@@ -181,11 +181,11 @@ INFRAWARE_LLM_URL=http://localhost:3000 cargo test --integration
 
 ---
 
-## Pattern da Implementare
+## Pattern Implementati (Continuazione)
 
-### 📋 2. Builder Pattern - InfrawareTerminal
+### ✅ 2. Builder Pattern - InfrawareTerminal
 
-**Status**: 📋 **PLANNED** (Fase 1 - Week 2)
+**Status**: ✅ **COMPLETATO** (Fase 1 - Week 2)
 **Priorità**: HIGH
 **Effort**: Low-Medium
 **Impact**: Testabilità + Configurazione
@@ -298,7 +298,64 @@ let terminal = InfrawareTerminal::builder()
 - ✅ Fluent, readable API
 - ✅ Default values sensibili
 
+#### Implementazione Completata
+
+Il Builder Pattern è stato implementato con successo in `src/main.rs`:
+
+```rust
+// Struct del builder
+pub struct InfrawareTerminalBuilder {
+    ui: Option<TerminalUI>,
+    state: Option<TerminalState>,
+    classifier: Option<InputClassifier>,
+    event_handler: Option<EventHandler>,
+    llm_client: Option<Arc<dyn LLMClientTrait>>,
+    renderer: Option<ResponseRenderer>,
+}
+
+// Metodi builder con fluent API
+impl InfrawareTerminalBuilder {
+    pub fn with_ui(mut self, ui: TerminalUI) -> Self { ... }
+    pub fn with_state(mut self, state: TerminalState) -> Self { ... }
+    pub fn with_classifier(mut self, classifier: InputClassifier) -> Self { ... }
+    pub fn with_event_handler(mut self, event_handler: EventHandler) -> Self { ... }
+    pub fn with_llm_client(mut self, client: Arc<dyn LLMClientTrait>) -> Self { ... }
+    pub fn with_renderer(mut self, renderer: ResponseRenderer) -> Self { ... }
+
+    // Build con defaults sensibili
+    pub fn build(self) -> Result<InfrawareTerminal> { ... }
+}
+
+// Constructor method
+impl InfrawareTerminal {
+    pub fn builder() -> InfrawareTerminalBuilder { ... }
+}
+```
+
+**Uso in produzione (main.rs):**
+```rust
+let terminal = InfrawareTerminal::builder()
+    .with_llm_client(llm_client)
+    .build()?;
+```
+
+**Uso nei test:**
+```rust
+let terminal = InfrawareTerminal::builder()
+    .with_llm_client(Arc::new(MockLLMClient::new()))
+    .with_classifier(custom_classifier)
+    .with_state(test_state)
+    .build()?;
+```
+
+#### File Modificati
+
+- `src/main.rs` - Aggiunto `InfrawareTerminalBuilder` con fluent API
+- `docs/design-patterns.md` - Documentato pattern implementato
+
 ---
+
+## Pattern da Implementare
 
 ### 📋 3. Strategy Pattern - Input Classification
 
@@ -926,12 +983,12 @@ impl CommandExecutionFacade {
 
 ## Roadmap di Implementazione
 
-### Fase 1 - Critici (Week 2) ✅
+### Fase 1 - Critici (Week 2) ✅ COMPLETATA
 
 | Pattern | Status | Priority | Effort |
 |---------|--------|----------|--------|
 | Trait Object LLM | ✅ DONE | CRITICAL | Low |
-| Builder Pattern | 📋 TODO | HIGH | Low-Medium |
+| Builder Pattern | ✅ DONE | HIGH | Low-Medium |
 
 ### Fase 2 - Alta Priorità (Week 3-4)
 

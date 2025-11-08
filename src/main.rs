@@ -24,7 +24,7 @@ use terminal::{EventHandler, TerminalMode, TerminalState, TerminalUI};
 use utils::{AnsiColor, MessageFormatter};
 
 /// Main application structure
-struct InfrawareTerminal {
+pub struct InfrawareTerminal {
     ui: TerminalUI,
     state: TerminalState,
     classifier: InputClassifier,
@@ -33,23 +33,136 @@ struct InfrawareTerminal {
     renderer: ResponseRenderer,
 }
 
-impl InfrawareTerminal {
-    /// Create a new terminal instance with provided LLM client
-    fn new_with_client(llm_client: Arc<dyn LLMClientTrait>) -> Result<Self> {
-        Ok(Self {
-            ui: TerminalUI::new()?,
-            state: TerminalState::new(),
-            classifier: InputClassifier::new(),
-            event_handler: EventHandler::new(),
-            llm_client,
-            renderer: ResponseRenderer::new(),
+/// Builder for InfrawareTerminal
+///
+/// Implements the Builder Pattern to provide flexible, testable construction
+/// of the terminal with dependency injection support.
+///
+/// # Example
+/// ```no_run
+/// use std::sync::Arc;
+/// # use infraware_terminal::llm::MockLLMClient;
+/// # use anyhow::Result;
+/// # fn main() -> Result<()> {
+/// let terminal = InfrawareTerminal::builder()
+///     .with_llm_client(Arc::new(MockLLMClient::new()))
+///     .build()?;
+/// # Ok(())
+/// # }
+/// ```
+pub struct InfrawareTerminalBuilder {
+    ui: Option<TerminalUI>,
+    state: Option<TerminalState>,
+    classifier: Option<InputClassifier>,
+    event_handler: Option<EventHandler>,
+    llm_client: Option<Arc<dyn LLMClientTrait>>,
+    renderer: Option<ResponseRenderer>,
+}
+
+impl InfrawareTerminalBuilder {
+    /// Create a new builder with all fields set to None
+    pub fn new() -> Self {
+        Self {
+            ui: None,
+            state: None,
+            classifier: None,
+            event_handler: None,
+            llm_client: None,
+            renderer: None,
+        }
+    }
+
+    /// Set a custom TerminalUI
+    pub fn with_ui(mut self, ui: TerminalUI) -> Self {
+        self.ui = Some(ui);
+        self
+    }
+
+    /// Set a custom TerminalState
+    pub fn with_state(mut self, state: TerminalState) -> Self {
+        self.state = Some(state);
+        self
+    }
+
+    /// Set a custom InputClassifier
+    pub fn with_classifier(mut self, classifier: InputClassifier) -> Self {
+        self.classifier = Some(classifier);
+        self
+    }
+
+    /// Set a custom EventHandler
+    pub fn with_event_handler(mut self, event_handler: EventHandler) -> Self {
+        self.event_handler = Some(event_handler);
+        self
+    }
+
+    /// Set a custom LLM client
+    pub fn with_llm_client(mut self, client: Arc<dyn LLMClientTrait>) -> Self {
+        self.llm_client = Some(client);
+        self
+    }
+
+    /// Set a custom ResponseRenderer
+    pub fn with_renderer(mut self, renderer: ResponseRenderer) -> Self {
+        self.renderer = Some(renderer);
+        self
+    }
+
+    /// Build the InfrawareTerminal instance
+    ///
+    /// Any components not explicitly set will use sensible defaults:
+    /// - UI: New TerminalUI instance
+    /// - State: New TerminalState with empty buffers
+    /// - Classifier: Default InputClassifier with standard handlers
+    /// - EventHandler: Default EventHandler
+    /// - LLM Client: MockLLMClient (for development/testing)
+    /// - Renderer: Default ResponseRenderer with syntax highlighting
+    pub fn build(self) -> Result<InfrawareTerminal> {
+        Ok(InfrawareTerminal {
+            ui: match self.ui {
+                Some(ui) => ui,
+                None => TerminalUI::new()?,
+            },
+            state: self.state.unwrap_or_default(),
+            classifier: self.classifier.unwrap_or_default(),
+            event_handler: self.event_handler.unwrap_or_default(),
+            llm_client: self
+                .llm_client
+                .unwrap_or_else(|| Arc::new(MockLLMClient::new())),
+            renderer: self.renderer.unwrap_or_default(),
         })
+    }
+}
+
+impl Default for InfrawareTerminalBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl InfrawareTerminal {
+    /// Create a builder for constructing an InfrawareTerminal instance
+    ///
+    /// This is the recommended way to construct the terminal, especially
+    /// for testing and when loading configuration from files.
+    pub fn builder() -> InfrawareTerminalBuilder {
+        InfrawareTerminalBuilder::new()
+    }
+
+    /// Create a new terminal instance with provided LLM client
+    ///
+    /// This is a convenience method. For more control, use `builder()`.
+    #[allow(dead_code)]
+    fn new_with_client(llm_client: Arc<dyn LLMClientTrait>) -> Result<Self> {
+        Self::builder().with_llm_client(llm_client).build()
     }
 
     /// Create a new Infraware Terminal instance with mock LLM (for development/testing)
+    ///
+    /// This is a convenience method. For more control, use `builder()`.
     #[allow(dead_code)]
     fn new() -> Result<Self> {
-        Self::new_with_client(Arc::new(MockLLMClient::new()))
+        Self::builder().build()
     }
 
     /// Run the main event loop
@@ -311,8 +424,10 @@ async fn main() -> Result<()> {
         }
     };
 
-    // Create and run the terminal
-    let mut terminal = InfrawareTerminal::new_with_client(llm_client)?;
+    // Create terminal using builder pattern
+    let mut terminal = InfrawareTerminal::builder()
+        .with_llm_client(llm_client)
+        .build()?;
 
     // Run the main loop
     if let Err(e) = terminal.run().await {
