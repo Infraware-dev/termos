@@ -1,8 +1,10 @@
 /// ANSI color utilities for terminal output
 use std::fmt;
+use std::sync::OnceLock;
 
 /// ANSI color codes for terminal output
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum AnsiColor {
     Black,
     Red,
@@ -60,8 +62,10 @@ impl fmt::Display for AnsiColor {
 }
 
 /// ANSI formatting styles
+#[allow(dead_code)]
 pub struct AnsiStyle;
 
+#[allow(dead_code)]
 impl AnsiStyle {
     pub const BOLD: &'static str = "\x1b[1m";
     pub const DIM: &'static str = "\x1b[2m";
@@ -94,9 +98,13 @@ impl AnsiStyle {
     }
 }
 
+/// Lazy-initialized regex for stripping ANSI codes
+static ANSI_REGEX: OnceLock<regex::Regex> = OnceLock::new();
+
 /// Strip ANSI codes from a string
 pub fn strip_ansi_codes(text: &str) -> String {
-    let re = regex::Regex::new(r"\x1b\[[0-9;]*m").unwrap();
+    let re = ANSI_REGEX
+        .get_or_init(|| regex::Regex::new(r"\x1b\[[0-9;]*m").expect("Invalid ANSI regex pattern"));
     re.replace_all(text, "").to_string()
 }
 

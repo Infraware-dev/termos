@@ -1,10 +1,11 @@
-/// Auto-install missing commands
-use anyhow::Result;
 use crate::executor::command::CommandExecutor;
+/// Auto-install missing commands (M2/M3)
+use anyhow::Result;
 
 /// Package installer for missing commands
 pub struct PackageInstaller;
 
+#[allow(dead_code)]
 impl PackageInstaller {
     /// Install a package using the system package manager
     pub async fn install_package(package: &str) -> Result<()> {
@@ -45,70 +46,67 @@ impl PackageInstaller {
 
     /// Install using apt-get (Debian/Ubuntu)
     async fn install_with_apt(package: &str) -> Result<()> {
-        CommandExecutor::execute_sudo("apt-get", &[
-            "install".to_string(),
-            "-y".to_string(),
-            package.to_string(),
-        ])
+        CommandExecutor::execute_sudo(
+            "apt-get",
+            &["install".to_string(), "-y".to_string(), package.to_string()],
+        )
         .await?;
         Ok(())
     }
 
     /// Install using yum (RedHat/CentOS)
     async fn install_with_yum(package: &str) -> Result<()> {
-        CommandExecutor::execute_sudo("yum", &[
-            "install".to_string(),
-            "-y".to_string(),
-            package.to_string(),
-        ])
+        CommandExecutor::execute_sudo(
+            "yum",
+            &["install".to_string(), "-y".to_string(), package.to_string()],
+        )
         .await?;
         Ok(())
     }
 
     /// Install using dnf (Fedora)
     async fn install_with_dnf(package: &str) -> Result<()> {
-        CommandExecutor::execute_sudo("dnf", &[
-            "install".to_string(),
-            "-y".to_string(),
-            package.to_string(),
-        ])
+        CommandExecutor::execute_sudo(
+            "dnf",
+            &["install".to_string(), "-y".to_string(), package.to_string()],
+        )
         .await?;
         Ok(())
     }
 
     /// Install using pacman (Arch)
     async fn install_with_pacman(package: &str) -> Result<()> {
-        CommandExecutor::execute_sudo("pacman", &[
-            "-S".to_string(),
-            "--noconfirm".to_string(),
-            package.to_string(),
-        ])
+        CommandExecutor::execute_sudo(
+            "pacman",
+            &[
+                "-S".to_string(),
+                "--noconfirm".to_string(),
+                package.to_string(),
+            ],
+        )
         .await?;
         Ok(())
     }
 
     /// Install using brew (macOS)
     async fn install_with_brew(package: &str) -> Result<()> {
-        CommandExecutor::execute("brew", &["install".to_string(), package.to_string()])
-            .await?;
+        CommandExecutor::execute("brew", &["install".to_string(), package.to_string()]).await?;
         Ok(())
     }
 
     /// Install using chocolatey (Windows)
     async fn install_with_choco(package: &str) -> Result<()> {
-        CommandExecutor::execute("choco", &[
-            "install".to_string(),
-            "-y".to_string(),
-            package.to_string(),
-        ])
+        CommandExecutor::execute(
+            "choco",
+            &["install".to_string(), "-y".to_string(), package.to_string()],
+        )
         .await?;
         Ok(())
     }
 
     /// Install using winget (Windows)
     async fn install_with_winget(package: &str) -> Result<()> {
-        CommandExecutor::execute("winget", &["install".to_string(), package.to_string()])
-            .await?;
+        CommandExecutor::execute("winget", &["install".to_string(), package.to_string()]).await?;
         Ok(())
     }
 

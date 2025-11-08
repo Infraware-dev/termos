@@ -68,7 +68,20 @@ impl ResponseRenderer {
         // Simple bold formatting (limited support for M1)
         // This is a simplified version - full markdown parsing would be in M2/M3
         if result.contains("**") {
-            result = result.replace("**", "\x1b[1m"); // Bold toggle
+            let parts: Vec<&str> = result.split("**").collect();
+            result = parts
+                .iter()
+                .enumerate()
+                .map(|(i, part)| {
+                    if i % 2 == 1 {
+                        // Odd indices are inside **...** pairs
+                        format!("\x1b[1m{}\x1b[0m", part)
+                    } else {
+                        part.to_string()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("");
         }
 
         // Inline code formatting

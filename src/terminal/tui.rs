@@ -1,3 +1,8 @@
+use anyhow::Result;
+use crossterm::{
+    execute,
+    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+};
 /// TUI rendering logic using ratatui
 use ratatui::{
     backend::CrosstermBackend,
@@ -7,14 +12,10 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Wrap},
     Frame, Terminal,
 };
-use crossterm::{
-    execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
-};
-use anyhow::Result;
 use std::io;
 
-use super::state::{TerminalState, TerminalMode};
+use super::state::{TerminalMode, TerminalState};
+use crate::utils::ansi::strip_ansi_codes;
 
 /// TUI wrapper for the terminal
 pub struct TerminalUI {
@@ -41,6 +42,12 @@ impl TerminalUI {
         Ok(())
     }
 
+    /// Clear the terminal screen completely
+    pub fn clear(&mut self) -> Result<()> {
+        self.terminal.clear()?;
+        Ok(())
+    }
+
     /// Clean up the terminal on exit
     pub fn cleanup(&mut self) -> Result<()> {
         disable_raw_mode()?;
@@ -64,9 +71,9 @@ fn render_frame(frame: &mut Frame, state: &TerminalState) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(1),     // Output area
-            Constraint::Length(1),  // Status bar
-            Constraint::Length(3),  // Input area
+            Constraint::Min(1),    // Output area
+            Constraint::Length(1), // Status bar
+            Constraint::Length(3), // Input area
         ])
         .split(size);
 
@@ -94,7 +101,11 @@ fn render_output(frame: &mut Frame, area: Rect, state: &TerminalState) {
 
         state.output_buffer[start..]
             .iter()
-            .map(|line| Line::from(line.as_str()))
+            .map(|line| {
+                // Strip ANSI codes since ratatui doesn't interpret them
+                let clean_line = strip_ansi_codes(line);
+                Line::from(clean_line)
+            })
             .collect()
     };
 
@@ -148,23 +159,24 @@ fn render_status_bar(frame: &mut Frame, area: Rect, state: &TerminalState) {
 /// Render the input area
 fn render_input(frame: &mut Frame, area: Rect, state: &TerminalState) {
     let input_text = Line::from(vec![
-        Span::styled("❯ ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "❯ ",
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::raw(state.input_buffer.as_str()),
     ]);
 
-    let input_widget = Paragraph::new(input_text)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Input ")
-                .title_style(Style::default().fg(Color::Cyan)),
-        );
+    let input_widget = Paragraph::new(input_text).block(
+        Block::default()
+            .borders(Borders::ALL)
+            .title(" Input ")
+            .title_style(Style::default().fg(Color::Cyan)),
+    );
 
     frame.render_widget(input_widget, area);
 
     // Set cursor position (2 accounts for "❯ " prefix and border)
-    frame.set_cursor_position((
-        area.x + state.cursor_position as u16 + 3,
-        area.y + 1,
-    ));
+    frame.set_cursor_position((area.x + state.cursor_position as u16 + 3, area.y + 1));
 }

@@ -1,7 +1,7 @@
 pub mod command;
-pub mod install;
 pub mod completion;
+pub mod install;
 
-pub use command::{CommandExecutor, CommandOutput};
-pub use install::PackageInstaller;
+pub use command::CommandExecutor;
 pub use completion::TabCompletion;
+pub use install::PackageInstaller;

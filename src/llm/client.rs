@@ -1,5 +1,6 @@
 /// LLM client for natural language queries
 use anyhow::Result;
+use async_trait::async_trait;
 use reqwest;
 use serde::{Deserialize, Serialize};
 
@@ -13,43 +14,78 @@ pub struct LLMRequest {
 
 /// Response from the LLM backend
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 pub struct LLMResponse {
     pub text: String,
     #[serde(default)]
     pub metadata: Option<serde_json::Value>,
 }
 
-/// Client for interacting with the LLM backend
-pub struct LLMClient {
-    base_url: String,
-    client: reqwest::Client,
-    timeout_secs: u64,
+/// Trait for LLM client implementations
+///
+/// This trait allows different LLM backends (mock, HTTP, OpenAI, etc.)
+/// to be used interchangeably via dependency injection
+#[async_trait]
+pub trait LLMClientTrait: Send + Sync {
+    /// Query the LLM with natural language input
+    async fn query(&self, text: &str) -> Result<String>;
+
+    /// Query with additional context
+    async fn query_with_context(&self, text: &str, _context: Option<String>) -> Result<String> {
+        // Default implementation ignores context
+        self.query(text).await
+    }
+
+    /// Query with command history context (M2/M3)
+    #[allow(dead_code)]
+    async fn query_with_history(&self, text: &str, command_history: &[String]) -> Result<String> {
+        let context = if !command_history.is_empty() {
+            Some(format!("Recent commands:\n{}", command_history.join("\n")))
+        } else {
+            None
+        };
+
+        self.query_with_context(text, context).await
+    }
 }
 
-impl LLMClient {
-    /// Create a new LLM client
+/// HTTP-based LLM client for production use
+pub struct HttpLLMClient {
+    base_url: String,
+    client: reqwest::Client,
+}
+
+impl HttpLLMClient {
+    /// Create a new HTTP LLM client
     pub fn new(base_url: String) -> Self {
         Self {
             base_url,
-            client: reqwest::Client::new(),
-            timeout_secs: 30,
+            client: reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(30))
+                .build()
+                .unwrap_or_default(),
         }
     }
 
-    /// Create a new LLM client with custom timeout
-    pub fn with_timeout(base_url: String, timeout_secs: u64) -> Self {
-        Self {
+    /// Create a new HTTP LLM client with custom timeout (M2/M3)
+    #[allow(dead_code)]
+    pub fn with_timeout(base_url: String, timeout_secs: u64) -> Result<Self> {
+        Ok(Self {
             base_url,
             client: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(timeout_secs))
-                .build()
-                .unwrap(),
-            timeout_secs,
-        }
+                .build()?,
+        })
+    }
+}
+
+#[async_trait]
+impl LLMClientTrait for HttpLLMClient {
+    async fn query(&self, text: &str) -> Result<String> {
+        self.query_with_context(text, None).await
     }
 
-    /// Query the LLM with a natural language input
-    pub async fn query(&self, text: &str, context: Option<String>) -> Result<String> {
+    async fn query_with_context(&self, text: &str, context: Option<String>) -> Result<String> {
         let request = LLMRequest {
             query: text.to_string(),
             context,
@@ -57,7 +93,7 @@ impl LLMClient {
 
         let response = self
             .client
-            .post(&format!("{}/query", self.base_url))
+            .post(format!("{}/query", self.base_url))
             .json(&request)
             .send()
             .await?;
@@ -71,29 +107,21 @@ impl LLMClient {
 
         Ok(llm_response.text)
     }
-
-    /// Query with command history context
-    pub async fn query_with_history(
-        &self,
-        text: &str,
-        command_history: &[String],
-    ) -> Result<String> {
-        let context = if !command_history.is_empty() {
-            Some(format!("Recent commands:\n{}", command_history.join("\n")))
-        } else {
-            None
-        };
-
-        self.query(text, context).await
-    }
 }
 
-/// Mock LLM client for testing
+/// Mock LLM client for testing and development
+#[derive(Default)]
 pub struct MockLLMClient;
 
 impl MockLLMClient {
-    /// Create a mock response for testing
-    pub async fn query(&self, text: &str) -> Result<String> {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+#[async_trait]
+impl LLMClientTrait for MockLLMClient {
+    async fn query(&self, text: &str) -> Result<String> {
         // Simple mock responses for testing
         let response = match text.to_lowercase().as_str() {
             s if s.contains("list files") => {

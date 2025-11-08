@@ -1,5 +1,13 @@
 /// Input classification: Command vs Natural Language
+///
+/// This module uses the Chain of Responsibility pattern to classify user input
+/// as either commands or natural language queries.
 use anyhow::Result;
+
+use super::handler::{
+    ClassifierChain, CommandSyntaxHandler, DefaultHandler, EmptyInputHandler, KnownCommandHandler,
+    NaturalLanguageHandler,
+};
 
 /// Represents the type of user input
 #[derive(Debug, Clone, PartialEq)]
@@ -13,184 +21,62 @@ pub enum InputType {
 }
 
 /// Classifier for determining if input is a command or natural language
+///
+/// Uses Chain of Responsibility pattern with the following chain:
+/// 1. EmptyInputHandler - handles empty/whitespace input
+/// 2. KnownCommandHandler - checks against whitelist of known commands
+/// 3. CommandSyntaxHandler - detects command syntax (flags, pipes, paths)
+/// 4. NaturalLanguageHandler - detects natural language patterns
+/// 5. DefaultHandler - fallback to natural language
 pub struct InputClassifier {
-    known_commands: Vec<String>,
+    chain: ClassifierChain,
 }
 
 impl InputClassifier {
-    /// Create a new input classifier with default known commands
+    /// Create a new input classifier with default chain
     pub fn new() -> Self {
-        Self {
-            known_commands: Self::default_known_commands(),
-        }
+        let chain = ClassifierChain::new()
+            .add_handler(Box::new(EmptyInputHandler::new()))
+            .add_handler(Box::new(KnownCommandHandler::with_defaults()))
+            .add_handler(Box::new(CommandSyntaxHandler::new()))
+            .add_handler(Box::new(NaturalLanguageHandler::new()))
+            .add_handler(Box::new(DefaultHandler::new()));
+
+        Self { chain }
     }
 
-    /// Default list of known DevOps and shell commands
-    fn default_known_commands() -> Vec<String> {
-        vec![
-            // Basic shell
-            "ls", "cd", "pwd", "cat", "echo", "grep", "find", "mkdir", "rm", "cp", "mv",
-            "touch", "chmod", "chown", "ln", "tar", "gzip", "gunzip", "zip", "unzip",
-            // Text processing
-            "sed", "awk", "sort", "uniq", "wc", "head", "tail", "cut", "paste", "tr",
-            // Process management
-            "ps", "top", "htop", "kill", "killall", "pkill", "jobs", "bg", "fg",
-            // Network
-            "curl", "wget", "ping", "netstat", "ss", "ip", "ifconfig", "dig", "nslookup",
-            "traceroute", "ssh", "scp", "rsync",
-            // System info
-            "uname", "hostname", "whoami", "who", "w", "uptime", "free", "df", "du",
-            // Docker
-            "docker", "docker-compose", "docker-machine",
-            // Kubernetes
-            "kubectl", "helm", "minikube", "k9s",
-            // Cloud providers
-            "aws", "az", "gcloud", "terraform", "terragrunt", "pulumi",
-            // Version control
-            "git", "svn", "hg",
-            // Build tools
-            "make", "cmake", "cargo", "npm", "yarn", "pip", "pipenv", "poetry",
-            "maven", "gradle", "ant",
-            // Monitoring
-            "prometheus", "grafana", "datadog",
-            // Other DevOps tools
-            "ansible", "ansible-playbook", "vagrant", "packer", "consul", "vault",
-        ]
-        .into_iter()
-        .map(String::from)
-        .collect()
+    /// Create a classifier with a custom chain
+    #[allow(dead_code)]
+    pub fn with_chain(chain: ClassifierChain) -> Self {
+        Self { chain }
     }
 
     /// Classify the input as command or natural language
     pub fn classify(&self, input: &str) -> Result<InputType> {
-        let trimmed = input.trim();
-
-        // Empty input
-        if trimmed.is_empty() {
-            return Ok(InputType::Empty);
-        }
-
-        // 1. Check against known commands whitelist
-        if self.is_known_command(trimmed) {
-            return Ok(self.parse_as_command(trimmed)?);
-        }
-
-        // 2. Check if looks like a command (before natural language heuristics)
-        if self.looks_like_command(trimmed) {
-            return Ok(self.parse_as_command(trimmed)?);
-        }
-
-        // 3. Heuristics for natural language detection
-        if self.is_likely_natural_language(trimmed) {
-            return Ok(InputType::NaturalLanguage(trimmed.to_string()));
-        }
-
-        // 4. Default: treat as natural language
-        Ok(InputType::NaturalLanguage(trimmed.to_string()))
-    }
-
-    /// Check if the input starts with a known command
-    fn is_known_command(&self, input: &str) -> bool {
-        let first_word = input.split_whitespace().next().unwrap_or("");
-        self.known_commands.iter().any(|cmd| cmd == first_word)
-    }
-
-    /// Check if input looks like a command based on syntax
-    fn looks_like_command(&self, input: &str) -> bool {
-        // Contains flags
-        if input.contains(" -") || input.contains(" --") {
-            return true;
-        }
-
-        // Contains pipes or redirects
-        if input.contains('|') || input.contains('>') || input.contains('<') {
-            return true;
-        }
-
-        // Environment variable syntax
-        if input.contains("$") || input.contains("${") {
-            return true;
-        }
-
-        // Looks like a path
-        if input.starts_with('/') || input.starts_with("./") || input.starts_with("../") {
-            return true;
-        }
-
-        // Single word without spaces (might be a command)
-        if !input.contains(' ') && input.len() < 20 {
-            return true;
-        }
-
-        false
-    }
-
-    /// Check if input is likely natural language
-    fn is_likely_natural_language(&self, input: &str) -> bool {
-        let lowercase = input.to_lowercase();
-
-        // Question words at the start
-        let question_words = ["how", "what", "why", "when", "where", "who", "can you", "could you"];
-        for word in &question_words {
-            if lowercase.starts_with(word) {
-                return true;
+        // Process through the chain of handlers
+        match self.chain.process(input) {
+            Some(result) => Ok(result),
+            None => {
+                // This should never happen with DefaultHandler at the end,
+                // but we handle it gracefully
+                Ok(InputType::NaturalLanguage(input.trim().to_string()))
             }
         }
-
-        // Contains question marks
-        if input.contains('?') {
-            return true;
-        }
-
-        // Contains articles
-        let articles = [" a ", " an ", " the "];
-        for article in &articles {
-            if lowercase.contains(article) {
-                return true;
-            }
-        }
-
-        // Common natural language verbs
-        let nl_verbs = ["show me", "explain", "help", "tell me", "describe"];
-        for verb in &nl_verbs {
-            if lowercase.contains(verb) {
-                return true;
-            }
-        }
-
-        // Long input with multiple words (likely natural language)
-        let word_count = input.split_whitespace().count();
-        if word_count > 5 && !self.looks_like_command(input) {
-            return true;
-        }
-
-        // Contains common punctuation
-        if input.contains(',') || input.contains('.') {
-            return true;
-        }
-
-        false
     }
 
-    /// Parse input as a command
-    fn parse_as_command(&self, input: &str) -> Result<InputType> {
-        let parts = shell_words::split(input)?;
-
-        if parts.is_empty() {
-            return Ok(InputType::Empty);
-        }
-
-        Ok(InputType::Command(
-            parts[0].clone(),
-            parts[1..].to_vec(),
-        ))
-    }
-
-    /// Add a command to the known commands list
-    pub fn add_known_command(&mut self, command: String) {
-        if !self.known_commands.contains(&command) {
-            self.known_commands.push(command);
-        }
+    /// Add a command to the known commands list (legacy method for backward compatibility)
+    ///
+    /// Note: This is a legacy method. In the new architecture, you should
+    /// construct a custom KnownCommandHandler if you need custom commands.
+    #[deprecated(
+        since = "0.2.0",
+        note = "Use custom KnownCommandHandler in chain instead"
+    )]
+    #[allow(dead_code)]
+    pub fn add_known_command(&mut self, _command: String) {
+        // This is a no-op in the new architecture
+        // Users should create a custom KnownCommandHandler with their commands
+        // and build a custom chain using with_chain()
     }
 }
 
@@ -255,6 +141,176 @@ mod tests {
         assert!(matches!(
             classifier.classify("cat file.txt | grep pattern").unwrap(),
             InputType::Command(_, _)
+        ));
+    }
+
+    #[test]
+    fn test_multilingual_italian() {
+        let classifier = InputClassifier::new();
+
+        // Italian questions
+        assert!(matches!(
+            classifier.classify("come posso listare i file?").unwrap(),
+            InputType::NaturalLanguage(_)
+        ));
+        assert!(matches!(
+            classifier.classify("cosa è docker").unwrap(),
+            InputType::NaturalLanguage(_)
+        ));
+        assert!(matches!(
+            classifier.classify("mostrami i log del container").unwrap(),
+            InputType::NaturalLanguage(_)
+        ));
+        assert!(matches!(
+            classifier
+                .classify("spiegami kubernetes per favore")
+                .unwrap(),
+            InputType::NaturalLanguage(_)
+        ));
+
+        // Commands should still work
+        assert!(matches!(
+            classifier.classify("docker ps").unwrap(),
+            InputType::Command(_, _)
+        ));
+    }
+
+    #[test]
+    fn test_multilingual_spanish() {
+        let classifier = InputClassifier::new();
+
+        // Spanish questions
+        assert!(matches!(
+            classifier.classify("cómo puedo listar archivos?").unwrap(),
+            InputType::NaturalLanguage(_)
+        ));
+        assert!(matches!(
+            classifier.classify("qué es kubernetes").unwrap(),
+            InputType::NaturalLanguage(_)
+        ));
+        assert!(matches!(
+            classifier.classify("muestrame los logs").unwrap(),
+            InputType::NaturalLanguage(_)
+        ));
+        assert!(matches!(
+            classifier.classify("ayuda con docker por favor").unwrap(),
+            InputType::NaturalLanguage(_)
+        ));
+    }
+
+    #[test]
+    fn test_multilingual_french() {
+        let classifier = InputClassifier::new();
+
+        // French questions
+        assert!(matches!(
+            classifier.classify("comment lister les fichiers?").unwrap(),
+            InputType::NaturalLanguage(_)
+        ));
+        assert!(matches!(
+            classifier.classify("qu'est-ce que kubernetes").unwrap(),
+            InputType::NaturalLanguage(_)
+        ));
+        assert!(matches!(
+            classifier.classify("montre-moi les logs").unwrap(),
+            InputType::NaturalLanguage(_)
+        ));
+        assert!(matches!(
+            classifier
+                .classify("explique docker s'il te plaît")
+                .unwrap(),
+            InputType::NaturalLanguage(_)
+        ));
+    }
+
+    #[test]
+    fn test_multilingual_german() {
+        let classifier = InputClassifier::new();
+
+        // German questions
+        assert!(matches!(
+            classifier
+                .classify("wie kann ich Dateien auflisten?")
+                .unwrap(),
+            InputType::NaturalLanguage(_)
+        ));
+        assert!(matches!(
+            classifier.classify("was ist kubernetes").unwrap(),
+            InputType::NaturalLanguage(_)
+        ));
+        assert!(matches!(
+            classifier.classify("zeig mir die logs").unwrap(),
+            InputType::NaturalLanguage(_)
+        ));
+        assert!(matches!(
+            classifier.classify("erkläre docker bitte").unwrap(),
+            InputType::NaturalLanguage(_)
+        ));
+    }
+
+    #[test]
+    fn test_universal_patterns() {
+        let classifier = InputClassifier::new();
+
+        // Question marks (any language)
+        assert!(matches!(
+            classifier.classify("¿Qué es esto?").unwrap(),
+            InputType::NaturalLanguage(_)
+        ));
+        assert!(matches!(
+            classifier.classify("Was ist das?").unwrap(),
+            InputType::NaturalLanguage(_)
+        ));
+
+        // Long phrases without command syntax
+        assert!(matches!(
+            classifier
+                .classify("I really need to understand how this works")
+                .unwrap(),
+            InputType::NaturalLanguage(_)
+        ));
+        assert!(matches!(
+            classifier
+                .classify("voglio capire come funziona questo sistema complesso")
+                .unwrap(),
+            InputType::NaturalLanguage(_)
+        ));
+
+        // Commands with paths should still be commands
+        assert!(matches!(
+            classifier.classify("./deploy.sh --production").unwrap(),
+            InputType::Command(_, _)
+        ));
+    }
+
+    #[test]
+    fn test_edge_cases() {
+        let classifier = InputClassifier::new();
+
+        // Single word commands
+        assert!(matches!(
+            classifier.classify("htop").unwrap(),
+            InputType::Command(_, _)
+        ));
+
+        // Articles indicate natural language
+        assert!(matches!(
+            classifier.classify("run the docker container").unwrap(),
+            InputType::NaturalLanguage(_)
+        ));
+        assert!(matches!(
+            classifier.classify("avvia il container docker").unwrap(),
+            InputType::NaturalLanguage(_)
+        ));
+
+        // Polite expressions
+        assert!(matches!(
+            classifier.classify("help me please").unwrap(),
+            InputType::NaturalLanguage(_)
+        ));
+        assert!(matches!(
+            classifier.classify("grazie per l'aiuto").unwrap(),
+            InputType::NaturalLanguage(_)
         ));
     }
 }

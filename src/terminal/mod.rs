@@ -1,7 +1,7 @@
-pub mod tui;
-pub mod state;
 pub mod events;
+pub mod state;
+pub mod tui;
 
-pub use tui::TerminalUI;
-pub use state::{TerminalState, TerminalMode};
 pub use events::EventHandler;
+pub use state::{TerminalMode, TerminalState};
+pub use tui::TerminalUI;

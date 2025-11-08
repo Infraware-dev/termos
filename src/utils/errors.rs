@@ -1,11 +1,13 @@
-/// Custom error types for Infraware Terminal
+/// Custom error types for Infraware Terminal (M2/M3)
 use thiserror::Error;
 
 /// Result type alias for Infraware Terminal
+#[allow(dead_code)]
 pub type InfraResult<T> = Result<T, InfraError>;
 
 /// Main error type for the application
 #[derive(Error, Debug)]
+#[allow(dead_code)]
 pub enum InfraError {
     /// IO errors
     #[error("IO error: {0}")]
@@ -56,6 +58,7 @@ pub enum InfraError {
     Other(#[from] anyhow::Error),
 }
 
+#[allow(dead_code)]
 impl InfraError {
     /// Create a command execution error
     pub fn command_execution(msg: impl Into<String>) -> Self {

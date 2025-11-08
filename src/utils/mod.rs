@@ -1,5 +1,6 @@
 pub mod ansi;
 pub mod errors;
+pub mod message;
 
 pub use ansi::AnsiColor;
-pub use errors::{InfraError, InfraResult};
+pub use message::MessageFormatter;

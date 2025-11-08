@@ -10,6 +10,7 @@ crossterm = "0.28"
 
 # Async runtime
 tokio = { version = "1.40", features = ["full"] }
+async-trait = "0.1"
 
 # Command execution
 which = "6.0"

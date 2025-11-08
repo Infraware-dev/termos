@@ -87,10 +87,7 @@ fn test_classify_command_syntax() {
 fn test_classify_empty() {
     let classifier = InputClassifier::new();
 
-    assert!(matches!(
-        classifier.classify("").unwrap(),
-        InputType::Empty
-    ));
+    assert!(matches!(classifier.classify("").unwrap(), InputType::Empty));
 
     assert!(matches!(
         classifier.classify("   ").unwrap(),
@@ -103,7 +100,8 @@ fn test_classify_edge_cases() {
     let classifier = InputClassifier::new();
 
     // Long natural language should be classified correctly
-    let long_query = "can you please explain how to set up a kubernetes cluster with helm and terraform";
+    let long_query =
+        "can you please explain how to set up a kubernetes cluster with helm and terraform";
     assert!(matches!(
         classifier.classify(long_query).unwrap(),
         InputType::NaturalLanguage(_)

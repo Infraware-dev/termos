@@ -1,7 +1,7 @@
+use infraware_terminal::executor::CommandExecutor;
 /// Integration tests for Infraware Terminal
 use infraware_terminal::input::{InputClassifier, InputType};
-use infraware_terminal::executor::CommandExecutor;
-use infraware_terminal::llm::{MockLLMClient, ResponseRenderer};
+use infraware_terminal::llm::{LLMClientTrait, MockLLMClient, ResponseRenderer};
 
 #[tokio::test]
 async fn test_end_to_end_command_execution() {
@@ -73,10 +73,6 @@ fn test_command_classification_accuracy() {
     for (input, should_be_command) in test_cases {
         let result = classifier.classify(input).unwrap();
         let is_command = matches!(result, InputType::Command(_, _));
-        assert_eq!(
-            is_command, should_be_command,
-            "Failed for input: {}",
-            input
-        );
+        assert_eq!(is_command, should_be_command, "Failed for input: {}", input);
     }
 }

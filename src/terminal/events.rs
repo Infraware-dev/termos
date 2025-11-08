@@ -1,6 +1,6 @@
+use anyhow::Result;
 /// Event handling for keyboard input
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
-use anyhow::Result;
 use std::time::Duration;
 
 /// Event handler for terminal input
@@ -61,8 +61,9 @@ impl EventHandler {
             // Tab - Tab completion (for later implementation)
             (KeyCode::Tab, _) => TerminalEvent::TabComplete,
 
-            // Character input
-            (KeyCode::Char(c), _) => TerminalEvent::InputChar(c),
+            // Character input (only without modifiers or with SHIFT only)
+            (KeyCode::Char(c), KeyModifiers::NONE) => TerminalEvent::InputChar(c),
+            (KeyCode::Char(c), KeyModifiers::SHIFT) => TerminalEvent::InputChar(c),
 
             _ => TerminalEvent::Unknown,
         }
@@ -77,6 +78,7 @@ impl Default for EventHandler {
 
 /// Custom terminal events
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 pub enum TerminalEvent {
     /// User input character
     InputChar(char),
@@ -102,7 +104,7 @@ pub enum TerminalEvent {
     ClearScreen,
     /// Quit application
     Quit,
-    /// Terminal resized
+    /// Terminal resized (width, height) - M2/M3 feature
     Resize(u16, u16),
     /// Unknown event
     Unknown,

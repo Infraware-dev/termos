@@ -1,7 +1,8 @@
 /// Command execution module
-use anyhow::Result;
+use anyhow::{Context, Result};
 use std::process::Stdio;
 use tokio::process::Command as TokioCommand;
+use tokio::time::{timeout, Duration};
 
 /// Output from a command execution
 #[derive(Debug, Clone)]
@@ -18,6 +19,7 @@ impl CommandOutput {
     }
 
     /// Get combined output (stdout + stderr)
+    #[allow(dead_code)]
     pub fn combined_output(&self) -> String {
         let mut result = String::new();
         if !self.stdout.is_empty() {
@@ -37,20 +39,23 @@ impl CommandOutput {
 pub struct CommandExecutor;
 
 impl CommandExecutor {
-    /// Execute a command asynchronously
+    /// Execute a command asynchronously with a 5-minute timeout
     pub async fn execute(cmd: &str, args: &[String]) -> Result<CommandOutput> {
         // Check if command exists
         if !Self::command_exists(cmd) {
             anyhow::bail!("Command '{}' not found", cmd);
         }
 
-        // Execute the command
-        let output = TokioCommand::new(cmd)
+        // Execute the command with timeout
+        let execution = TokioCommand::new(cmd)
             .args(args)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .output()
-            .await?;
+            .output();
+
+        let output = timeout(Duration::from_secs(300), execution)
+            .await
+            .context("Command execution timed out after 5 minutes")??;
 
         Ok(CommandOutput {
             stdout: String::from_utf8_lossy(&output.stdout).to_string(),
@@ -65,18 +70,36 @@ impl CommandExecutor {
     }
 
     /// Get the full path of a command
+    #[allow(dead_code)]
     pub fn get_command_path(cmd: &str) -> Option<String> {
         which::which(cmd)
             .ok()
             .and_then(|p| p.to_str().map(String::from))
     }
 
-    /// Execute a command with sudo privileges
+    /// Execute a command with sudo privileges (M2/M3)
+    #[allow(dead_code)]
     pub async fn execute_sudo(cmd: &str, args: &[String]) -> Result<CommandOutput> {
-        let mut sudo_args = vec!["sudo".to_string(), cmd.to_string()];
-        sudo_args.extend(args.iter().cloned());
+        // Check if command exists
+        if !Self::command_exists(cmd) {
+            anyhow::bail!("Command '{}' not found", cmd);
+        }
 
-        Self::execute("sudo", &sudo_args).await
+        // Use TokioCommand directly to ensure proper argument separation
+        // and avoid command injection vulnerabilities
+        let output = TokioCommand::new("sudo")
+            .arg(cmd)
+            .args(args)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output()
+            .await?;
+
+        Ok(CommandOutput {
+            stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+            exit_code: output.status.code().unwrap_or(-1),
+        })
     }
 }
 

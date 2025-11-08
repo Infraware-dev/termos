@@ -1,9 +1,11 @@
-/// Command parsing utilities
+/// Command parsing utilities (M2/M3)
 use anyhow::Result;
 
 /// Parser for shell commands
+#[allow(dead_code)]
 pub struct CommandParser;
 
+#[allow(dead_code)]
 impl CommandParser {
     /// Parse a command string into command and arguments
     pub fn parse(input: &str) -> Result<(String, Vec<String>)> {
@@ -56,7 +58,8 @@ mod tests {
 
     #[test]
     fn test_parse_complex() {
-        let (cmd, args) = CommandParser::parse(r#"docker run -it --name test ubuntu bash"#).unwrap();
+        let (cmd, args) =
+            CommandParser::parse(r#"docker run -it --name test ubuntu bash"#).unwrap();
         assert_eq!(cmd, "docker");
         assert_eq!(args, vec!["run", "-it", "--name", "test", "ubuntu", "bash"]);
     }

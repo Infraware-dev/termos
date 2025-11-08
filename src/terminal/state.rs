@@ -1,12 +1,17 @@
 /// Terminal state management
+/// Maximum number of lines to keep in output buffer
+const MAX_OUTPUT_LINES: usize = 10_000;
+/// Number of lines to remove when buffer is full
+const TRIM_LINES: usize = 1_000;
 
 /// Represents the current mode of the terminal
 #[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)]
 pub enum TerminalMode {
-    Normal,              // Waiting for input
-    ExecutingCommand,    // Running shell command
-    WaitingLLM,         // Querying LLM
-    PromptingInstall,   // Asking to install missing command
+    Normal,           // Waiting for input
+    ExecutingCommand, // Running shell command
+    WaitingLLM,       // Querying LLM
+    PromptingInstall, // Asking to install missing command (M2/M3)
 }
 
 /// Main terminal state structure
@@ -44,6 +49,13 @@ impl TerminalState {
     /// Add a line to the output buffer
     pub fn add_output(&mut self, line: String) {
         self.output_buffer.push(line);
+
+        // Trim buffer if it exceeds maximum size
+        if self.output_buffer.len() > MAX_OUTPUT_LINES {
+            self.output_buffer.drain(0..TRIM_LINES);
+            self.scroll_position = self.scroll_position.saturating_sub(TRIM_LINES);
+        }
+
         // Auto-scroll to bottom
         self.scroll_position = self.output_buffer.len().saturating_sub(1);
     }
@@ -53,6 +65,14 @@ impl TerminalState {
         for line in lines {
             self.output_buffer.push(line);
         }
+
+        // Trim buffer if it exceeds maximum size
+        if self.output_buffer.len() > MAX_OUTPUT_LINES {
+            let lines_to_remove = self.output_buffer.len() - MAX_OUTPUT_LINES + TRIM_LINES;
+            self.output_buffer.drain(0..lines_to_remove);
+            self.scroll_position = self.scroll_position.saturating_sub(lines_to_remove);
+        }
+
         self.scroll_position = self.output_buffer.len().saturating_sub(1);
     }
 

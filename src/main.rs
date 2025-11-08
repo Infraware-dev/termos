@@ -1,3 +1,6 @@
+mod executor;
+mod input;
+mod llm;
 /// Infraware Terminal - Hybrid Command Interpreter with AI Assistance
 ///
 /// This is a TUI-based terminal that accepts user input and intelligently
@@ -6,21 +9,19 @@
 /// 2. LLM backend for natural language queries
 ///
 /// Target use case: DevOps operations in cloud environments (AWS/Azure) with AI assistance
-
 mod terminal;
-mod input;
-mod executor;
-mod llm;
 mod utils;
 
 use anyhow::Result;
 use std::time::Duration;
 
-use terminal::{TerminalUI, TerminalState, TerminalMode, EventHandler, TerminalEvent};
-use input::{InputClassifier, InputType};
 use executor::{CommandExecutor, PackageInstaller, TabCompletion};
-use llm::{MockLLMClient, ResponseRenderer};
-use utils::AnsiColor;
+use input::{InputClassifier, InputType};
+use llm::{HttpLLMClient, LLMClientTrait, MockLLMClient, ResponseRenderer};
+use std::sync::Arc;
+use terminal::events::TerminalEvent;
+use terminal::{EventHandler, TerminalMode, TerminalState, TerminalUI};
+use utils::{AnsiColor, MessageFormatter};
 
 /// Main application structure
 struct InfrawareTerminal {
@@ -28,32 +29,52 @@ struct InfrawareTerminal {
     state: TerminalState,
     classifier: InputClassifier,
     event_handler: EventHandler,
-    llm_client: MockLLMClient,
+    llm_client: Arc<dyn LLMClientTrait>,
     renderer: ResponseRenderer,
 }
 
 impl InfrawareTerminal {
-    /// Create a new Infraware Terminal instance
-    fn new() -> Result<Self> {
+    /// Create a new terminal instance with provided LLM client
+    fn new_with_client(llm_client: Arc<dyn LLMClientTrait>) -> Result<Self> {
         Ok(Self {
             ui: TerminalUI::new()?,
             state: TerminalState::new(),
             classifier: InputClassifier::new(),
             event_handler: EventHandler::new(),
-            llm_client: MockLLMClient,
+            llm_client,
             renderer: ResponseRenderer::new(),
         })
+    }
+
+    /// Create a new Infraware Terminal instance with mock LLM (for development/testing)
+    #[allow(dead_code)]
+    fn new() -> Result<Self> {
+        Self::new_with_client(Arc::new(MockLLMClient::new()))
     }
 
     /// Run the main event loop
     async fn run(&mut self) -> Result<()> {
         // Display welcome message
-        self.state.add_output(AnsiColor::Cyan.colorize("╔══════════════════════════════════════════════════════════════╗"));
-        self.state.add_output(AnsiColor::Cyan.colorize("║       Infraware Terminal - AI-Assisted DevOps Shell        ║"));
-        self.state.add_output(AnsiColor::Cyan.colorize("╚══════════════════════════════════════════════════════════════╝"));
+        self.state.add_output(
+            AnsiColor::Cyan
+                .colorize("╔══════════════════════════════════════════════════════════════╗"),
+        );
+        self.state.add_output(
+            AnsiColor::Cyan.colorize("║   Infraware Terminal - AI-Assisted DevOps Shell         ║"),
+        );
+        self.state.add_output(
+            AnsiColor::Cyan
+                .colorize("╚══════════════════════════════════════════════════════════════╝"),
+        );
         self.state.add_output(String::new());
-        self.state.add_output("Type a command to execute or ask a question in natural language.".to_string());
-        self.state.add_output(format!("{}", AnsiColor::BrightBlack.colorize("Press Ctrl+C to quit")));
+        self.state.add_output(
+            "Type a command to execute or ask a question in natural language.".to_string(),
+        );
+        self.state.add_output(
+            AnsiColor::BrightBlack
+                .colorize("Press Ctrl+C to quit")
+                .to_string(),
+        );
         self.state.add_output(String::new());
 
         // Initial render
@@ -133,11 +154,7 @@ impl InfrawareTerminal {
         }
 
         // Echo the input
-        self.state.add_output(format!(
-            "{} {}",
-            AnsiColor::Cyan.colorize("❯"),
-            input
-        ));
+        self.state.add_output(MessageFormatter::command(&input));
 
         // Classify the input
         match self.classifier.classify(&input)? {
@@ -160,52 +177,57 @@ impl InfrawareTerminal {
     async fn handle_command(&mut self, cmd: &str, args: &[String]) -> Result<()> {
         self.state.mode = TerminalMode::ExecutingCommand;
 
+        // Handle special built-in commands that would interfere with TUI
+        if cmd == "clear" {
+            // Clear the output buffer instead of executing the system clear command
+            self.state.output_buffer.clear();
+            self.state.scroll_position = 0;
+            // Force a complete terminal clear to prevent spurious characters
+            self.ui.clear()?;
+            return Ok(());
+        }
+
         // Check if command exists
         if !CommandExecutor::command_exists(cmd) {
-            self.state.add_output(format!(
-                "{} Command '{}' not found",
-                AnsiColor::Red.colorize("✗"),
-                cmd
+            self.state
+                .add_output(MessageFormatter::command_not_found(cmd));
+            self.state.add_output(MessageFormatter::install_suggestion(
+                PackageInstaller::is_available(),
             ));
-
-            // Offer to install
-            if PackageInstaller::is_available() {
-                self.state.add_output(format!(
-                    "  {} Would you like to install it? (Feature coming in next version)",
-                    AnsiColor::Yellow.colorize("→")
-                ));
-            }
-
             return Ok(());
         }
 
         // Execute the command
         match CommandExecutor::execute(cmd, args).await {
             Ok(output) => {
+                // Show stdout as-is
                 if !output.stdout.is_empty() {
                     for line in output.stdout.lines() {
                         self.state.add_output(line.to_string());
                     }
                 }
+
+                // Show stderr - only colorize red if command failed
                 if !output.stderr.is_empty() {
                     for line in output.stderr.lines() {
-                        self.state.add_output(AnsiColor::Red.colorize(line));
+                        if output.is_success() {
+                            // Command succeeded, stderr is just informational
+                            self.state.add_output(line.to_string());
+                        } else {
+                            // Command failed, highlight stderr in red
+                            self.state.add_output(AnsiColor::Red.colorize(line));
+                        }
                     }
                 }
+
                 if !output.is_success() {
-                    self.state.add_output(format!(
-                        "{} Command exited with code {}",
-                        AnsiColor::Red.colorize("✗"),
-                        output.exit_code
-                    ));
+                    self.state
+                        .add_output(MessageFormatter::command_failed(output.exit_code));
                 }
             }
             Err(e) => {
-                self.state.add_output(format!(
-                    "{} Error executing command: {}",
-                    AnsiColor::Red.colorize("✗"),
-                    e
-                ));
+                self.state
+                    .add_output(MessageFormatter::execution_error(e.to_string()));
             }
         }
 
@@ -215,10 +237,8 @@ impl InfrawareTerminal {
     /// Handle natural language query
     async fn handle_natural_language(&mut self, query: &str) -> Result<()> {
         self.state.mode = TerminalMode::WaitingLLM;
-        self.state.add_output(format!(
-            "{} Querying AI assistant...",
-            AnsiColor::Blue.colorize("⟳")
-        ));
+        self.state
+            .add_output(MessageFormatter::info("Querying AI assistant..."));
 
         // Render to show "waiting" state
         self.ui.render(&self.state)?;
@@ -235,11 +255,10 @@ impl InfrawareTerminal {
             }
             Err(e) => {
                 self.state.output_buffer.pop();
-                self.state.add_output(format!(
-                    "{} Error querying LLM: {}",
-                    AnsiColor::Red.colorize("✗"),
+                self.state.add_output(MessageFormatter::error(format!(
+                    "Error querying LLM: {}",
                     e
-                ));
+                )));
             }
         }
 
@@ -261,10 +280,8 @@ impl InfrawareTerminal {
             self.state.cursor_position = self.state.input_buffer.len();
         } else {
             // Multiple completions - show them
-            self.state.add_output(format!(
-                "{} Possible completions:",
-                AnsiColor::Yellow.colorize("→")
-            ));
+            self.state
+                .add_output(MessageFormatter::info("Possible completions:"));
             for completion in &completions {
                 self.state.add_output(format!("  {}", completion));
             }
@@ -282,8 +299,20 @@ impl InfrawareTerminal {
 /// Main entry point
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Configure LLM client based on environment variable
+    let llm_client: Arc<dyn LLMClientTrait> = match std::env::var("INFRAWARE_LLM_URL") {
+        Ok(url) => {
+            eprintln!("Using HTTP LLM client: {}", url);
+            Arc::new(HttpLLMClient::new(url))
+        }
+        Err(_) => {
+            eprintln!("Using Mock LLM client (set INFRAWARE_LLM_URL to use real LLM)");
+            Arc::new(MockLLMClient::new())
+        }
+    };
+
     // Create and run the terminal
-    let mut terminal = InfrawareTerminal::new()?;
+    let mut terminal = InfrawareTerminal::new_with_client(llm_client)?;
 
     // Run the main loop
     if let Err(e) = terminal.run().await {
