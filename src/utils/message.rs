@@ -88,6 +88,21 @@ impl MessageFormatter {
             Self::info("Package manager not available for auto-install")
         }
     }
+
+    /// Format welcome banner header line
+    pub fn banner_line(content: impl AsRef<str>) -> String {
+        AnsiColor::Cyan.colorize(content.as_ref())
+    }
+
+    /// Format welcome banner hint/footer text
+    pub fn banner_hint(content: impl AsRef<str>) -> String {
+        AnsiColor::BrightBlack.colorize(content.as_ref())
+    }
+
+    /// Format stderr output line (for failed commands)
+    pub fn stderr_error(line: impl AsRef<str>) -> String {
+        AnsiColor::Red.colorize(line.as_ref())
+    }
 }
 
 #[cfg(test)]

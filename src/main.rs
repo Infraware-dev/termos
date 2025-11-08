@@ -21,7 +21,7 @@ use llm::{HttpLLMClient, LLMClientTrait, MockLLMClient, ResponseRenderer};
 use std::sync::Arc;
 use terminal::events::TerminalEvent;
 use terminal::{EventHandler, TerminalMode, TerminalState, TerminalUI};
-use utils::{AnsiColor, MessageFormatter};
+use utils::MessageFormatter;
 
 /// Main application structure
 pub struct InfrawareTerminal {
@@ -168,26 +168,21 @@ impl InfrawareTerminal {
     /// Run the main event loop
     async fn run(&mut self) -> Result<()> {
         // Display welcome message
-        self.state.add_output(
-            AnsiColor::Cyan
-                .colorize("╔══════════════════════════════════════════════════════════════╗"),
-        );
-        self.state.add_output(
-            AnsiColor::Cyan.colorize("║   Infraware Terminal - AI-Assisted DevOps Shell      ║"),
-        );
-        self.state.add_output(
-            AnsiColor::Cyan
-                .colorize("╚══════════════════════════════════════════════════════════════╝"),
-        );
+        self.state.add_output(MessageFormatter::banner_line(
+            "╔══════════════════════════════════════════════════════════════╗",
+        ));
+        self.state.add_output(MessageFormatter::banner_line(
+            "║   Infraware Terminal - AI-Assisted DevOps Shell/cleasd      ║",
+        ));
+        self.state.add_output(MessageFormatter::banner_line(
+            "╚══════════════════════════════════════════════════════════════╝",
+        ));
         self.state.add_output(String::new());
         self.state.add_output(
             "Type a command to execute or ask a question in natural language.".to_string(),
         );
-        self.state.add_output(
-            AnsiColor::BrightBlack
-                .colorize("Press Ctrl+C to quit")
-                .to_string(),
-        );
+        self.state
+            .add_output(MessageFormatter::banner_hint("Press Ctrl+C to quit"));
         self.state.add_output(String::new());
 
         // Initial render
@@ -328,7 +323,7 @@ impl InfrawareTerminal {
                             self.state.add_output(line.to_string());
                         } else {
                             // Command failed, highlight stderr in red
-                            self.state.add_output(AnsiColor::Red.colorize(line));
+                            self.state.add_output(MessageFormatter::stderr_error(line));
                         }
                     }
                 }
