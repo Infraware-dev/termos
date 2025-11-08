@@ -54,8 +54,7 @@ impl CommandOrchestrator {
     /// Handle the built-in "clear" command
     fn handle_clear_command(&self, state: &mut TerminalState, ui: &mut TerminalUI) -> Result<()> {
         // Clear the output buffer instead of executing the system clear command
-        state.output_buffer.clear();
-        state.scroll_position = 0;
+        state.output.clear();
         // Force a complete terminal clear to prevent spurious characters
         ui.clear()?;
         Ok(())
@@ -123,9 +122,9 @@ mod tests {
 
         orchestrator.handle_command_not_found("nonexistent", &mut state);
 
-        assert!(!state.output_buffer.is_empty());
-        assert!(state.output_buffer[0].contains("nonexistent"));
-        assert!(state.output_buffer[0].contains("not found"));
+        assert!(!state.output.lines().is_empty());
+        assert!(state.output.lines()[0].contains("nonexistent"));
+        assert!(state.output.lines()[0].contains("not found"));
     }
 
     #[tokio::test]
@@ -140,9 +139,10 @@ mod tests {
             .unwrap();
 
         // Should have output
-        assert!(!state.output_buffer.is_empty());
+        assert!(!state.output.lines().is_empty());
         assert!(state
-            .output_buffer
+            .output
+            .lines()
             .iter()
             .any(|line| line.contains("hello")));
     }

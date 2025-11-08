@@ -70,7 +70,7 @@ impl NaturalLanguageOrchestrator {
     /// Handle successful LLM response
     fn handle_success(&self, response: String, state: &mut TerminalState) {
         // Remove the "Querying..." message
-        state.output_buffer.pop();
+        state.output.pop();
 
         // Render the response with formatting
         let formatted_lines = self.renderer.render(&response);
@@ -80,7 +80,7 @@ impl NaturalLanguageOrchestrator {
     /// Handle LLM query error
     fn handle_error(&self, error: anyhow::Error, state: &mut TerminalState) {
         // Remove the "Querying..." message
-        state.output_buffer.pop();
+        state.output.pop();
 
         // Show error message
         state.add_output(MessageFormatter::error(format!(
@@ -107,9 +107,10 @@ mod tests {
         orchestrator.handle_success("Test response".to_string(), &mut state);
 
         // Should have output (the response)
-        assert!(!state.output_buffer.is_empty());
+        assert!(!state.output.lines().is_empty());
         assert!(state
-            .output_buffer
+            .output
+            .lines()
             .iter()
             .any(|line| line.contains("Test response")));
     }
@@ -126,8 +127,8 @@ mod tests {
         orchestrator.handle_error(error, &mut state);
 
         // Should have error message
-        assert!(!state.output_buffer.is_empty());
-        assert!(state.output_buffer[0].contains("Error querying LLM"));
-        assert!(state.output_buffer[0].contains("Test error"));
+        assert!(!state.output.lines().is_empty());
+        assert!(state.output.lines()[0].contains("Error querying LLM"));
+        assert!(state.output.lines()[0].contains("Test error"));
     }
 }

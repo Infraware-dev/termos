@@ -281,8 +281,7 @@ impl InfrawareTerminal {
                 self.handle_tab_completion();
             }
             TerminalEvent::ClearScreen => {
-                self.state.output_buffer.clear();
-                self.state.scroll_position = 0;
+                self.state.output.clear();
             }
             TerminalEvent::Resize(_, _) => {
                 // Terminal resized - re-render will handle it

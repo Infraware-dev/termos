@@ -28,7 +28,7 @@ impl TabCompletionHandler {
     /// - Displaying multiple matches
     /// - Finding common prefix for partial completion
     pub fn handle_tab_completion(&self, state: &mut TerminalState) {
-        let input = state.input_buffer.clone();
+        let input = state.input.text().to_string();
         let completions = TabCompletion::get_completions(&input);
 
         if completions.is_empty() {
@@ -45,8 +45,7 @@ impl TabCompletionHandler {
     /// Handle case when there's exactly one completion
     fn handle_single_completion(&self, completion: &str, state: &mut TerminalState) {
         // Single completion - auto-complete
-        state.input_buffer = completion.to_string();
-        state.cursor_position = state.input_buffer.len();
+        state.input.set_text(completion.to_string());
     }
 
     /// Handle case when there are multiple completions
@@ -65,8 +64,7 @@ impl TabCompletionHandler {
         // Auto-complete to common prefix
         let common_prefix = TabCompletion::get_common_prefix(completions);
         if common_prefix.len() > input.len() {
-            state.input_buffer = common_prefix;
-            state.cursor_position = state.input_buffer.len();
+            state.input.set_text(common_prefix);
         }
     }
 }
@@ -79,26 +77,26 @@ mod tests {
     fn test_single_completion() {
         let handler = TabCompletionHandler::new();
         let mut state = TerminalState::new();
-        state.input_buffer = "test".to_string();
+        state.input.set_text("test".to_string());
 
         handler.handle_single_completion("test_completion", &mut state);
 
-        assert_eq!(state.input_buffer, "test_completion");
-        assert_eq!(state.cursor_position, "test_completion".len());
+        assert_eq!(state.input.text(), "test_completion");
+        assert_eq!(state.input.cursor_position(), "test_completion".len());
     }
 
     #[test]
     fn test_multiple_completions() {
         let handler = TabCompletionHandler::new();
         let mut state = TerminalState::new();
-        state.input_buffer = "tes".to_string();
+        state.input.set_text("tes".to_string());
 
         let completions = vec!["test1".to_string(), "test2".to_string()];
 
         handler.handle_multiple_completions(&completions, "tes", &mut state);
 
         // Should have added completion messages
-        assert!(!state.output_buffer.is_empty());
-        assert!(state.output_buffer[0].contains("Possible completions"));
+        assert!(!state.output.lines().is_empty());
+        assert!(state.output.lines()[0].contains("Possible completions"));
     }
 }

@@ -97,7 +97,7 @@ fn render_frame(frame: &mut Frame, state: &TerminalState) {
 
 /// Render the output buffer
 fn render_output(frame: &mut Frame, area: Rect, state: &TerminalState) {
-    let output_text = if state.output_buffer.is_empty() {
+    let output_text = if state.output.lines().is_empty() {
         vec![Line::from(Span::styled(
             "Infraware Terminal - Type a command or ask a question",
             Style::default().fg(Color::Gray),
@@ -105,9 +105,9 @@ fn render_output(frame: &mut Frame, area: Rect, state: &TerminalState) {
     } else {
         // Show the last N lines that fit in the area
         let visible_lines = area.height.saturating_sub(2) as usize; // -2 for borders
-        let start = state.output_buffer.len().saturating_sub(visible_lines);
+        let start = state.output.lines().len().saturating_sub(visible_lines);
 
-        state.output_buffer[start..]
+        state.output.lines()[start..]
             .iter()
             .map(|line| {
                 // Strip ANSI codes since ratatui doesn't interpret them
@@ -155,7 +155,7 @@ fn render_status_bar(frame: &mut Frame, area: Rect, state: &TerminalState) {
         ),
         Span::raw(" | "),
         Span::styled(
-            format!("History: {} ", state.command_history.len()),
+            format!("History: {} ", state.history.all().len()),
             Style::default().fg(Color::Gray),
         ),
     ]);
@@ -173,7 +173,7 @@ fn render_input(frame: &mut Frame, area: Rect, state: &TerminalState) {
                 .fg(Color::Cyan)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::raw(state.input_buffer.as_str()),
+        Span::raw(state.input.text()),
     ]);
 
     let input_widget = Paragraph::new(input_text).block(
@@ -186,5 +186,8 @@ fn render_input(frame: &mut Frame, area: Rect, state: &TerminalState) {
     frame.render_widget(input_widget, area);
 
     // Set cursor position (2 accounts for "❯ " prefix and border)
-    frame.set_cursor_position((area.x + state.cursor_position as u16 + 3, area.y + 1));
+    frame.set_cursor_position((
+        area.x + state.input.cursor_position() as u16 + 3,
+        area.y + 1,
+    ));
 }
