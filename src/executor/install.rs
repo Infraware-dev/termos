@@ -32,11 +32,13 @@ impl PackageInstaller {
     }
 
     /// Create an installer with custom package managers
+    #[allow(dead_code)]
     pub fn with_managers(managers: Vec<Box<dyn PackageManager>>) -> Self {
         Self { managers }
     }
 
     /// Register a new package manager
+    #[allow(dead_code)]
     pub fn register(&mut self, manager: Box<dyn PackageManager>) {
         self.managers.push(manager);
     }
@@ -74,6 +76,7 @@ impl PackageInstaller {
     }
 
     /// Get all available package managers
+    #[allow(dead_code)]
     pub fn get_available_managers(&self) -> Vec<&str> {
         self.managers
             .iter()
@@ -92,6 +95,7 @@ impl Default for PackageInstaller {
 // Static methods for backward compatibility
 impl PackageInstaller {
     /// Install a package using the default installer (static method for compatibility)
+    #[allow(dead_code)]
     pub async fn install_package_static(package: &str) -> Result<()> {
         let installer = Self::new();
         installer.install_package(package).await
@@ -103,6 +107,7 @@ impl PackageInstaller {
     }
 
     /// Get the name of the available package manager (static method for compatibility)
+    #[allow(dead_code)]
     pub fn get_package_manager_static() -> Option<String> {
         Self::new().get_package_manager().map(|s| s.to_string())
     }

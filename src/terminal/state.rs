@@ -63,9 +63,8 @@ impl TerminalState {
 
     /// Add multiple lines to the output buffer
     pub fn add_output_lines(&mut self, lines: Vec<String>) {
-        for line in lines {
-            self.output_buffer.push(line);
-        }
+        // Use extend() for better performance - single allocation instead of multiple pushes
+        self.output_buffer.extend(lines);
 
         // Trim buffer if it exceeds maximum size
         if self.output_buffer.len() > MAX_OUTPUT_LINES {
@@ -74,6 +73,7 @@ impl TerminalState {
             self.scroll_position = self.scroll_position.saturating_sub(lines_to_remove);
         }
 
+        // Auto-scroll to bottom
         self.scroll_position = self.output_buffer.len().saturating_sub(1);
     }
 

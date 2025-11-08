@@ -6,5 +6,4 @@ pub mod package_manager;
 
 pub use command::CommandExecutor;
 pub use completion::TabCompletion;
-pub use facade::{CommandExecutionFacade, ExecutionResult};
 pub use install::PackageInstaller;
