@@ -9,7 +9,10 @@ readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
 dependencies = [
+    "langchain>=1.0.5",
+    "langchain-anthropic>=1.0.3",
     "langgraph>=1.0.0",
+    "langgraph-supervisor>=0.0.30",
     "python-dotenv>=1.0.1",
 ]
 
