@@ -1,0 +1,381 @@
+mod executor;
+mod input;
+mod llm;
+mod orchestrators;
+/// Infraware Terminal - Hybrid Command Interpreter with AI Assistance
+///
+/// This is a TUI-based terminal that accepts user input and intelligently
+/// routes it to either:
+/// 1. Shell command execution (with auto-install for missing commands)
+/// 2. LLM backend for natural language queries
+///
+/// Target use case: DevOps operations in cloud environments (AWS/Azure) with AI assistance
+mod terminal;
+mod utils;
+
+use anyhow::Result;
+use std::time::Duration;
+
+use input::{InputClassifier, InputType};
+use llm::{HttpLLMClient, LLMClientTrait, MockLLMClient, ResponseRenderer};
+use orchestrators::{CommandOrchestrator, NaturalLanguageOrchestrator, TabCompletionHandler};
+use std::sync::Arc;
+use terminal::events::TerminalEvent;
+use terminal::{EventHandler, TerminalMode, TerminalState, TerminalUI};
+use utils::MessageFormatter;
+
+/// Main application structure
+///
+/// Following Single Responsibility Principle (SRP), this struct now delegates
+/// specific workflows to specialized orchestrators:
+/// - CommandOrchestrator: Handles command execution workflow
+/// - NaturalLanguageOrchestrator: Handles LLM query workflow
+/// - TabCompletionHandler: Handles tab completion workflow
+///
+/// InfrawareTerminal's single responsibility is to:
+/// - Manage the event loop
+/// - Route events to appropriate handlers
+/// - Coordinate between UI, state, and orchestrators
+pub struct InfrawareTerminal {
+    ui: TerminalUI,
+    state: TerminalState,
+    classifier: InputClassifier,
+    event_handler: EventHandler,
+    command_orchestrator: CommandOrchestrator,
+    nl_orchestrator: NaturalLanguageOrchestrator,
+    tab_completion_handler: TabCompletionHandler,
+}
+
+/// Builder for InfrawareTerminal
+///
+/// Implements the Builder Pattern to provide flexible, testable construction
+/// of the terminal with dependency injection support.
+///
+/// # Example
+/// ```no_run
+/// use std::sync::Arc;
+/// # use infraware_terminal::llm::MockLLMClient;
+/// # use anyhow::Result;
+/// # fn main() -> Result<()> {
+/// let terminal = InfrawareTerminal::builder()
+///     .with_llm_client(Arc::new(MockLLMClient::new()))
+///     .build()?;
+/// # Ok(())
+/// # }
+/// ```
+#[derive(Default)]
+pub struct InfrawareTerminalBuilder {
+    ui: Option<TerminalUI>,
+    state: Option<TerminalState>,
+    classifier: Option<InputClassifier>,
+    event_handler: Option<EventHandler>,
+    llm_client: Option<Arc<dyn LLMClientTrait>>,
+    renderer: Option<ResponseRenderer>,
+    command_orchestrator: Option<CommandOrchestrator>,
+    tab_completion_handler: Option<TabCompletionHandler>,
+}
+
+impl std::fmt::Debug for InfrawareTerminalBuilder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InfrawareTerminalBuilder")
+            .field("ui", &self.ui.is_some())
+            .field("state", &self.state.is_some())
+            .field("classifier", &self.classifier.is_some())
+            .field("event_handler", &self.event_handler.is_some())
+            .field("llm_client", &self.llm_client.is_some())
+            .field("renderer", &self.renderer.is_some())
+            .field("command_orchestrator", &self.command_orchestrator.is_some())
+            .field(
+                "tab_completion_handler",
+                &self.tab_completion_handler.is_some(),
+            )
+            .finish()
+    }
+}
+
+impl InfrawareTerminalBuilder {
+    /// Create a new builder with all fields set to None
+    pub fn new() -> Self {
+        Self {
+            ui: None,
+            state: None,
+            classifier: None,
+            event_handler: None,
+            llm_client: None,
+            renderer: None,
+            command_orchestrator: None,
+            tab_completion_handler: None,
+        }
+    }
+
+    /// Set a custom TerminalUI
+    pub fn with_ui(mut self, ui: TerminalUI) -> Self {
+        self.ui = Some(ui);
+        self
+    }
+
+    /// Set a custom TerminalState
+    pub fn with_state(mut self, state: TerminalState) -> Self {
+        self.state = Some(state);
+        self
+    }
+
+    /// Set a custom InputClassifier
+    pub fn with_classifier(mut self, classifier: InputClassifier) -> Self {
+        self.classifier = Some(classifier);
+        self
+    }
+
+    /// Set a custom EventHandler
+    pub fn with_event_handler(mut self, event_handler: EventHandler) -> Self {
+        self.event_handler = Some(event_handler);
+        self
+    }
+
+    /// Set a custom LLM client
+    pub fn with_llm_client(mut self, client: Arc<dyn LLMClientTrait>) -> Self {
+        self.llm_client = Some(client);
+        self
+    }
+
+    /// Set a custom ResponseRenderer
+    pub fn with_renderer(mut self, renderer: ResponseRenderer) -> Self {
+        self.renderer = Some(renderer);
+        self
+    }
+
+    /// Build the InfrawareTerminal instance
+    ///
+    /// Any components not explicitly set will use sensible defaults:
+    /// - UI: New TerminalUI instance
+    /// - State: New TerminalState with empty buffers
+    /// - Classifier: Default InputClassifier with standard handlers
+    /// - EventHandler: Default EventHandler
+    /// - LLM Client: MockLLMClient (for development/testing)
+    /// - Renderer: Default ResponseRenderer with syntax highlighting
+    /// - Orchestrators: Default instances
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if TerminalUI initialization fails. This can occur when
+    /// the terminal backend cannot be initialized or when entering raw mode fails.
+    pub fn build(self) -> Result<InfrawareTerminal> {
+        let llm_client = self
+            .llm_client
+            .unwrap_or_else(|| Arc::new(MockLLMClient::new()));
+        let renderer = self.renderer.unwrap_or_default();
+
+        Ok(InfrawareTerminal {
+            ui: match self.ui {
+                Some(ui) => ui,
+                None => TerminalUI::new()?,
+            },
+            state: self.state.unwrap_or_default(),
+            classifier: self.classifier.unwrap_or_default(),
+            event_handler: self.event_handler.unwrap_or_default(),
+            command_orchestrator: self.command_orchestrator.unwrap_or_default(),
+            nl_orchestrator: NaturalLanguageOrchestrator::new(llm_client, renderer),
+            tab_completion_handler: self.tab_completion_handler.unwrap_or_default(),
+        })
+    }
+}
+
+impl InfrawareTerminal {
+    /// Create a builder for constructing an InfrawareTerminal instance
+    ///
+    /// This is the recommended way to construct the terminal, especially
+    /// for testing and when loading configuration from files.
+    pub fn builder() -> InfrawareTerminalBuilder {
+        InfrawareTerminalBuilder::new()
+    }
+
+    /// Create a new terminal instance with provided LLM client
+    ///
+    /// This is a convenience method. For more control, use `builder()`.
+    #[allow(dead_code)]
+    fn new_with_client(llm_client: Arc<dyn LLMClientTrait>) -> Result<Self> {
+        Self::builder().with_llm_client(llm_client).build()
+    }
+
+    /// Create a new Infraware Terminal instance with mock LLM (for development/testing)
+    ///
+    /// This is a convenience method. For more control, use `builder()`.
+    #[allow(dead_code)]
+    fn new() -> Result<Self> {
+        Self::builder().build()
+    }
+
+    /// Run the main event loop
+    async fn run(&mut self) -> Result<()> {
+        // Display welcome message
+        self.state.add_output(MessageFormatter::banner_line(
+            "╔══════════════════════════════════════════════════════════════╗",
+        ));
+        self.state.add_output(MessageFormatter::banner_line(
+            "║   Infraware Terminal - AI-Assisted DevOps Shell/cleasd       ║",
+        ));
+        self.state.add_output(MessageFormatter::banner_line(
+            "╚══════════════════════════════════════════════════════════════╝",
+        ));
+        self.state.add_output(String::new());
+        self.state.add_output(
+            "Type a command to execute or ask a question in natural language.".to_string(),
+        );
+        self.state
+            .add_output(MessageFormatter::banner_hint("Press Ctrl+C to quit"));
+        self.state.add_output(String::new());
+
+        // Initial render
+        self.ui.render(&self.state)?;
+
+        // Main event loop
+        loop {
+            // Poll for events with a short timeout
+            if let Some(event) = self.event_handler.poll_event(Duration::from_millis(100))? {
+                if !self.handle_event(event).await? {
+                    break; // Quit requested
+                }
+
+                // Re-render after handling event
+                self.ui.render(&self.state)?;
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Handle a terminal event
+    async fn handle_event(&mut self, event: TerminalEvent) -> Result<bool> {
+        match event {
+            TerminalEvent::Quit => {
+                return Ok(false);
+            }
+            TerminalEvent::InputChar(c) => {
+                self.state.insert_char(c);
+            }
+            TerminalEvent::DeleteChar => {
+                self.state.delete_char();
+            }
+            TerminalEvent::MoveCursorLeft => {
+                self.state.move_cursor_left();
+            }
+            TerminalEvent::MoveCursorRight => {
+                self.state.move_cursor_right();
+            }
+            TerminalEvent::HistoryPrevious => {
+                self.state.history_previous();
+            }
+            TerminalEvent::HistoryNext => {
+                self.state.history_next();
+            }
+            TerminalEvent::ScrollUp => {
+                self.state.scroll_up();
+            }
+            TerminalEvent::ScrollDown => {
+                self.state.scroll_down();
+            }
+            TerminalEvent::Submit => {
+                self.handle_submit().await?;
+            }
+            TerminalEvent::TabComplete => {
+                self.handle_tab_completion();
+            }
+            TerminalEvent::ClearScreen => {
+                self.state.output.clear();
+            }
+            TerminalEvent::Resize(_, _) => {
+                // Terminal resized - re-render will handle it
+            }
+            TerminalEvent::Unknown => {}
+        }
+
+        Ok(true)
+    }
+
+    /// Handle input submission
+    async fn handle_submit(&mut self) -> Result<()> {
+        let input = self.state.submit_input();
+
+        if input.trim().is_empty() {
+            return Ok(());
+        }
+
+        // Echo the input
+        self.state.add_output(MessageFormatter::command(&input));
+
+        // Classify the input
+        match self.classifier.classify(&input)? {
+            InputType::Command(cmd, args) => {
+                self.handle_command(&cmd, &args).await?;
+            }
+            InputType::NaturalLanguage(query) => {
+                self.handle_natural_language(&query).await?;
+            }
+            InputType::Empty => {}
+        }
+
+        self.state.add_output(String::new()); // Empty line for spacing
+        self.state.mode = TerminalMode::Normal;
+
+        Ok(())
+    }
+
+    /// Handle command execution
+    ///
+    /// Delegates to CommandOrchestrator (SRP compliance)
+    async fn handle_command(&mut self, cmd: &str, args: &[String]) -> Result<()> {
+        self.state.mode = TerminalMode::ExecutingCommand;
+
+        self.command_orchestrator
+            .handle_command(cmd, args, &mut self.state, &mut self.ui)
+            .await
+    }
+
+    /// Handle natural language query
+    ///
+    /// Delegates to NaturalLanguageOrchestrator (SRP compliance)
+    async fn handle_natural_language(&mut self, query: &str) -> Result<()> {
+        self.state.mode = TerminalMode::WaitingLLM;
+
+        self.nl_orchestrator
+            .handle_query(query, &mut self.state, &mut self.ui)
+            .await
+    }
+
+    /// Handle tab completion
+    ///
+    /// Delegates to TabCompletionHandler (SRP compliance)
+    fn handle_tab_completion(&mut self) {
+        self.tab_completion_handler
+            .handle_tab_completion(&mut self.state);
+    }
+}
+
+/// Main entry point
+#[tokio::main]
+async fn main() -> Result<()> {
+    // Configure LLM client based on environment variable
+    let llm_client: Arc<dyn LLMClientTrait> = match std::env::var("INFRAWARE_LLM_URL") {
+        Ok(url) => {
+            eprintln!("Using HTTP LLM client: {}", url);
+            Arc::new(HttpLLMClient::new(url))
+        }
+        Err(_) => {
+            eprintln!("Using Mock LLM client (set INFRAWARE_LLM_URL to use real LLM)");
+            Arc::new(MockLLMClient::new())
+        }
+    };
+
+    // Create terminal using builder pattern
+    let mut terminal = InfrawareTerminal::builder()
+        .with_llm_client(llm_client)
+        .build()?;
+
+    // Run the main loop
+    if let Err(e) = terminal.run().await {
+        eprintln!("Error: {}", e);
+        std::process::exit(1);
+    }
+
+    Ok(())
+}

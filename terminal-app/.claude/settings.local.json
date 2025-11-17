@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo build:*)",
+      "Bash(cargo test:*)",
+      "Bash(cargo clippy:*)",
+      "Bash(cargo fmt:*)",
+      "Bash(git add:*)",
+      "Bash(git reset:*)",
+      "Bash(.gitignore)",
+      "Bash(git commit:*)",
+      "Skill(rust-guidelines)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

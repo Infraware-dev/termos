@@ -1,0 +1,10 @@
+/target/
+Cargo.lock
+
+# Editor temporary files
+*.swp
+*.swo
+*~
+
+# Claude Code local settings
+.claude/settings.local.json
