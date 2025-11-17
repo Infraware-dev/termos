@@ -173,7 +173,11 @@ mod tests {
 
         // Command succeeds but outputs to stderr
         orchestrator
-            .execute_and_display("sh", &["-c".to_string(), "echo warning >&2".to_string()], &mut state)
+            .execute_and_display(
+                "sh",
+                &["-c".to_string(), "echo warning >&2".to_string()],
+                &mut state,
+            )
             .await
             .unwrap();
 
@@ -192,7 +196,11 @@ mod tests {
 
         // Command fails and outputs to stderr
         orchestrator
-            .execute_and_display("sh", &["-c".to_string(), "echo error >&2; exit 1".to_string()], &mut state)
+            .execute_and_display(
+                "sh",
+                &["-c".to_string(), "echo error >&2; exit 1".to_string()],
+                &mut state,
+            )
             .await
             .unwrap();
 

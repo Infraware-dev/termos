@@ -159,7 +159,12 @@ mod tests {
     fn test_complete_command_no_match() {
         let completions = TabCompletion::complete_command("zzz_nonexistent_cmd");
         // Should be empty for non-existent commands
-        assert!(completions.is_empty() || completions.iter().all(|c| c.starts_with("zzz_nonexistent_cmd")));
+        assert!(
+            completions.is_empty()
+                || completions
+                    .iter()
+                    .all(|c| c.starts_with("zzz_nonexistent_cmd"))
+        );
     }
 
     #[test]
@@ -266,10 +271,7 @@ mod tests {
 
     #[test]
     fn test_get_common_prefix_partial_match() {
-        let completions = vec![
-            "testing.txt".to_string(),
-            "test.md".to_string(),
-        ];
+        let completions = vec!["testing.txt".to_string(), "test.md".to_string()];
         let prefix = TabCompletion::get_common_prefix(&completions);
         assert_eq!(prefix, "test");
     }

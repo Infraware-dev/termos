@@ -130,12 +130,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_command_with_multiple_args() {
-        let output = CommandExecutor::execute(
-            "echo",
-            &["hello".to_string(), "world".to_string()],
-        )
-        .await
-        .unwrap();
+        let output = CommandExecutor::execute("echo", &["hello".to_string(), "world".to_string()])
+            .await
+            .unwrap();
         assert!(output.is_success());
         assert_eq!(output.stdout.trim(), "hello world");
     }
@@ -143,9 +140,10 @@ mod tests {
     #[tokio::test]
     async fn test_command_with_stderr() {
         // Use a command that outputs to stderr (grep with no match)
-        let output = CommandExecutor::execute("sh", &["-c".to_string(), "echo error >&2".to_string()])
-            .await
-            .unwrap();
+        let output =
+            CommandExecutor::execute("sh", &["-c".to_string(), "echo error >&2".to_string()])
+                .await
+                .unwrap();
         assert!(output.is_success());
         assert!(output.stderr.contains("error"));
     }
@@ -265,9 +263,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute_with_empty_args() {
-        let output = CommandExecutor::execute("pwd", &[])
-            .await
-            .unwrap();
+        let output = CommandExecutor::execute("pwd", &[]).await.unwrap();
         assert!(output.is_success());
         assert!(!output.stdout.is_empty());
     }
