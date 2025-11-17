@@ -157,7 +157,10 @@ mod tests {
     #[test]
     fn test_package_install_error() {
         let err = InfraError::package_install("apt-get failed");
-        assert_eq!(err.to_string(), "Package installation failed: apt-get failed");
+        assert_eq!(
+            err.to_string(),
+            "Package installation failed: apt-get failed"
+        );
     }
 
     #[test]
@@ -175,7 +178,10 @@ mod tests {
     #[test]
     fn test_no_package_manager() {
         let err = InfraError::NoPackageManager;
-        assert_eq!(err.to_string(), "No supported package manager found on this system");
+        assert_eq!(
+            err.to_string(),
+            "No supported package manager found on this system"
+        );
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use anyhow::Result;
 /// Event handling for keyboard input
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use std::time::Duration;
 
 /// Event handler for terminal input
@@ -35,6 +35,13 @@ impl EventHandler {
 
     /// Map key events to terminal events
     fn map_key_event(&self, key: KeyEvent) -> TerminalEvent {
+        // IMPORTANT: On Windows, crossterm generates multiple events per keystroke
+        // (Press, Repeat, Release). We only want to handle Press events to avoid
+        // duplicate input. This fixes the double-input issue on Windows.
+        if key.kind != KeyEventKind::Press {
+            return TerminalEvent::Unknown;
+        }
+
         match (key.code, key.modifiers) {
             // Ctrl+C - Quit
             (KeyCode::Char('c'), KeyModifiers::CONTROL) => TerminalEvent::Quit,
