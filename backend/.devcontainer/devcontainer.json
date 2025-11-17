@@ -3,16 +3,22 @@
 {
 	"name": "Python 3",
 	// Or use a Dockerfile or Docker Compose file. More info: https://containers.dev/guide/dockerfile
-	"image": "mcr.microsoft.com/devcontainers/python:2-3.12-bullseye",
+	 
+	"build": {
+        // Path is relative to the devcontainer.json file.
+        "dockerfile": "Dockerfile",
+        // Set build context to parent directory so we can access pyproject.toml and uv.lock
+        "context": ".."
+    },
+
+	// Use 'postCreateCommand' to run commands after the container is created.
+	"postCreateCommand": "pip install -e ."
 
 	// Features to add to the dev container. More info: https://containers.dev/features.
 	// "features": {},
 
 	// Use 'forwardPorts' to make a list of ports inside the container available locally.
 	// "forwardPorts": [],
-
-	// Use 'postCreateCommand' to run commands after the container is created.
-	"postCreateCommand": "pip3 install uv && uv sync && pip3 install langgraph-cli && pip install -U 'langgraph-cli[inmem]' && pip install -e . "
 
 	// Configure tool-specific properties.
 	// "customizations": {},
