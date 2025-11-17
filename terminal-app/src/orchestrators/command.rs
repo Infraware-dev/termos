@@ -211,7 +211,7 @@ mod tests {
 
     #[test]
     fn test_orchestrator_default() {
-        let _ = CommandOrchestrator::default();
+        let _ = CommandOrchestrator;
     }
 
     #[test]

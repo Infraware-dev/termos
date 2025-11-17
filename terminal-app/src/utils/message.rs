@@ -246,6 +246,6 @@ mod tests {
         // Test that methods work with both &str and String
         let _ = MessageFormatter::error("string literal");
         let _ = MessageFormatter::error(String::from("owned string"));
-        let _ = MessageFormatter::warning(&"reference".to_string());
+        let _ = MessageFormatter::warning("reference");
     }
 }
