@@ -39,6 +39,69 @@ impl CommandOutput {
 pub struct CommandExecutor;
 
 impl CommandExecutor {
+    /// List of interactive commands that should not be executed in non-interactive mode
+    /// These commands require a TTY and will block or behave incorrectly without one
+    const INTERACTIVE_COMMANDS: &'static [&'static str] = &[
+        // Text editors
+        "vi",
+        "vim",
+        "nvim",
+        "emacs",
+        "nano",
+        "pico",
+        "ed",
+        // Interactive system monitors
+        "top",
+        "htop",
+        "btop",
+        "atop",
+        "iotop",
+        "iftop",
+        "nethogs",
+        // Interactive file managers
+        "mc",
+        "ranger",
+        "nnn",
+        "lf",
+        "vifm",
+        // Interactive programs
+        "less",
+        "more",
+        "most",
+        "man",
+        "info",
+        "ssh",
+        "telnet",
+        "ftp",
+        "sftp",
+        "screen",
+        "tmux",
+        "python",
+        "python3",
+        "irb",
+        "node",
+        "ipython", // REPLs without args
+        "mysql",
+        "psql",
+        "sqlite3",
+        "mongo",
+        "redis-cli",
+        // Other interactive tools
+        "gdb",
+        "lldb",
+        "pdb",
+        "w3m",
+        "lynx",
+        "links",
+        // Note: sh, bash, zsh, fish are NOT blocked when used with -c flag
+        // They are already used internally for shell operator interpretation
+    ];
+
+    /// Check if a command is interactive and should be blocked
+    fn is_interactive_command(cmd: &str) -> bool {
+        Self::INTERACTIVE_COMMANDS.contains(&cmd)
+    }
+
     /// Execute a command asynchronously with a 5-minute timeout
     ///
     /// # Arguments
@@ -52,16 +115,38 @@ impl CommandExecutor {
     /// If `original_input` is provided, the entire command is passed to `sh -c` for
     /// proper shell operator handling (pipes, redirects, subshells, etc.).
     /// Otherwise, the command is executed directly for better security and performance.
+    ///
+    /// # Interactive Commands
+    /// Interactive commands (vim, top, etc.) are blocked and return an error message.
+    /// Use non-interactive alternatives or specific flags instead.
     pub async fn execute(
         cmd: &str,
         args: &[String],
         original_input: Option<&str>,
     ) -> Result<CommandOutput> {
+        // Block interactive commands
+        if Self::is_interactive_command(cmd) {
+            return Ok(CommandOutput {
+                stdout: String::new(),
+                stderr: format!(
+                    "Interactive command '{}' is not supported in this terminal.\n\
+                     Suggestions:\n\
+                     - For 'top': use 'ps aux' or 'top -b -n 1' for batch mode\n\
+                     - For 'vim/nano': use 'cat' to view files, or edit externally\n\
+                     - For 'less': use 'cat' or 'head/tail'\n\
+                     - For shells: commands are already executed in a shell\n\
+                     - For REPLs: pass code as argument (e.g., 'python -c \"print(1+1)\"')",
+                    cmd
+                ),
+                exit_code: 1,
+            });
+        }
         // If original_input is provided, use sh -c for shell operator interpretation
         if let Some(shell_input) = original_input {
             let execution = TokioCommand::new("sh")
                 .arg("-c")
                 .arg(shell_input)
+                .stdin(Stdio::null()) // Prevent interactive programs from blocking
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
                 .output();
@@ -86,6 +171,7 @@ impl CommandExecutor {
         // Execute the command with timeout
         let execution = TokioCommand::new(cmd)
             .args(args)
+            .stdin(Stdio::null()) // Prevent interactive programs from blocking
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .output();
@@ -240,6 +326,43 @@ mod tests {
             exit_code: 0,
         };
         assert_eq!(output.combined_output(), "");
+    }
+
+    #[tokio::test]
+    async fn test_interactive_command_blocked() {
+        // Test that interactive commands are blocked
+        let output = CommandExecutor::execute("vim", &[], None).await.unwrap();
+        assert!(!output.is_success());
+        assert_eq!(output.exit_code, 1);
+        assert!(output.stderr.contains("Interactive command"));
+        assert!(output.stderr.contains("not supported"));
+    }
+
+    #[tokio::test]
+    async fn test_top_command_blocked() {
+        let output = CommandExecutor::execute("top", &[], None).await.unwrap();
+        assert!(!output.is_success());
+        assert!(output.stderr.contains("Interactive command"));
+        assert!(output.stderr.contains("top -b -n 1"));
+    }
+
+    #[tokio::test]
+    async fn test_nano_command_blocked() {
+        let output = CommandExecutor::execute("nano", &[], None).await.unwrap();
+        assert!(!output.is_success());
+        assert!(output.stderr.contains("Interactive command"));
+    }
+
+    #[test]
+    fn test_is_interactive_command() {
+        assert!(CommandExecutor::is_interactive_command("vim"));
+        assert!(CommandExecutor::is_interactive_command("top"));
+        assert!(CommandExecutor::is_interactive_command("nano"));
+        assert!(CommandExecutor::is_interactive_command("htop"));
+        assert!(CommandExecutor::is_interactive_command("less"));
+        assert!(!CommandExecutor::is_interactive_command("ls"));
+        assert!(!CommandExecutor::is_interactive_command("ps"));
+        assert!(!CommandExecutor::is_interactive_command("cat"));
     }
 
     #[test]
