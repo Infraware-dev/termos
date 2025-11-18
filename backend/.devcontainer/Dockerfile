@@ -13,7 +13,7 @@ COPY uv.lock ./
 RUN uv sync
 
 # Install langgraph-cli
-RUN pip3 install langgraph-cli && pip install -U 'langgraph-cli[inmem]'
+RUN pip install --upgrade pip && pip install ruff && pip3 install langgraph-cli && pip install -U 'langgraph-cli[inmem]'
 
 # Install package in editable mode (this will run after workspace is mounted)
 # Note: pip install -e . needs to run after the full codebase is available
