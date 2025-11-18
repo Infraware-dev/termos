@@ -1,12 +1,10 @@
-from langgraph_supervisor import create_supervisor
 from langchain.chat_models import init_chat_model
+from langgraph_supervisor import create_supervisor
+
 from agents.aws.agent import aws_agent
 from agents.gcp.agent import gcp_agent
 
-model = init_chat_model(
-    "anthropic:claude-3-7-sonnet-latest",
-    temperature=0
-)
+model = init_chat_model("anthropic:claude-3-7-sonnet-latest", temperature=0)
 
 supervisor = create_supervisor(
     model=model,
@@ -21,4 +19,3 @@ supervisor = create_supervisor(
     add_handoff_back_messages=True,
     output_mode="full_history",
 ).compile()
-

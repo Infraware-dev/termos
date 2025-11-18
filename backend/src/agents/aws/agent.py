@@ -1,11 +1,9 @@
 from langchain.agents import create_agent
 from langchain.chat_models import init_chat_model
+
 from agents.aws.tools import get_ip_aws
 
-model = init_chat_model(
-    "anthropic:claude-3-7-sonnet-latest",
-    temperature=0
-)
+model = init_chat_model("anthropic:claude-3-7-sonnet-latest", temperature=0)
 
 aws_agent = create_agent(
     model=model,
