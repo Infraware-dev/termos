@@ -1,9 +1,7 @@
 from langchain.agents import create_agent
-from langchain.chat_models import init_chat_model
-
 from agents.gcp.tools import get_ip_gcp
+from agents.shared.models import model
 
-model = init_chat_model("anthropic:claude-3-7-sonnet-latest", temperature=0)
 
 gcp_agent = create_agent(
     model=model,
