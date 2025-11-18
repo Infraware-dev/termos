@@ -1,6 +1,7 @@
 pub mod classifier;
 pub mod discovery;
 pub mod handler;
+pub mod known_commands;
 pub mod parser;
 pub mod patterns;
 pub mod typo_detection;

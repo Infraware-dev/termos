@@ -58,6 +58,7 @@ impl CommandExecutor {
         "iotop",
         "iftop",
         "nethogs",
+        "watch", // Runs commands repeatedly
         // Interactive file managers
         "mc",
         "ranger",
@@ -93,6 +94,9 @@ impl CommandExecutor {
         "w3m",
         "lynx",
         "links",
+        // System administration
+        "passwd",
+        "visudo",
         // Note: sh, bash, zsh, fish are NOT blocked when used with -c flag
         // They are already used internally for shell operator interpretation
     ];

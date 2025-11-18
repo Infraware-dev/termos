@@ -54,7 +54,15 @@ impl CommandCache {
     pub fn is_available(command: &str) -> bool {
         // Fast path: check cache first (read lock)
         {
-            let cache = COMMAND_CACHE.read().unwrap();
+            let cache = match COMMAND_CACHE.read() {
+                Ok(cache) => cache,
+                Err(poisoned) => {
+                    // Lock was poisoned, but we can still access the data
+                    eprintln!("Warning: Command cache read lock was poisoned, recovering...");
+                    poisoned.into_inner()
+                }
+            };
+
             if cache.available.contains(command) {
                 return true;
             }
@@ -68,7 +76,14 @@ impl CommandCache {
 
         // Update cache (write lock)
         {
-            let mut cache = COMMAND_CACHE.write().unwrap();
+            let mut cache = match COMMAND_CACHE.write() {
+                Ok(cache) => cache,
+                Err(poisoned) => {
+                    eprintln!("Warning: Command cache write lock was poisoned, recovering...");
+                    poisoned.into_inner()
+                }
+            };
+
             if exists {
                 cache.available.insert(command.to_string());
             } else {
@@ -92,7 +107,13 @@ impl CommandCache {
     /// ```
     #[allow(dead_code)]
     pub fn is_alias(command: &str) -> bool {
-        let cache = COMMAND_CACHE.read().unwrap();
+        let cache = match COMMAND_CACHE.read() {
+            Ok(cache) => cache,
+            Err(poisoned) => {
+                eprintln!("Warning: Command cache read lock was poisoned, recovering...");
+                poisoned.into_inner()
+            }
+        };
         cache.aliases.contains_key(command)
     }
 
@@ -101,7 +122,13 @@ impl CommandCache {
     /// Returns `None` if not an alias, or `Some(expanded_command)` if found.
     #[allow(dead_code)]
     pub fn get_alias_expansion(alias: &str) -> Option<String> {
-        let cache = COMMAND_CACHE.read().unwrap();
+        let cache = match COMMAND_CACHE.read() {
+            Ok(cache) => cache,
+            Err(poisoned) => {
+                eprintln!("Warning: Command cache read lock was poisoned, recovering...");
+                poisoned.into_inner()
+            }
+        };
         cache.aliases.get(alias).cloned()
     }
 
@@ -151,7 +178,13 @@ impl CommandCache {
         }
 
         // Update cache
-        let mut cache = COMMAND_CACHE.write().unwrap();
+        let mut cache = match COMMAND_CACHE.write() {
+            Ok(cache) => cache,
+            Err(poisoned) => {
+                eprintln!("Warning: Command cache write lock was poisoned, recovering...");
+                poisoned.into_inner()
+            }
+        };
         cache.aliases = aliases;
     }
 
@@ -165,7 +198,13 @@ impl CommandCache {
     /// ```
     #[allow(dead_code)]
     pub fn clear() {
-        let mut cache = COMMAND_CACHE.write().unwrap();
+        let mut cache = match COMMAND_CACHE.write() {
+            Ok(cache) => cache,
+            Err(poisoned) => {
+                eprintln!("Warning: Command cache write lock was poisoned, recovering...");
+                poisoned.into_inner()
+            }
+        };
         cache.available.clear();
         cache.unavailable.clear();
         cache.aliases.clear();
