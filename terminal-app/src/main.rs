@@ -416,3 +416,10 @@ async fn main() -> Result<()> {
 
     Ok(())
 }
+
+
+fn test_ci_warning()
+{
+    let unused = InfrawareTerminal::builder();
+
+}
