@@ -207,4 +207,4 @@ marimo/_lsp/
 __marimo__/
 
 # LangGraph runtime files
-**/.langgraph_api/*.pckl
+**/.langgraph_api/
