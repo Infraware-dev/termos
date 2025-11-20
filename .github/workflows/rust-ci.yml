@@ -105,13 +105,19 @@ jobs:
 
       - name: Check coverage threshold
         run: |
-          # Extract coverage percentage from lcov.info
-          coverage=$(cargo llvm-cov --all-features --workspace --summary-only | grep -oP 'TOTAL.*\K[0-9]+\.[0-9]+(?=%)')
+          # Extract coverage percentage using awk (more portable than grep -P)
+          coverage=$(cargo llvm-cov --all-features --workspace --summary-only | grep 'TOTAL' | awk '{print $4}' | tr -d '%')
           echo "Coverage: ${coverage}%"
 
-          # Check if coverage meets threshold
+          # Check if extraction succeeded
+          if [ -z "$coverage" ]; then
+            echo "Error: Failed to extract coverage percentage"
+            exit 1
+          fi
+
+          # Compare using awk (doesn't require bc)
           threshold=75.0
-          if (( $(echo "$coverage < $threshold" | bc -l) )); then
+          if awk "BEGIN {exit !($coverage < $threshold)}"; then
             echo "Error: Coverage ${coverage}% is below threshold ${threshold}%"
             exit 1
           fi
