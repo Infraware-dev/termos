@@ -4,6 +4,7 @@ pub mod handler;
 pub mod known_commands;
 pub mod parser;
 pub mod patterns;
+pub mod shell_builtins;
 pub mod typo_detection;
 
 pub use classifier::{InputClassifier, InputType};
@@ -14,3 +15,5 @@ pub use handler::{
     ClassifierChain, CommandSyntaxHandler, DefaultHandler, EmptyInputHandler, InputHandler,
     KnownCommandHandler, NaturalLanguageHandler, PathCommandHandler,
 };
+#[allow(unused_imports)]
+pub use shell_builtins::ShellBuiltinHandler;

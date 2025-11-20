@@ -101,9 +101,27 @@ impl CommandExecutor {
         // They are already used internally for shell operator interpretation
     ];
 
+    /// List of shell builtin commands that must be executed through a shell
+    /// These commands are built into the shell and don't exist as standalone executables
+    const SHELL_BUILTINS: &'static [&'static str] = &[
+        ".",      // POSIX: source a file
+        ":",      // POSIX: no-op command
+        "[[",     // Bash/Zsh: extended test (not in POSIX, must use shell)
+        "source", // Bash: source a file (not in POSIX sh)
+        "alias", "unalias", "export", "unset", "set", "declare", "local", "readonly", "typeset",
+        "eval", "exec", "return", "exit", "break", "continue", "shift", "builtin", "command",
+        "enable", "type", "hash", "times", "umask", "ulimit", "pushd", "popd", "dirs",
+        "read", // May be interactive, but included as builtin
+    ];
+
     /// Check if a command is interactive and should be blocked
     fn is_interactive_command(cmd: &str) -> bool {
         Self::INTERACTIVE_COMMANDS.contains(&cmd)
+    }
+
+    /// Check if a command is a shell builtin that must be executed through a shell
+    fn is_shell_builtin(cmd: &str) -> bool {
+        Self::SHELL_BUILTINS.contains(&cmd)
     }
 
     /// Execute a command asynchronously with a 5-minute timeout
@@ -145,6 +163,36 @@ impl CommandExecutor {
                 exit_code: 1,
             });
         }
+
+        // If command is a shell builtin, execute through shell
+        // Builtins like '.', ':', '[[', 'source', 'export' don't exist as standalone executables
+        if Self::is_shell_builtin(cmd) {
+            // Reconstruct the full command from cmd + args
+            let full_command = if args.is_empty() {
+                cmd.to_string()
+            } else {
+                format!("{} {}", cmd, args.join(" "))
+            };
+
+            let execution = TokioCommand::new("sh")
+                .arg("-c")
+                .arg(&full_command)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .output();
+
+            let output = timeout(Duration::from_secs(300), execution)
+                .await
+                .context("Command execution timed out after 5 minutes")??;
+
+            return Ok(CommandOutput {
+                stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+                stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+                exit_code: output.status.code().unwrap_or(-1),
+            });
+        }
+
         // If original_input is provided, use sh -c for shell operator interpretation
         if let Some(shell_input) = original_input {
             let execution = TokioCommand::new("sh")

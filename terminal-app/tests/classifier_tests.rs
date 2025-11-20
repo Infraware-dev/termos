@@ -114,3 +114,95 @@ fn test_classify_edge_cases() {
         _ => panic!("Expected Command"),
     }
 }
+
+#[test]
+fn test_classify_shell_builtins() {
+    let classifier = InputClassifier::new();
+
+    // Test . (dot/source) builtin
+    match classifier.classify(".").unwrap() {
+        InputType::Command { command, args, .. } => {
+            assert_eq!(command, ".");
+            assert!(args.is_empty());
+        }
+        _ => panic!("Expected Command for '.'"),
+    }
+
+    // Test . with file argument
+    match classifier.classify(". ~/.bashrc").unwrap() {
+        InputType::Command { command, args, .. } => {
+            assert_eq!(command, ".");
+            assert_eq!(args, vec!["~/.bashrc"]);
+        }
+        _ => panic!("Expected Command for '. ~/.bashrc'"),
+    }
+
+    // Test : (colon/no-op) builtin
+    match classifier.classify(":").unwrap() {
+        InputType::Command { command, args, .. } => {
+            assert_eq!(command, ":");
+            assert!(args.is_empty());
+        }
+        _ => panic!("Expected Command for ':'"),
+    }
+
+    // Test [ (single bracket) builtin
+    match classifier.classify("[ -f file.txt ]").unwrap() {
+        InputType::Command { command, args, .. } => {
+            assert_eq!(command, "[");
+            assert_eq!(args, vec!["-f", "file.txt", "]"]);
+        }
+        _ => panic!("Expected Command for '['"),
+    }
+
+    // Test [[ (double bracket) builtin
+    match classifier.classify("[[ -f file.txt ]]").unwrap() {
+        InputType::Command { command, args, .. } => {
+            assert_eq!(command, "[[");
+            assert_eq!(args, vec!["-f", "file.txt", "]]"]);
+        }
+        _ => panic!("Expected Command for '[['"),
+    }
+
+    // Test source builtin
+    match classifier.classify("source ~/.bashrc").unwrap() {
+        InputType::Command { command, args, .. } => {
+            assert_eq!(command, "source");
+            assert_eq!(args, vec!["~/.bashrc"]);
+        }
+        _ => panic!("Expected Command for 'source'"),
+    }
+
+    // Test export builtin
+    match classifier.classify("export PATH=/usr/bin").unwrap() {
+        InputType::Command { command, args, .. } => {
+            assert_eq!(command, "export");
+            assert_eq!(args, vec!["PATH=/usr/bin"]);
+        }
+        _ => panic!("Expected Command for 'export'"),
+    }
+
+    // Test test builtin
+    match classifier.classify("test -f file.txt").unwrap() {
+        InputType::Command { command, args, .. } => {
+            assert_eq!(command, "test");
+            assert_eq!(args, vec!["-f", "file.txt"]);
+        }
+        _ => panic!("Expected Command for 'test'"),
+    }
+
+    // Test true/false builtins
+    match classifier.classify("true").unwrap() {
+        InputType::Command { command, .. } => {
+            assert_eq!(command, "true");
+        }
+        _ => panic!("Expected Command for 'true'"),
+    }
+
+    match classifier.classify("false").unwrap() {
+        InputType::Command { command, .. } => {
+            assert_eq!(command, "false");
+        }
+        _ => panic!("Expected Command for 'false'"),
+    }
+}

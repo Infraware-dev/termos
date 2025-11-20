@@ -23,8 +23,9 @@ This is the initial project setup with the complete module structure. Implementa
   - O(1) HashMap lookup for performance (<1μs expansion overhead)
   - Built-in `reload-aliases` command for runtime reloading
   - Security: Rejects dangerous patterns (rm -rf /, mkfs, dd, fork bombs, etc.)
-- ✅ **SCAN Algorithm**: Advanced input classification with 7-handler chain + alias expansion (<100μs avg)
+- ✅ **SCAN Algorithm**: Advanced input classification with 8-handler chain + alias expansion (<100μs avg)
   - Alias expansion before classification (single-level like Bash)
+  - Shell builtin support (45+): `.`, `:`, `[`, `[[`, source, export, eval, exec, and more
   - Command recognition with PATH verification and caching
   - Typo detection with Levenshtein distance (e.g., "dokcer" → "docker")
   - Shell operator support (pipes, redirects, logical operators)
@@ -40,7 +41,7 @@ This is the initial project setup with the complete module structure. Implementa
 - ✅ **Command History**: Navigate previous commands with arrow keys
 - ✅ **Cross-Platform**: Windows, macOS, and Linux support with platform-specific optimizations
 - ✅ **Benchmarking Suite**: Performance benchmarks for SCAN algorithm
-- ✅ **Code Quality**: 236+ tests passing, 0 clippy warnings, serial tests for shared state, production-ready code
+- ✅ **Code Quality**: 267+ tests passing, 0 clippy warnings, serial tests for shared state, production-ready code
 
 ### Coming in M2/M3
 
@@ -66,14 +67,15 @@ Command          Typo?          Natural Language
 Shell Exec    Suggestion        LLM Backend
 ```
 
-**7-Handler Chain** (executed in strict order):
+**8-Handler Chain** (executed in strict order):
 1. **EmptyInputHandler** - Fast path for empty input (<1μs)
-2. **PathCommandHandler** - Executable paths: `./script.sh`, `/usr/bin/cmd` (~10μs)
-3. **KnownCommandHandler** - 60+ DevOps commands with PATH cache (<1μs hit)
-4. **CommandSyntaxHandler** - Flags, pipes, redirects detection (~10μs)
-5. **TypoDetectionHandler** - Levenshtein distance ≤2: "dokcer" → "docker" (~100μs)
-6. **NaturalLanguageHandler** - English patterns (precompiled regex) (~5μs)
-7. **DefaultHandler** - Fallback to natural language (<1μs)
+2. **ShellBuiltinHandler** - Shell builtins without PATH check: `.`, `:`, `[`, `[[`, source, export, eval, etc. (<1μs)
+3. **PathCommandHandler** - Executable paths: `./script.sh`, `/usr/bin/cmd` (~10μs)
+4. **KnownCommandHandler** - 60+ DevOps commands with PATH cache (<1μs hit)
+5. **CommandSyntaxHandler** - Flags, pipes, redirects detection (~10μs)
+6. **TypoDetectionHandler** - Levenshtein distance ≤2: "dokcer" → "docker" (~100μs)
+7. **NaturalLanguageHandler** - English patterns (precompiled regex) (~5μs)
+8. **DefaultHandler** - Fallback to natural language (<1μs)
 
 **Key Features**:
 - Average classification: <100μs
@@ -98,7 +100,8 @@ infraware-terminal/
 │   │   └── events.rs             # Keyboard event handling
 │   ├── input/                     # SCAN Algorithm
 │   │   ├── classifier.rs         # InputClassifier coordinator
-│   │   ├── handler.rs            # 7-handler Chain of Responsibility
+│   │   ├── handler.rs            # 8-handler Chain of Responsibility
+│   │   ├── shell_builtins.rs     # Shell builtin recognition (., :, [, [[, etc.)
 │   │   ├── patterns.rs           # Precompiled RegexSet patterns
 │   │   ├── discovery.rs          # PATH-aware command cache
 │   │   ├── typo_detection.rs     # Levenshtein distance typo detection

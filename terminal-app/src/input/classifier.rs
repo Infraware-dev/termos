@@ -8,6 +8,7 @@ use super::handler::{
     ClassifierChain, CommandSyntaxHandler, DefaultHandler, EmptyInputHandler, KnownCommandHandler,
     NaturalLanguageHandler, PathCommandHandler,
 };
+use super::shell_builtins::ShellBuiltinHandler;
 use super::typo_detection::TypoDetectionHandler;
 
 /// Represents the type of user input
@@ -43,12 +44,13 @@ pub enum InputType {
 ///
 /// Uses Chain of Responsibility pattern with the following chain:
 /// 1. EmptyInputHandler - handles empty/whitespace input
-/// 2. PathCommandHandler - detects executable paths (./script.sh, /usr/bin/cmd)
-/// 3. KnownCommandHandler - checks whitelist + verifies command exists in PATH
-/// 4. CommandSyntaxHandler - detects command syntax (flags, pipes, redirects)
-/// 5. TypoDetectionHandler - detects command typos via Levenshtein distance
-/// 6. NaturalLanguageHandler - detects natural language patterns (multilingual)
-/// 7. DefaultHandler - fallback to natural language
+/// 2. ShellBuiltinHandler - recognizes shell builtins (., :, [, [[, source, export, etc.)
+/// 3. PathCommandHandler - detects executable paths (./script.sh, /usr/bin/cmd)
+/// 4. KnownCommandHandler - checks whitelist + verifies command exists in PATH
+/// 5. CommandSyntaxHandler - detects command syntax (flags, pipes, redirects)
+/// 6. TypoDetectionHandler - detects command typos via Levenshtein distance
+/// 7. NaturalLanguageHandler - detects natural language patterns (multilingual)
+/// 8. DefaultHandler - fallback to natural language
 pub struct InputClassifier {
     chain: ClassifierChain,
 }
@@ -62,10 +64,12 @@ impl std::fmt::Debug for InputClassifier {
 }
 
 impl InputClassifier {
-    /// Create a new input classifier with default 7-handler chain
+    /// Create a new input classifier with default 8-handler chain
     ///
     /// Chain order optimized for performance and accuracy:
-    /// - Fast paths first (empty, executable paths)
+    /// - Fast paths first (empty, shell builtins)
+    /// - Shell builtins (no PATH verification needed)
+    /// - Executable paths (unambiguous)
     /// - Existence-verified commands (with caching)
     /// - Syntax detection (precompiled regex)
     /// - Typo detection (prevents false LLM calls)
@@ -75,17 +79,19 @@ impl InputClassifier {
         let chain = ClassifierChain::new()
             // 1. Empty input (fastest check)
             .add_handler(Box::new(EmptyInputHandler::new()))
-            // 2. Executable paths (unambiguous: ./script.sh, /usr/bin/cmd)
+            // 2. Shell builtins (., :, [, [[, source, export, etc. - no PATH verification)
+            .add_handler(Box::new(ShellBuiltinHandler::new()))
+            // 3. Executable paths (unambiguous: ./script.sh, /usr/bin/cmd)
             .add_handler(Box::new(PathCommandHandler::new()))
-            // 3. Known commands with PATH existence check (cached)
+            // 4. Known commands with PATH existence check (cached)
             .add_handler(Box::new(KnownCommandHandler::with_defaults()))
-            // 4. Command syntax detection (flags, pipes, redirects)
+            // 5. Command syntax detection (flags, pipes, redirects)
             .add_handler(Box::new(CommandSyntaxHandler::new()))
-            // 5. Typo detection (prevents "dokcer ps" → LLM)
+            // 6. Typo detection (prevents "dokcer ps" → LLM)
             .add_handler(Box::new(TypoDetectionHandler::with_defaults()))
-            // 6. Natural language patterns (precompiled regex, multilingual)
+            // 7. Natural language patterns (precompiled regex, multilingual)
             .add_handler(Box::new(NaturalLanguageHandler::new()))
-            // 7. Fallback to natural language
+            // 8. Fallback to natural language
             .add_handler(Box::new(DefaultHandler::new()));
 
         Self { chain }

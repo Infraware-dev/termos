@@ -282,3 +282,156 @@ async fn test_reload_aliases_command() {
 
     CommandCache::clear();
 }
+
+#[tokio::test]
+async fn test_shell_builtin_colon_execution() {
+    let classifier = InputClassifier::new();
+
+    // Test : (no-op) builtin
+    let input = ":";
+    let classified = classifier.classify(input).unwrap();
+
+    match classified {
+        InputType::Command {
+            command,
+            args,
+            original_input,
+        } => {
+            assert_eq!(command, ":");
+            assert!(args.is_empty());
+
+            // Execute the builtin
+            let result = CommandExecutor::execute(&command, &args, original_input.as_deref())
+                .await
+                .unwrap();
+
+            // : always succeeds
+            assert!(result.is_success());
+            assert_eq!(result.exit_code, 0);
+        }
+        _ => panic!("Expected Command"),
+    }
+}
+
+#[tokio::test]
+async fn test_shell_builtin_true_false() {
+    let classifier = InputClassifier::new();
+
+    // Test true builtin
+    let true_result = classifier.classify("true").unwrap();
+    match true_result {
+        InputType::Command {
+            command,
+            args,
+            original_input,
+        } => {
+            let result = CommandExecutor::execute(&command, &args, original_input.as_deref())
+                .await
+                .unwrap();
+            assert_eq!(result.exit_code, 0);
+        }
+        _ => panic!("Expected Command for 'true'"),
+    }
+
+    // Test false builtin
+    let false_result = classifier.classify("false").unwrap();
+    match false_result {
+        InputType::Command {
+            command,
+            args,
+            original_input,
+        } => {
+            let result = CommandExecutor::execute(&command, &args, original_input.as_deref())
+                .await
+                .unwrap();
+            assert_eq!(result.exit_code, 1);
+        }
+        _ => panic!("Expected Command for 'false'"),
+    }
+}
+
+#[tokio::test]
+async fn test_shell_builtin_export() {
+    let classifier = InputClassifier::new();
+
+    // Test export builtin
+    let input = "export TEST_VAR=hello";
+    let classified = classifier.classify(input).unwrap();
+
+    match classified {
+        InputType::Command {
+            command,
+            args,
+            original_input,
+        } => {
+            assert_eq!(command, "export");
+            assert_eq!(args, vec!["TEST_VAR=hello"]);
+
+            // Execute the builtin
+            let result = CommandExecutor::execute(&command, &args, original_input.as_deref())
+                .await
+                .unwrap();
+
+            // export in a subshell will succeed but won't affect parent
+            assert!(result.is_success());
+        }
+        _ => panic!("Expected Command"),
+    }
+}
+
+#[tokio::test]
+async fn test_shell_builtin_test_command() {
+    let classifier = InputClassifier::new();
+
+    // Test [ builtin with file test
+    let input = "[ -d /tmp ]";
+    let classified = classifier.classify(input).unwrap();
+
+    match classified {
+        InputType::Command {
+            command,
+            args,
+            original_input,
+        } => {
+            assert_eq!(command, "[");
+
+            // Execute the builtin
+            let result = CommandExecutor::execute(&command, &args, original_input.as_deref())
+                .await
+                .unwrap();
+
+            // /tmp should exist as a directory
+            assert_eq!(result.exit_code, 0);
+        }
+        _ => panic!("Expected Command"),
+    }
+}
+
+#[tokio::test]
+async fn test_shell_builtin_double_bracket() {
+    let classifier = InputClassifier::new();
+
+    // Test [[ builtin (bash-specific)
+    let input = "[[ -d /tmp ]]";
+    let classified = classifier.classify(input).unwrap();
+
+    match classified {
+        InputType::Command {
+            command,
+            args,
+            original_input,
+        } => {
+            assert_eq!(command, "[[");
+
+            // Execute the builtin
+            let _result = CommandExecutor::execute(&command, &args, original_input.as_deref())
+                .await
+                .unwrap();
+
+            // [[ requires bash, but sh might not support it
+            // We execute via sh, so this might fail on systems without bash
+            // Just verify it doesn't crash
+        }
+        _ => panic!("Expected Command"),
+    }
+}

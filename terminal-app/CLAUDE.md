@@ -99,15 +99,20 @@ User Input → Alias Expansion → InputClassifier → [Command Path | Natural L
 - `events.rs`: Keyboard event handling
 
 **`input/`** - Input classification and parsing (**SCAN Algorithm** - Shell-Command And Natural-language)
-- `classifier.rs`: Main InputClassifier coordinating the 7-handler chain with **alias expansion** support
-- `handler.rs`: **Chain of Responsibility** implementation with 7 handlers:
+- `classifier.rs`: Main InputClassifier coordinating the 8-handler chain with **alias expansion** support
+- `handler.rs`: **Chain of Responsibility** implementation with 8 handlers:
   1. EmptyInputHandler - Fast path for empty/whitespace input
-  2. PathCommandHandler - Executable paths (./script.sh, /usr/bin/cmd) with platform-specific checks
-  3. KnownCommandHandler - DevOps commands whitelist (60+) with PATH existence verification
-  4. CommandSyntaxHandler - Detects command syntax (flags, pipes, redirects, env vars, subshells)
-  5. TypoDetectionHandler - Levenshtein distance ≤2 for typo detection (prevents LLM false positives)
-  6. NaturalLanguageHandler - English patterns with precompiled regex (multilingual delegated to LLM)
-  7. DefaultHandler - Fallback to natural language (guarantees a result)
+  2. ShellBuiltinHandler - Shell builtins (45+) without PATH verification (., :, [, [[, source, export, etc.)
+  3. PathCommandHandler - Executable paths (./script.sh, /usr/bin/cmd) with platform-specific checks
+  4. KnownCommandHandler - DevOps commands whitelist (60+) with PATH existence verification
+  5. CommandSyntaxHandler - Detects command syntax (flags, pipes, redirects, env vars, subshells)
+  6. TypoDetectionHandler - Levenshtein distance ≤2 for typo detection (prevents LLM false positives)
+  7. NaturalLanguageHandler - English patterns with precompiled regex (multilingual delegated to LLM)
+  8. DefaultHandler - Fallback to natural language (guarantees a result)
+- `shell_builtins.rs`: **Shell builtin recognition** without PATH verification (., :, [, [[, source, export, etc.)
+  - Handles 45+ builtins: punctuation (`.`, `:`, `[`, `[[`), evaluation (eval, exec), variables (export, unset, set)
+  - Execution via `sh -c` for proper builtin interpretation
+  - Performance: <1μs handler overhead
 - `known_commands.rs`: **Single source of truth** for 60+ DevOps commands (used by both KnownCommandHandler and TypoDetectionHandler)
 - `patterns.rs`: **Precompiled RegexSet patterns** using `once_cell::Lazy` (10-100x faster)
 - `discovery.rs`: **PATH-aware command discovery** with thread-safe `RwLock<CommandCache>` + **poisoning recovery** + **alias loading and expansion**
@@ -151,7 +156,7 @@ User Input → Alias Expansion → InputClassifier → [Command Path | Natural L
    - **Builder Pattern**: Terminal construction (`main.rs` InfrawareTerminalBuilder)
    - **Single Responsibility Principle**: Orchestrators, buffer components
 
-2. **SCAN Algorithm** (Shell-Command And Natural-language): Production-ready input classification with alias expansion + Chain of Responsibility with 7 optimized handlers executing in strict order (<100μs average):
+2. **SCAN Algorithm** (Shell-Command And Natural-language): Production-ready input classification with alias expansion + Chain of Responsibility with 8 optimized handlers executing in strict order (<100μs average):
 
    **Pre-classification**: Alias expansion
    - Extract first word from input
@@ -161,12 +166,13 @@ User Input → Alias Expansion → InputClassifier → [Command Path | Natural L
 
    **Handler chain**:
    1. **EmptyInputHandler**: Fast path for empty/whitespace input (<1μs)
-   2. **PathCommandHandler**: Executable paths with platform-specific checks - Unix: executable bit check, Windows: .exe/.bat/.cmd extensions (~10μs)
-   3. **KnownCommandHandler**: Whitelist of 60+ DevOps commands + cached PATH verification (<1μs cache hit, 1-5ms cache miss)
-   4. **CommandSyntaxHandler**: Shell syntax detection - flags (--/-), pipes (|), redirects (>/</>>), logical operators (&&/||), env vars ($VAR), subshells ($()/ backticks) (~10μs)
-   5. **TypoDetectionHandler**: Levenshtein distance ≤2 typo detection with `strsim` crate - prevents expensive LLM calls for "dokcer" → "docker" (~100μs)
-   6. **NaturalLanguageHandler**: English-only patterns (question words, articles, polite phrases) using precompiled regex - delegates multilingual to LLM (~5μs)
-   7. **DefaultHandler**: Fallback to natural language - guarantees result, never panics (<1μs)
+   2. **ShellBuiltinHandler**: Shell builtins (45+) without PATH verification - punctuation (`.`, `:`, `[`, `[[`), evaluation (eval, exec), variables (export, unset, set), I/O (echo, printf), job control (jobs, fg, bg) (<1μs)
+   3. **PathCommandHandler**: Executable paths with platform-specific checks - Unix: executable bit check, Windows: .exe/.bat/.cmd extensions (~10μs)
+   4. **KnownCommandHandler**: Whitelist of 60+ DevOps commands + cached PATH verification (<1μs cache hit, 1-5ms cache miss)
+   5. **CommandSyntaxHandler**: Shell syntax detection - flags (--/-), pipes (|), redirects (>/</>>), logical operators (&&/||), env vars ($VAR), subshells ($()/ backticks) (~10μs)
+   6. **TypoDetectionHandler**: Levenshtein distance ≤2 typo detection with `strsim` crate - prevents expensive LLM calls for "dokcer" → "docker" (~100μs)
+   7. **NaturalLanguageHandler**: English-only patterns (question words, articles, polite phrases) using precompiled regex - delegates multilingual to LLM (~5μs)
+   8. **DefaultHandler**: Fallback to natural language - guarantees result, never panics (<1μs)
 
    **Performance Optimizations** (see `benches/scan_benchmark.rs`):
    - **Precompiled RegexSet**: `once_cell::Lazy<CompiledPatterns>` compiles patterns once at startup (10-100x speedup)
@@ -370,7 +376,10 @@ The **SCAN Algorithm** (Shell-Command And Natural-language) is the core input cl
 ## Implementation Status & Known Limitations
 
 ### ✅ Completed (Production-Ready)
-- **SCAN Algorithm**: All 7 handlers implemented with performance optimizations
+- **SCAN Algorithm**: All 8 handlers implemented with performance optimizations
+  - Shell builtin support (45+): Punctuation (`.`, `:`, `[`, `[[`), evaluation (eval, exec), variables (export, unset, set), I/O (echo, printf), job control (jobs, fg, bg)
+  - Execution via `sh -c` for proper builtin interpretation
+  - Performance: <1μs handler overhead
 - **Alias Support**: System and user alias loading + single-level expansion with security validation
   - Loads from: `/etc/bash.bashrc`, `/etc/bashrc`, `/etc/profile`, `/etc/profile.d/*.sh`, `~/.bashrc`, `~/.bash_aliases`, `~/.zshrc`
   - User aliases override system aliases (priority ordering)
@@ -383,9 +392,10 @@ The **SCAN Algorithm** (Shell-Command And Natural-language) is the core input cl
 - **Precompiled Patterns**: Zero runtime regex compilation overhead
 - **Cross-Platform**: Windows/macOS/Linux support with platform-specific handlers
 - **Benchmarking**: Performance benchmarks in `benches/scan_benchmark.rs`
-- **Test Coverage**: 236+ tests passing, 0 clippy warnings, serial tests for shared state
+- **Test Coverage**: 267+ tests passing, 0 clippy warnings, serial tests for shared state
 - **Interactive Command Blocking**: 43 commands blocked with user-friendly suggestions
 - **Known Commands Module**: Single source of truth for 60+ DevOps commands
+- **Shell Builtin Support**: 45+ builtins recognized without PATH verification
 
 ### ⚠️ Known Limitations (Deferred to M2/M3)
 - **Auto-install**: Framework exists, prompts user but doesn't execute installation
