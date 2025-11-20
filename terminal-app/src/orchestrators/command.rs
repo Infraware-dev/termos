@@ -7,7 +7,9 @@
 /// - Formatting command output
 use anyhow::Result;
 
+use crate::executor::command::CommandOutput;
 use crate::executor::{CommandExecutor, PackageInstaller};
+use crate::input::shell_builtins::ShellBuiltinHandler;
 use crate::terminal::{TerminalState, TerminalUI};
 use crate::utils::MessageFormatter;
 
@@ -49,8 +51,21 @@ impl CommandOrchestrator {
             return self.handle_clear_command(state, ui);
         }
 
-        // Check if command exists (skip check if using shell interpretation)
-        if original_input.is_none() && !CommandExecutor::command_exists(cmd) {
+        // Handle reload-aliases built-in command
+        if cmd == "reload-aliases" {
+            return self.handle_reload_aliases_command(state).await;
+        }
+
+        // Check if command exists (skip check if using shell interpretation, shell builtin, or history expansion)
+        // Shell builtins don't exist in PATH but are valid commands that must be executed via shell
+        // History expansions (!!, !$, etc.) should have been expanded by HistoryExpansionHandler
+        let is_history_expansion = cmd.starts_with('!');
+
+        if original_input.is_none()
+            && !ShellBuiltinHandler::requires_shell_execution(cmd)
+            && !is_history_expansion
+            && !CommandExecutor::command_exists(cmd)
+        {
             self.handle_command_not_found(cmd, state);
             return Ok(());
         }
@@ -66,6 +81,39 @@ impl CommandOrchestrator {
         state.output.clear();
         // Force a complete terminal clear to prevent spurious characters
         ui.clear()?;
+        Ok(())
+    }
+
+    /// Handle the built-in "reload-aliases" command
+    ///
+    /// Reloads system aliases from /etc/bash.bashrc, /etc/bashrc, etc.
+    /// Uses spawn_blocking to avoid blocking the async executor during file I/O.
+    async fn handle_reload_aliases_command(&self, state: &mut TerminalState) -> Result<()> {
+        use crate::input::discovery::CommandCache;
+
+        state.add_output(MessageFormatter::info("Reloading system aliases..."));
+
+        // Spawn blocking task to avoid blocking the async executor
+        // File I/O is blocking, so we use spawn_blocking as recommended by Tokio
+        let result = tokio::task::spawn_blocking(CommandCache::load_system_aliases).await;
+
+        match result {
+            Ok(Ok(())) => {
+                state.add_output(MessageFormatter::success(
+                    "System aliases reloaded successfully",
+                ));
+            }
+            Ok(Err(e)) => {
+                state.add_output(MessageFormatter::error(format!(
+                    "Failed to reload aliases: {}",
+                    e
+                )));
+            }
+            Err(e) => {
+                state.add_output(MessageFormatter::error(format!("Task panicked: {}", e)));
+            }
+        }
+
         Ok(())
     }
 
@@ -107,7 +155,10 @@ impl CommandOrchestrator {
                     }
                 }
 
-                if !output.is_success() {
+                // Only show "Command failed" for truly problematic exit codes
+                // Exit code 1 is often used semantically (grep no match, diff found differences)
+                // so we suppress the error message if the command produced output
+                if !output.is_success() && !self.is_benign_failure(&output) {
                     state.add_output(MessageFormatter::command_failed(output.exit_code));
                 }
             }
@@ -117,6 +168,21 @@ impl CommandOrchestrator {
         }
 
         Ok(())
+    }
+
+    /// Check if a non-zero exit code is likely benign (semantic result, not error)
+    ///
+    /// Commands like grep, diff, test use exit code 1 to indicate semantic results:
+    /// - grep: no matches found (exit 1, no output)
+    /// - diff: files differ (exit 1, with differences)
+    /// - test/[: condition false (exit 1, no output)
+    ///
+    /// Exit code 1 is commonly used for semantic results rather than errors.
+    /// Exit code 2+ usually indicates actual errors (syntax error, file not found, etc.)
+    fn is_benign_failure(&self, output: &CommandOutput) -> bool {
+        // Exit code 1 is often semantic (grep no match, diff differences, test false)
+        // Exit code 2+ usually indicates real errors
+        output.exit_code == 1
     }
 }
 
@@ -162,7 +228,7 @@ mod tests {
         let orchestrator = CommandOrchestrator::new();
         let mut state = TerminalState::new();
 
-        // Execute command that fails
+        // Execute command that fails with exit 1 (benign failure)
         orchestrator
             .execute_and_display(
                 "sh",
@@ -173,8 +239,8 @@ mod tests {
             .await
             .unwrap();
 
-        // Should have error message about exit code
-        assert!(state
+        // Exit 1 is benign, should NOT show "exited with code" message
+        assert!(!state
             .output
             .lines()
             .iter()
@@ -272,5 +338,85 @@ mod tests {
 
         // true command produces no output, state might be empty or have minimal output
         // Just verify it doesn't panic
+    }
+
+    #[tokio::test]
+    async fn test_grep_no_match_exit_1_benign() {
+        let orchestrator = CommandOrchestrator::new();
+        let mut state = TerminalState::new();
+
+        // grep with no match returns exit 1 (benign, not an error)
+        orchestrator
+            .execute_and_display(
+                "sh",
+                &[],
+                Some("echo 'hello world' | grep 'nonexistent'"),
+                &mut state,
+            )
+            .await
+            .unwrap();
+
+        // Should NOT show "Command exited with code 1" message
+        // because exit 1 is benign for grep
+        let output_str = state.output.lines().join("\n");
+        assert!(!output_str.contains("exited with code"));
+    }
+
+    #[tokio::test]
+    async fn test_exit_code_2_shows_error() {
+        let orchestrator = CommandOrchestrator::new();
+        let mut state = TerminalState::new();
+
+        // Exit code 2 should show error message (real error)
+        orchestrator
+            .execute_and_display(
+                "sh",
+                &["-c".to_string(), "exit 2".to_string()],
+                None,
+                &mut state,
+            )
+            .await
+            .unwrap();
+
+        // Should show "Command exited with code 2" message
+        let output_str = state.output.lines().join("\n");
+        assert!(output_str.contains("exited with code 2"));
+    }
+
+    #[test]
+    fn test_is_benign_failure() {
+        let orchestrator = CommandOrchestrator::new();
+
+        // Exit code 1 is benign
+        let benign = CommandOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 1,
+        };
+        assert!(orchestrator.is_benign_failure(&benign));
+
+        // Exit code 0 is success (not a failure at all)
+        let success = CommandOutput {
+            stdout: "output".to_string(),
+            stderr: String::new(),
+            exit_code: 0,
+        };
+        assert!(!orchestrator.is_benign_failure(&success));
+
+        // Exit code 2+ is a real error
+        let error = CommandOutput {
+            stdout: String::new(),
+            stderr: "error".to_string(),
+            exit_code: 2,
+        };
+        assert!(!orchestrator.is_benign_failure(&error));
+
+        // Exit code 127 (command not found) is a real error
+        let not_found = CommandOutput {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: 127,
+        };
+        assert!(!orchestrator.is_benign_failure(&not_found));
     }
 }

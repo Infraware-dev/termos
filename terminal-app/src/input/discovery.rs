@@ -188,6 +188,103 @@ impl CommandCache {
         cache.aliases = aliases;
     }
 
+    /// Load system-wide aliases from global configuration files
+    ///
+    /// Searches for and parses:
+    /// - `/etc/bash.bashrc` (Debian/Ubuntu)
+    /// - `/etc/bashrc` (RedHat/CentOS/Fedora)
+    /// - `/etc/profile`
+    /// - `/etc/profile.d/*.sh`
+    ///
+    /// System aliases are merged with user aliases (user aliases take precedence).
+    ///
+    /// # Performance
+    /// This is a blocking I/O operation (~1-5ms). Use with `spawn_blocking` in async context.
+    ///
+    /// # Example
+    /// ```no_run
+    /// use infraware_terminal::input::discovery::CommandCache;
+    ///
+    /// CommandCache::load_system_aliases();
+    /// ```
+    pub fn load_system_aliases() -> Result<(), String> {
+        let mut aliases = HashMap::new();
+
+        // System-wide alias files (in priority order)
+        let system_files = vec![
+            "/etc/bash.bashrc", // Debian/Ubuntu
+            "/etc/bashrc",      // RedHat/CentOS/Fedora
+            "/etc/profile",     // Generic
+        ];
+
+        for file_path in system_files {
+            if let Ok(content) = fs::read_to_string(file_path) {
+                aliases.extend(parse_aliases(&content));
+            }
+            // Ignore files that don't exist - different distros have different files
+        }
+
+        // Check /etc/profile.d/*.sh files
+        if let Ok(entries) = fs::read_dir("/etc/profile.d") {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|s| s.to_str()) == Some("sh") {
+                    if let Ok(content) = fs::read_to_string(&path) {
+                        aliases.extend(parse_aliases(&content));
+                    }
+                }
+            }
+        }
+
+        // Update cache - merge with existing aliases (user aliases take precedence)
+        let mut cache = match COMMAND_CACHE.write() {
+            Ok(cache) => cache,
+            Err(poisoned) => {
+                eprintln!("Warning: Command cache write lock was poisoned, recovering...");
+                poisoned.into_inner()
+            }
+        };
+
+        // Merge: system aliases first, then user aliases override
+        let mut merged = aliases;
+        merged.extend(cache.aliases.clone());
+        cache.aliases = merged;
+
+        Ok(())
+    }
+
+    /// Expand an alias (single-level expansion like Bash)
+    ///
+    /// Returns the expansion if the name is an alias, None otherwise.
+    /// Does NOT recursively expand chained aliases - that's handled by the classifier
+    /// re-calling classify on the expanded result.
+    ///
+    /// # Arguments
+    /// * `alias_name` - The alias to expand
+    ///
+    /// # Returns
+    /// * `Some(expanded)` - The expansion of the alias
+    /// * `None` - If not an alias
+    ///
+    /// # Example
+    /// ```no_run
+    /// use infraware_terminal::input::discovery::CommandCache;
+    ///
+    /// // If alias: ll='ls -la'
+    /// assert_eq!(CommandCache::expand_alias("ll"), Some("ls -la".to_string()));
+    /// ```
+    pub fn expand_alias(alias_name: &str) -> Option<String> {
+        let cache = match COMMAND_CACHE.read() {
+            Ok(cache) => cache,
+            Err(poisoned) => {
+                eprintln!("Warning: Command cache read lock was poisoned, recovering...");
+                poisoned.into_inner()
+            }
+        };
+
+        cache.aliases.get(alias_name).cloned()
+    }
+
     /// Clear the entire cache (useful for testing or when PATH changes)
     ///
     /// # Example
@@ -237,12 +334,52 @@ pub struct CacheStats {
     pub alias_count: usize,
 }
 
+/// Check if an alias value contains potentially dangerous patterns
+///
+/// This is a security measure to prevent malicious aliases from being loaded
+/// from system configuration files.
+///
+/// # Arguments
+/// * `name` - The alias name
+/// * `value` - The alias value to check
+///
+/// # Returns
+/// `true` if the alias is safe, `false` if it contains dangerous patterns
+fn is_safe_alias(name: &str, value: &str) -> bool {
+    // List of dangerous command patterns that should be rejected
+    const DANGEROUS_PATTERNS: &[&str] = &[
+        "rm -rf /",        // Recursive delete from root
+        "rm -rf /*",       // Recursive delete all
+        "mkfs",            // Format filesystem
+        "dd if=/dev/zero", // Wipe disk
+        ":(){ :|:& };:",   // Fork bomb
+        "chmod -R 777 /",  // Chmod everything
+        "chown -R root /", // Chown everything to root
+        "> /dev/sda",      // Direct disk write
+        "mkfs.",           // Any mkfs variant
+    ];
+
+    for pattern in DANGEROUS_PATTERNS {
+        if value.contains(pattern) {
+            eprintln!(
+                "Warning: Rejecting potentially dangerous alias '{}': contains '{}'",
+                name, pattern
+            );
+            return false;
+        }
+    }
+
+    true
+}
+
 /// Parse shell alias definitions from config file content
 ///
 /// Supports formats:
 /// - `alias ll='ls -la'`
 /// - `alias ll="ls -la"`
 /// - `alias ll=ls\ -la`
+///
+/// Security: Rejects aliases with potentially dangerous patterns (rm -rf /, mkfs, etc.)
 ///
 /// # Arguments
 /// * `content` - The file content to parse
@@ -253,7 +390,7 @@ pub struct CacheStats {
 fn parse_aliases(content: &str) -> HashMap<String, String> {
     let mut aliases = HashMap::new();
 
-    for line in content.lines() {
+    for (line_num, line) in content.lines().enumerate() {
         let trimmed = line.trim();
 
         // Skip comments and empty lines
@@ -267,6 +404,25 @@ fn parse_aliases(content: &str) -> HashMap<String, String> {
                 let name = alias_def[..eq_pos].trim();
                 let value = alias_def[eq_pos + 1..].trim();
 
+                // Validate alias name is not empty
+                if name.is_empty() {
+                    eprintln!(
+                        "Warning: Malformed alias on line {}: empty name",
+                        line_num + 1
+                    );
+                    continue;
+                }
+
+                // Validate alias value is not empty
+                if value.is_empty() {
+                    eprintln!(
+                        "Warning: Malformed alias '{}' on line {}: empty value",
+                        name,
+                        line_num + 1
+                    );
+                    continue;
+                }
+
                 // Remove quotes if present
                 let value = value
                     .strip_prefix('\'')
@@ -274,7 +430,17 @@ fn parse_aliases(content: &str) -> HashMap<String, String> {
                     .or_else(|| value.strip_prefix('"').and_then(|s| s.strip_suffix('"')))
                     .unwrap_or(value);
 
+                // Security check: reject dangerous aliases
+                if !is_safe_alias(name, value) {
+                    continue;
+                }
+
                 aliases.insert(name.to_string(), value.to_string());
+            } else {
+                eprintln!(
+                    "Warning: Malformed alias on line {}: no '=' found",
+                    line_num + 1
+                );
             }
         }
     }
@@ -287,6 +453,7 @@ mod tests {
     use super::*;
 
     #[test]
+    #[serial_test::serial]
     fn test_command_availability() {
         // Clear cache before testing
         CommandCache::clear();
@@ -308,6 +475,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn test_command_caching() {
         CommandCache::clear();
 
@@ -399,6 +567,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn test_cache_clear() {
         // Add some entries
         CommandCache::is_available("ls");
@@ -415,6 +584,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn test_alias_loading() {
         // Note: This test may not find aliases if user doesn't have them
         // It should not fail, just verify the function runs without errors
@@ -427,6 +597,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn test_is_alias() {
         CommandCache::clear();
 
@@ -453,6 +624,7 @@ mod tests {
     }
 
     #[test]
+    #[serial_test::serial]
     fn test_get_alias_expansion() {
         CommandCache::clear();
 
@@ -475,6 +647,126 @@ mod tests {
             Some("ls -la".to_string())
         );
         assert_eq!(CommandCache::get_alias_expansion("nonexistent"), None);
+
+        CommandCache::clear();
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_expand_alias_simple() {
+        CommandCache::clear();
+
+        // Add a simple alias
+        {
+            let mut cache = match COMMAND_CACHE.write() {
+                Ok(cache) => cache,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            cache.aliases.insert("ll".to_string(), "ls -la".to_string());
+        }
+
+        assert_eq!(CommandCache::expand_alias("ll"), Some("ls -la".to_string()));
+        assert_eq!(CommandCache::expand_alias("ls"), None);
+
+        CommandCache::clear();
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_expand_alias_chained() {
+        CommandCache::clear();
+
+        // Add chained aliases: l -> ll -> ls -la
+        // Single-level expansion: l expands to "ll" only
+        {
+            let mut cache = match COMMAND_CACHE.write() {
+                Ok(cache) => cache,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            cache.aliases.insert("ll".to_string(), "ls -la".to_string());
+            cache.aliases.insert("l".to_string(), "ll".to_string());
+        }
+
+        // Single-level expansion
+        assert_eq!(CommandCache::expand_alias("l"), Some("ll".to_string()));
+        assert_eq!(CommandCache::expand_alias("ll"), Some("ls -la".to_string()));
+
+        CommandCache::clear();
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_expand_alias_circular() {
+        CommandCache::clear();
+
+        // Add circular aliases: a -> b -> a
+        // Single-level expansion doesn't detect cycles - that's OK
+        {
+            let mut cache = match COMMAND_CACHE.write() {
+                Ok(cache) => cache,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            cache.aliases.insert("a".to_string(), "b".to_string());
+            cache.aliases.insert("b".to_string(), "a".to_string());
+        }
+
+        // Single-level expansion just returns the direct expansion
+        assert_eq!(CommandCache::expand_alias("a"), Some("b".to_string()));
+        assert_eq!(CommandCache::expand_alias("b"), Some("a".to_string()));
+
+        CommandCache::clear();
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_load_system_aliases() {
+        CommandCache::clear();
+
+        // This test will work on systems with /etc/bash.bashrc or /etc/bashrc
+        // On systems without these files, it should not fail
+        let result = CommandCache::load_system_aliases();
+
+        // Should succeed even if no files found
+        assert!(result.is_ok());
+
+        // Just verify it doesn't panic
+        let _stats = CommandCache::stats();
+
+        CommandCache::clear();
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn test_alias_priority_user_over_system() {
+        CommandCache::clear();
+
+        // Simulate system alias
+        {
+            let mut cache = match COMMAND_CACHE.write() {
+                Ok(cache) => cache,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            cache
+                .aliases
+                .insert("test_cmd".to_string(), "system_value".to_string());
+        }
+
+        // Load user aliases (which should override system)
+        {
+            let mut cache = match COMMAND_CACHE.write() {
+                Ok(cache) => cache,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            cache
+                .aliases
+                .insert("test_cmd".to_string(), "user_value".to_string());
+        }
+
+        // User alias should take precedence
+        assert_eq!(
+            CommandCache::get_alias_expansion("test_cmd"),
+            Some("user_value".to_string())
+        );
 
         CommandCache::clear();
     }

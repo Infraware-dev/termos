@@ -44,6 +44,8 @@ pub struct InfrawareTerminal {
     command_orchestrator: CommandOrchestrator,
     nl_orchestrator: NaturalLanguageOrchestrator,
     tab_completion_handler: TabCompletionHandler,
+    /// Shared history for history expansion (synchronized with state.history)
+    history_arc: Arc<std::sync::RwLock<Vec<String>>>,
 }
 
 /// Builder for InfrawareTerminal
@@ -165,17 +167,32 @@ impl InfrawareTerminalBuilder {
             .unwrap_or_else(|| Arc::new(MockLLMClient::new()));
         let renderer = self.renderer.unwrap_or_default();
 
+        // Create state
+        let state = self.state.unwrap_or_default();
+
+        // Create a shared reference to the history for the classifier
+        // The history is owned by state, but we create an Arc<RwLock> wrapper
+        // that the classifier can use for history expansion
+        let history_vec = Arc::new(std::sync::RwLock::new(state.history.all().to_vec()));
+
+        // Create classifier with history support
+        let classifier = match self.classifier {
+            Some(c) => c,
+            None => InputClassifier::new().with_history(history_vec.clone()),
+        };
+
         Ok(InfrawareTerminal {
             ui: match self.ui {
                 Some(ui) => ui,
                 None => TerminalUI::new()?,
             },
-            state: self.state.unwrap_or_default(),
-            classifier: self.classifier.unwrap_or_default(),
+            state,
+            classifier,
             event_handler: self.event_handler.unwrap_or_default(),
             command_orchestrator: self.command_orchestrator.unwrap_or_default(),
             nl_orchestrator: NaturalLanguageOrchestrator::new(llm_client, renderer),
             tab_completion_handler: self.tab_completion_handler.unwrap_or_default(),
+            history_arc: history_vec,
         })
     }
 }
@@ -207,12 +224,26 @@ impl InfrawareTerminal {
 
     /// Run the main event loop
     async fn run(&mut self) -> Result<()> {
+        // Load aliases at startup (async, non-blocking)
+        // Use spawn_blocking for file I/O to avoid blocking the executor
+        tokio::task::spawn_blocking(|| {
+            use input::discovery::CommandCache;
+
+            // Load system aliases first
+            if let Err(e) = CommandCache::load_system_aliases() {
+                eprintln!("Warning: Failed to load system aliases: {}", e);
+            }
+
+            // Load user aliases (these override system aliases)
+            CommandCache::load_user_aliases();
+        });
+
         // Display welcome message
         self.state.add_output(MessageFormatter::banner_line(
             "╔══════════════════════════════════════════════════════════════╗",
         ));
         self.state.add_output(MessageFormatter::banner_line(
-            "║   Infraware Terminal - AI-Assisted DevOps Shell/cleasd       ║",
+            "║   Infraware Terminal - AI-Assisted DevOps Shell              ║",
         ));
         self.state.add_output(MessageFormatter::banner_line(
             "╚══════════════════════════════════════════════════════════════╝",
@@ -298,6 +329,15 @@ impl InfrawareTerminal {
 
         if input.trim().is_empty() {
             return Ok(());
+        }
+
+        // Sync history with Arc for history expansion
+        {
+            let mut history_guard = match self.history_arc.write() {
+                Ok(guard) => guard,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            *history_guard = self.state.history.all().to_vec();
         }
 
         // Echo the input

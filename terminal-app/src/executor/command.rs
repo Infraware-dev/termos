@@ -4,6 +4,8 @@ use std::process::Stdio;
 use tokio::process::Command as TokioCommand;
 use tokio::time::{timeout, Duration};
 
+use crate::input::shell_builtins::ShellBuiltinHandler;
+
 /// Output from a command execution
 #[derive(Debug, Clone, PartialEq)]
 pub struct CommandOutput {
@@ -106,6 +108,27 @@ impl CommandExecutor {
         Self::INTERACTIVE_COMMANDS.contains(&cmd)
     }
 
+    /// Check if a command is a shell builtin that must be executed through a shell
+    fn is_shell_builtin(cmd: &str) -> bool {
+        ShellBuiltinHandler::requires_shell_execution(cmd)
+    }
+
+    /// Get the platform-appropriate shell and shell command flag
+    ///
+    /// Returns a tuple of (shell_executable, command_flag):
+    /// - Unix/Linux/macOS: ("sh", "-c")
+    /// - Windows: ("cmd", "/C")
+    fn get_platform_shell() -> (&'static str, &'static str) {
+        #[cfg(target_os = "windows")]
+        {
+            ("cmd", "/C")
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            ("sh", "-c")
+        }
+    }
+
     /// Execute a command asynchronously with a 5-minute timeout
     ///
     /// # Arguments
@@ -145,10 +168,58 @@ impl CommandExecutor {
                 exit_code: 1,
             });
         }
-        // If original_input is provided, use sh -c for shell operator interpretation
+
+        // If command is a shell builtin, execute through shell
+        // Builtins like '.', ':', '[[', 'source', 'export' don't exist as standalone executables
+        if Self::is_shell_builtin(cmd) {
+            // Check if this is a Unix-only builtin on Windows
+            #[cfg(target_os = "windows")]
+            {
+                if ShellBuiltinHandler::is_unix_only(cmd) {
+                    return Ok(CommandOutput {
+                        stdout: String::new(),
+                        stderr: format!(
+                            "Shell builtin '{}' is not available on Windows.\n\
+                             This is a Unix/Linux shell builtin that requires bash or sh.",
+                            cmd
+                        ),
+                        exit_code: 1,
+                    });
+                }
+            }
+
+            // Reconstruct the full command from cmd + args
+            let full_command = if args.is_empty() {
+                cmd.to_string()
+            } else {
+                format!("{} {}", cmd, args.join(" "))
+            };
+
+            let (shell, shell_flag) = Self::get_platform_shell();
+            let execution = TokioCommand::new(shell)
+                .arg(shell_flag)
+                .arg(&full_command)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .output();
+
+            let output = timeout(Duration::from_secs(300), execution)
+                .await
+                .context("Command execution timed out after 5 minutes")??;
+
+            return Ok(CommandOutput {
+                stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+                stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+                exit_code: output.status.code().unwrap_or(-1),
+            });
+        }
+
+        // If original_input is provided, use platform shell for shell operator interpretation
         if let Some(shell_input) = original_input {
-            let execution = TokioCommand::new("sh")
-                .arg("-c")
+            let (shell, shell_flag) = Self::get_platform_shell();
+            let execution = TokioCommand::new(shell)
+                .arg(shell_flag)
                 .arg(shell_input)
                 .stdin(Stdio::null()) // Prevent interactive programs from blocking
                 .stdout(Stdio::piped())

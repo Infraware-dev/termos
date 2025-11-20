@@ -38,6 +38,7 @@ strsim = "0.11"  # Levenshtein distance for typo detection
 [dev-dependencies]
 tokio-test = "0.4"
 criterion = "0.5"  # Performance benchmarking
+serial_test = "3.0"  # Fix flaky tests with shared global state
 
 [[bench]]
 name = "scan_benchmark"
