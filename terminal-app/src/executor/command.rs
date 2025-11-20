@@ -4,6 +4,8 @@ use std::process::Stdio;
 use tokio::process::Command as TokioCommand;
 use tokio::time::{timeout, Duration};
 
+use crate::input::shell_builtins::ShellBuiltinHandler;
+
 /// Output from a command execution
 #[derive(Debug, Clone, PartialEq)]
 pub struct CommandOutput {
@@ -101,19 +103,6 @@ impl CommandExecutor {
         // They are already used internally for shell operator interpretation
     ];
 
-    /// List of shell builtin commands that must be executed through a shell
-    /// These commands are built into the shell and don't exist as standalone executables
-    const SHELL_BUILTINS: &'static [&'static str] = &[
-        ".",      // POSIX: source a file
-        ":",      // POSIX: no-op command
-        "[[",     // Bash/Zsh: extended test (not in POSIX, must use shell)
-        "source", // Bash: source a file (not in POSIX sh)
-        "alias", "unalias", "export", "unset", "set", "declare", "local", "readonly", "typeset",
-        "eval", "exec", "return", "exit", "break", "continue", "shift", "builtin", "command",
-        "enable", "type", "hash", "times", "umask", "ulimit", "pushd", "popd", "dirs",
-        "read", // May be interactive, but included as builtin
-    ];
-
     /// Check if a command is interactive and should be blocked
     fn is_interactive_command(cmd: &str) -> bool {
         Self::INTERACTIVE_COMMANDS.contains(&cmd)
@@ -121,7 +110,23 @@ impl CommandExecutor {
 
     /// Check if a command is a shell builtin that must be executed through a shell
     fn is_shell_builtin(cmd: &str) -> bool {
-        Self::SHELL_BUILTINS.contains(&cmd)
+        ShellBuiltinHandler::requires_shell_execution(cmd)
+    }
+
+    /// Get the platform-appropriate shell and shell command flag
+    ///
+    /// Returns a tuple of (shell_executable, command_flag):
+    /// - Unix/Linux/macOS: ("sh", "-c")
+    /// - Windows: ("cmd", "/C")
+    fn get_platform_shell() -> (&'static str, &'static str) {
+        #[cfg(target_os = "windows")]
+        {
+            ("cmd", "/C")
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            ("sh", "-c")
+        }
     }
 
     /// Execute a command asynchronously with a 5-minute timeout
@@ -167,6 +172,22 @@ impl CommandExecutor {
         // If command is a shell builtin, execute through shell
         // Builtins like '.', ':', '[[', 'source', 'export' don't exist as standalone executables
         if Self::is_shell_builtin(cmd) {
+            // Check if this is a Unix-only builtin on Windows
+            #[cfg(target_os = "windows")]
+            {
+                if ShellBuiltinHandler::is_unix_only(cmd) {
+                    return Ok(CommandOutput {
+                        stdout: String::new(),
+                        stderr: format!(
+                            "Shell builtin '{}' is not available on Windows.\n\
+                             This is a Unix/Linux shell builtin that requires bash or sh.",
+                            cmd
+                        ),
+                        exit_code: 1,
+                    });
+                }
+            }
+
             // Reconstruct the full command from cmd + args
             let full_command = if args.is_empty() {
                 cmd.to_string()
@@ -174,8 +195,9 @@ impl CommandExecutor {
                 format!("{} {}", cmd, args.join(" "))
             };
 
-            let execution = TokioCommand::new("sh")
-                .arg("-c")
+            let (shell, shell_flag) = Self::get_platform_shell();
+            let execution = TokioCommand::new(shell)
+                .arg(shell_flag)
                 .arg(&full_command)
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
@@ -193,10 +215,11 @@ impl CommandExecutor {
             });
         }
 
-        // If original_input is provided, use sh -c for shell operator interpretation
+        // If original_input is provided, use platform shell for shell operator interpretation
         if let Some(shell_input) = original_input {
-            let execution = TokioCommand::new("sh")
-                .arg("-c")
+            let (shell, shell_flag) = Self::get_platform_shell();
+            let execution = TokioCommand::new(shell)
+                .arg(shell_flag)
                 .arg(shell_input)
                 .stdin(Stdio::null()) // Prevent interactive programs from blocking
                 .stdout(Stdio::piped())

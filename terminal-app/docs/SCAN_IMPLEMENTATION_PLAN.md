@@ -9,7 +9,7 @@ This document outlined the plan for implementing the SCAN (Shell-Command And Nat
 **Final Metrics**:
 - Total SCAN code: 2,486 lines (33.3% of codebase)
 - Average classification: <100μs
-- Test coverage: 157 tests passing, 75% code coverage enforced
+- Test coverage: 229 tests passing, 75% code coverage enforced
 - Zero clippy warnings
 - Production-ready implementation
 
@@ -18,18 +18,19 @@ This document outlined the plan for implementing the SCAN (Shell-Command And Nat
 ### ✅ COMPLETED - All Features Implemented with Code Review Fixes
 
 **Chain of Responsibility Pattern** - Fully implemented in `src/input/handler.rs`
-- All 7 handlers implemented and tested
+- All 8 handlers implemented and tested
 - Handler chain executes in strict order
 - Clean separation of concerns (SRP)
 
 **Complete Handler Chain**:
 1. ✅ `EmptyInputHandler` - Fast path for empty/whitespace input
-2. ✅ `PathCommandHandler` - Executable paths with platform-specific checks
-3. ✅ `KnownCommandHandler` - 60+ DevOps commands with PATH verification
-4. ✅ `CommandSyntaxHandler` - Full shell syntax detection
-5. ✅ `TypoDetectionHandler` - Levenshtein distance typo detection
-6. ✅ `NaturalLanguageHandler` - English patterns with precompiled regex
-7. ✅ `DefaultHandler` - Fallback to natural language
+2. ✅ `ShellBuiltinHandler` - Shell builtins without PATH verification
+3. ✅ `PathCommandHandler` - Executable paths with platform-specific checks
+4. ✅ `KnownCommandHandler` - 60+ DevOps commands with PATH verification
+5. ✅ `CommandSyntaxHandler` - Full shell syntax detection
+6. ✅ `TypoDetectionHandler` - Levenshtein distance typo detection
+7. ✅ `NaturalLanguageHandler` - English patterns with precompiled regex
+8. ✅ `DefaultHandler` - Fallback to natural language
 
 ### ✅ All Original Limitations Addressed
 

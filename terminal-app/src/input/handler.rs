@@ -6,19 +6,6 @@ use anyhow::Result;
 
 use super::InputType;
 
-/// Check if input contains shell operators that require shell interpretation
-fn has_shell_operators(input: &str) -> bool {
-    input.contains('|')
-        || input.contains('>')
-        || input.contains('<')
-        || input.contains("&&")
-        || input.contains("||")
-        || input.contains(';')
-        || input.contains('&')
-        || input.contains("$(")
-        || input.contains('`')
-}
-
 /// Handler trait for the Chain of Responsibility pattern
 ///
 /// Each handler in the chain can either:
@@ -147,7 +134,8 @@ impl KnownCommandHandler {
         }
 
         // Preserve original input if it contains shell operators
-        let original_input = if has_shell_operators(input) {
+        let patterns = crate::input::patterns::CompiledPatterns::get();
+        let original_input = if patterns.has_shell_operators(input) {
             Some(input.to_string())
         } else {
             None
@@ -241,7 +229,8 @@ impl CommandSyntaxHandler {
         }
 
         // Preserve original input if it contains shell operators
-        let original_input = if has_shell_operators(input) {
+        let patterns = crate::input::patterns::CompiledPatterns::get();
+        let original_input = if patterns.has_shell_operators(input) {
             Some(input.to_string())
         } else {
             None
@@ -602,7 +591,8 @@ impl PathCommandHandler {
         }
 
         // Preserve original input if it contains shell operators
-        let original_input = if has_shell_operators(input) {
+        let patterns = crate::input::patterns::CompiledPatterns::get();
+        let original_input = if patterns.has_shell_operators(input) {
             Some(input.to_string())
         } else {
             None

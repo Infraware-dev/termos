@@ -9,6 +9,7 @@ use anyhow::Result;
 
 use crate::executor::command::CommandOutput;
 use crate::executor::{CommandExecutor, PackageInstaller};
+use crate::input::shell_builtins::ShellBuiltinHandler;
 use crate::terminal::{TerminalState, TerminalUI};
 use crate::utils::MessageFormatter;
 
@@ -55,8 +56,12 @@ impl CommandOrchestrator {
             return self.handle_reload_aliases_command(state).await;
         }
 
-        // Check if command exists (skip check if using shell interpretation)
-        if original_input.is_none() && !CommandExecutor::command_exists(cmd) {
+        // Check if command exists (skip check if using shell interpretation or if it's a shell builtin)
+        // Shell builtins don't exist in PATH but are valid commands that must be executed via shell
+        if original_input.is_none()
+            && !ShellBuiltinHandler::requires_shell_execution(cmd)
+            && !CommandExecutor::command_exists(cmd)
+        {
             self.handle_command_not_found(cmd, state);
             return Ok(());
         }

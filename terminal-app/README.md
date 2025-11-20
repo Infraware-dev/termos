@@ -41,7 +41,7 @@ This is the initial project setup with the complete module structure. Implementa
 - ✅ **Command History**: Navigate previous commands with arrow keys
 - ✅ **Cross-Platform**: Windows, macOS, and Linux support with platform-specific optimizations
 - ✅ **Benchmarking Suite**: Performance benchmarks for SCAN algorithm
-- ✅ **Code Quality**: 267+ tests passing, 0 clippy warnings, serial tests for shared state, production-ready code
+- ✅ **Code Quality**: 229 tests passing, 0 clippy warnings, serial tests for shared state, production-ready code
 
 ### Coming in M2/M3
 
@@ -58,13 +58,13 @@ This is the initial project setup with the complete module structure. Implementa
 The core of Infraware Terminal is the **SCAN algorithm** - a high-performance input classification system using the Chain of Responsibility pattern:
 
 ```
-User Input → InputClassifier (7-Handler Chain)
-                     ↓
-    ┌────────────────┼────────────────┐
-    ↓                ↓                ↓
-Command          Typo?          Natural Language
-    ↓                ↓                ↓
-Shell Exec    Suggestion        LLM Backend
+User Input → Alias Expansion → InputClassifier (8-Handler Chain)
+                (if matches)           ↓
+                              ┌────────┼────────┐
+                              ↓        ↓        ↓
+                          Command    Typo?   Natural Language
+                              ↓        ↓        ↓
+                          Shell Exec Suggest LLM Backend
 ```
 
 **8-Handler Chain** (executed in strict order):
@@ -269,7 +269,7 @@ xdg-open target/criterion/report/index.html  # Linux
 - [x] Terminal state composition (SRP-compliant buffers)
 
 **Week 2-3: SCAN Algorithm Implementation** ✅
-- [x] 7-handler Chain of Responsibility implementation
+- [x] 8-handler Chain of Responsibility implementation
 - [x] Precompiled RegexSet patterns (10-100x performance improvement)
 - [x] PATH-aware command discovery with thread-safe caching
 - [x] Levenshtein distance typo detection
@@ -280,7 +280,7 @@ xdg-open target/criterion/report/index.html  # Linux
 - [x] Auto-install framework (prompt logic implemented)
 
 **Week 4: Testing & Optimization** ✅
-- [x] Comprehensive test suite (157 tests passing)
+- [x] Comprehensive test suite (229 tests passing)
 - [x] Performance benchmarking suite
 - [x] Integration tests for end-to-end workflows
 - [x] Cross-platform testing (Ubuntu, Windows, macOS)

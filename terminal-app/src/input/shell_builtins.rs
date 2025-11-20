@@ -2,9 +2,33 @@
 ///
 /// This module provides detection for shell builtin commands that may not exist in PATH
 /// but are valid shell commands. This includes punctuation commands like `.`, `:`, `[`, `[[`.
+///
+/// # Platform Support
+///
+/// Most shell builtins are POSIX/bash-specific for Unix-like systems (Linux, macOS).
+/// On Windows, builtins are executed via `cmd.exe` which has different built-in commands.
+/// Unix builtins like `.`, `source`, `[[` are not available on Windows.
+///
+/// # Execution Model
+///
+/// Shell builtins are executed through the system shell (`sh -c` on Unix, `cmd /C` on Windows)
+/// rather than as direct executables, since they're built into the shell itself.
 use super::handler::InputHandler;
 use super::parser::CommandParser;
 use super::InputType;
+
+/// Metadata for a shell builtin command
+#[derive(Debug, Clone, Copy)]
+pub struct ShellBuiltinInfo {
+    /// The builtin command name
+    pub name: &'static str,
+    /// Whether this MUST be executed through a shell (true) or can also exist as standalone binary (false)
+    pub requires_shell: bool,
+    /// Whether this is Unix-only (not available on Windows)
+    /// Note: This field is used in conditional compilation for Windows targets
+    #[allow(dead_code)]
+    pub unix_only: bool,
+}
 
 /// Handler for shell builtin commands
 ///
@@ -43,69 +67,266 @@ impl ShellBuiltinHandler {
         Self { builtins }
     }
 
-    /// Default list of shell builtins to recognize
+    /// Get metadata for all shell builtins (single source of truth)
     ///
-    /// This list focuses on builtins that:
-    /// 1. Are not reliably in PATH
-    /// 2. Use punctuation or are commonly used
-    /// 3. Should be executed through a shell
-    pub fn default_builtins() -> Vec<&'static str> {
-        vec![
-            // Source commands (POSIX and bash)
-            ".",      // POSIX: source a file
-            "source", // Bash/Zsh: equivalent to .
-            // No-op and boolean commands (POSIX)
-            ":",     // No-op command (always succeeds)
-            "true",  // Always succeeds (exit 0)
-            "false", // Always fails (exit 1)
-            // Test commands (POSIX and bash)
-            "[",    // POSIX test command (also /usr/bin/[)
-            "[[",   // Bash/Zsh extended test
-            "test", // POSIX test command (also /usr/bin/test)
-            // Variable and environment commands
-            "export",   // Export environment variables
-            "unset",    // Unset variables
-            "set",      // Set shell options/positional parameters
-            "declare",  // Bash: declare variables with attributes
-            "local",    // Bash: declare local variables in functions
-            "readonly", // Mark variables as read-only
-            "typeset",  // Ksh/Zsh: declare variables
-            // Evaluation and execution
-            "eval",   // Evaluate arguments as shell commands
-            "exec",   // Replace shell with command
-            "return", // Return from function
-            "exit",   // Exit shell
-            // Flow control
-            "break",    // Break out of loop
-            "continue", // Continue to next iteration
-            "shift",    // Shift positional parameters
-            // Alias management
-            "alias",   // Define command aliases
-            "unalias", // Remove aliases
-            // I/O and read commands
-            "read",   // Read input (may be interactive)
-            "echo",   // Print to stdout (builtin in bash)
-            "printf", // Formatted print (builtin in bash)
-            // Job control
-            "jobs", // List jobs
-            "fg",   // Foreground job
-            "bg",   // Background job
-            "wait", // Wait for job completion
-            // Directory stack
-            "pushd", // Push directory onto stack
-            "popd",  // Pop directory from stack
-            "dirs",  // Display directory stack
-            // Builtin command management
-            "builtin", // Run builtin command
-            "command", // Run command bypassing functions
-            "enable",  // Enable/disable builtins
-            // Miscellaneous
-            "type",   // Display command type
-            "hash",   // Remember/display command locations
-            "times",  // Display process times
-            "umask",  // Set file creation mask
-            "ulimit", // Set resource limits
+    /// This is the authoritative list of shell builtins with platform and execution metadata.
+    /// Other parts of the codebase should query this list rather than maintaining their own.
+    pub fn builtin_info() -> &'static [ShellBuiltinInfo] {
+        &[
+            // Source commands (POSIX and bash) - MUST use shell, Unix-only
+            ShellBuiltinInfo {
+                name: ".",
+                requires_shell: true,
+                unix_only: true,
+            },
+            ShellBuiltinInfo {
+                name: "source",
+                requires_shell: true,
+                unix_only: true,
+            },
+            // No-op command - MUST use shell, Unix-only
+            ShellBuiltinInfo {
+                name: ":",
+                requires_shell: true,
+                unix_only: true,
+            },
+            // Boolean commands - can exist as /usr/bin/true and /usr/bin/false but prefer shell
+            ShellBuiltinInfo {
+                name: "true",
+                requires_shell: false,
+                unix_only: true,
+            },
+            ShellBuiltinInfo {
+                name: "false",
+                requires_shell: false,
+                unix_only: true,
+            },
+            // Test commands
+            ShellBuiltinInfo {
+                name: "[",
+                requires_shell: false,
+                unix_only: true,
+            }, // Also /usr/bin/[
+            ShellBuiltinInfo {
+                name: "[[",
+                requires_shell: true,
+                unix_only: true,
+            }, // Bash/Zsh only
+            ShellBuiltinInfo {
+                name: "test",
+                requires_shell: false,
+                unix_only: true,
+            }, // Also /usr/bin/test
+            // Variable and environment commands - MUST use shell
+            ShellBuiltinInfo {
+                name: "export",
+                requires_shell: true,
+                unix_only: true,
+            },
+            ShellBuiltinInfo {
+                name: "unset",
+                requires_shell: true,
+                unix_only: true,
+            },
+            ShellBuiltinInfo {
+                name: "set",
+                requires_shell: true,
+                unix_only: true,
+            },
+            ShellBuiltinInfo {
+                name: "declare",
+                requires_shell: true,
+                unix_only: true,
+            },
+            ShellBuiltinInfo {
+                name: "local",
+                requires_shell: true,
+                unix_only: true,
+            },
+            ShellBuiltinInfo {
+                name: "readonly",
+                requires_shell: true,
+                unix_only: true,
+            },
+            ShellBuiltinInfo {
+                name: "typeset",
+                requires_shell: true,
+                unix_only: true,
+            },
+            // Evaluation and execution - MUST use shell
+            ShellBuiltinInfo {
+                name: "eval",
+                requires_shell: true,
+                unix_only: true,
+            },
+            ShellBuiltinInfo {
+                name: "exec",
+                requires_shell: true,
+                unix_only: true,
+            },
+            ShellBuiltinInfo {
+                name: "return",
+                requires_shell: true,
+                unix_only: true,
+            },
+            ShellBuiltinInfo {
+                name: "exit",
+                requires_shell: true,
+                unix_only: true,
+            },
+            // Flow control - MUST use shell
+            ShellBuiltinInfo {
+                name: "break",
+                requires_shell: true,
+                unix_only: true,
+            },
+            ShellBuiltinInfo {
+                name: "continue",
+                requires_shell: true,
+                unix_only: true,
+            },
+            ShellBuiltinInfo {
+                name: "shift",
+                requires_shell: true,
+                unix_only: true,
+            },
+            // Alias management - MUST use shell
+            ShellBuiltinInfo {
+                name: "alias",
+                requires_shell: true,
+                unix_only: true,
+            },
+            ShellBuiltinInfo {
+                name: "unalias",
+                requires_shell: true,
+                unix_only: true,
+            },
+            // I/O commands - prefer shell but can exist as standalone
+            ShellBuiltinInfo {
+                name: "read",
+                requires_shell: true,
+                unix_only: true,
+            },
+            ShellBuiltinInfo {
+                name: "echo",
+                requires_shell: false,
+                unix_only: false,
+            }, // Cross-platform
+            ShellBuiltinInfo {
+                name: "printf",
+                requires_shell: false,
+                unix_only: true,
+            },
+            // Job control - MUST use shell
+            ShellBuiltinInfo {
+                name: "jobs",
+                requires_shell: true,
+                unix_only: true,
+            },
+            ShellBuiltinInfo {
+                name: "fg",
+                requires_shell: true,
+                unix_only: true,
+            },
+            ShellBuiltinInfo {
+                name: "bg",
+                requires_shell: true,
+                unix_only: true,
+            },
+            ShellBuiltinInfo {
+                name: "wait",
+                requires_shell: true,
+                unix_only: true,
+            },
+            // Directory stack - MUST use shell
+            ShellBuiltinInfo {
+                name: "pushd",
+                requires_shell: true,
+                unix_only: true,
+            },
+            ShellBuiltinInfo {
+                name: "popd",
+                requires_shell: true,
+                unix_only: true,
+            },
+            ShellBuiltinInfo {
+                name: "dirs",
+                requires_shell: true,
+                unix_only: true,
+            },
+            // Builtin management - MUST use shell
+            ShellBuiltinInfo {
+                name: "builtin",
+                requires_shell: true,
+                unix_only: true,
+            },
+            ShellBuiltinInfo {
+                name: "command",
+                requires_shell: true,
+                unix_only: true,
+            },
+            ShellBuiltinInfo {
+                name: "enable",
+                requires_shell: true,
+                unix_only: true,
+            },
+            // System info - MUST use shell
+            ShellBuiltinInfo {
+                name: "type",
+                requires_shell: true,
+                unix_only: true,
+            },
+            ShellBuiltinInfo {
+                name: "hash",
+                requires_shell: true,
+                unix_only: true,
+            },
+            ShellBuiltinInfo {
+                name: "times",
+                requires_shell: true,
+                unix_only: true,
+            },
+            ShellBuiltinInfo {
+                name: "umask",
+                requires_shell: true,
+                unix_only: true,
+            },
+            ShellBuiltinInfo {
+                name: "ulimit",
+                requires_shell: true,
+                unix_only: true,
+            },
         ]
+    }
+
+    /// Default list of shell builtin names for classification
+    ///
+    /// Extracts just the names from builtin_info() for use in the handler.
+    pub fn default_builtins() -> Vec<&'static str> {
+        Self::builtin_info().iter().map(|info| info.name).collect()
+    }
+
+    /// Check if a command MUST be executed through a shell
+    ///
+    /// Returns true for builtins that don't exist as standalone executables
+    /// and must be run via `sh -c` (or `cmd /C` on Windows).
+    pub fn requires_shell_execution(cmd: &str) -> bool {
+        Self::builtin_info()
+            .iter()
+            .find(|info| info.name == cmd)
+            .map(|info| info.requires_shell)
+            .unwrap_or(false)
+    }
+
+    /// Check if a command is Unix-only and not available on Windows
+    /// Note: This function is used in conditional compilation for Windows targets
+    #[allow(dead_code)]
+    pub fn is_unix_only(cmd: &str) -> bool {
+        Self::builtin_info()
+            .iter()
+            .find(|info| info.name == cmd)
+            .map(|info| info.unix_only)
+            .unwrap_or(false)
     }
 
     /// Check if a word is a recognized shell builtin
@@ -129,21 +350,21 @@ impl InputHandler for ShellBuiltinHandler {
         if self.is_builtin(first_word) {
             // Parse as command using the standard parser
             match CommandParser::parse(input) {
-                Ok((command, args)) => Some(InputType::Command {
-                    command,
-                    args,
+                Ok((command, args)) => {
                     // Preserve original input for shell operators
-                    original_input: if input.contains('|')
-                        || input.contains('>')
-                        || input.contains('<')
-                        || input.contains('&')
-                        || input.contains(';')
-                    {
+                    let patterns = crate::input::patterns::CompiledPatterns::get();
+                    let original_input = if patterns.has_shell_operators(input) {
                         Some(input.to_string())
                     } else {
                         None
-                    },
-                }),
+                    };
+
+                    Some(InputType::Command {
+                        command,
+                        args,
+                        original_input,
+                    })
+                }
                 Err(_) => None,
             }
         } else {

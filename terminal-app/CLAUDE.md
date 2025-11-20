@@ -373,6 +373,47 @@ The **SCAN Algorithm** (Shell-Command And Natural-language) is the core input cl
      - `vim` → "Try 'cat' to view or edit externally"
      - `python` → "Pass code with -c flag: 'python -c \"code\"'"
 
+4. **Orchestrator Shell Builtin Bug Fix** (High Priority - FIXED)
+   - Location: `src/orchestrators/command.rs:59-67`
+   - Issue: Shell builtins (`:`, `.`, `export`, `[[`, etc.) were being classified correctly but failing during execution with "Command ':' not found"
+   - Root Cause: `CommandOrchestrator` was checking if command exists in PATH BEFORE executor, but shell builtins don't exist in PATH (they're built into shell)
+   - Fix: Changed PATH existence check to skip shell builtins:
+     - Before: `if original_input.is_none() && !CommandExecutor::command_exists(cmd)`
+     - After: `if original_input.is_none() && !ShellBuiltinHandler::requires_shell_execution(cmd) && !CommandExecutor::command_exists(cmd)`
+   - Impact: All 45 shell builtins now work end-to-end (`:`, `.`, `source`, `export`, `[[`, `eval`, `exec`, etc.)
+   - Pattern: Orchestrator now properly delegates shell builtins to executor which executes them via `sh -c`
+
+### ✅ Shell Builtin Code Review Fixes (Commit 50c2f0f follow-up)
+**Status**: All critical issues resolved - 229 tests passing, 0 clippy warnings
+
+1. **Windows Compatibility Fix** (High Priority - FIXED)
+   - Location: `src/executor/command.rs`
+   - Issue: Hardcoded `sh -c` for shell execution breaks on Windows
+   - Fix: Platform-specific shell detection via `get_platform_shell()`
+     - Unix/Linux/macOS: `("sh", "-c")`
+     - Windows: `("cmd", "/C")`
+   - Added Windows Unix-only builtin check to prevent running Unix builtins on Windows
+   - Impact: Cross-platform shell execution now works correctly
+
+2. **Shell Builtin List Deduplication** (High Priority - FIXED)
+   - Location: `src/input/shell_builtins.rs` + `src/executor/command.rs`
+   - Issue: 45 builtins in handler, only 19 in executor - inconsistent and unmaintainable
+   - Fix: Created single source of truth with `ShellBuiltinInfo` metadata structure
+     - `requires_shell: bool` - whether builtin MUST run via shell
+     - `unix_only: bool` - whether builtin is Unix/Linux-only
+   - All code now queries `ShellBuiltinHandler::builtin_info()` for authoritative list
+   - Added missing `[` and `test` to executor builtin recognition
+   - Benefit: Consistency, maintainability, platform-aware execution
+
+3. **Shell Operator Detection Duplication** (High Priority - FIXED)
+   - Location: `src/input/handler.rs` + `src/input/shell_builtins.rs`
+   - Issue: Shell operator detection logic duplicated in 3 places with inconsistent implementations
+   - Fix: Centralized all detection to `CompiledPatterns::has_shell_operators()`
+     - Uses precompiled regex for robust detection
+     - Single source of truth eliminates inconsistencies
+     - All handlers now use `crate::input::patterns::CompiledPatterns::get()`
+   - Impact: Consistent shell operator detection, easier to maintain
+
 ## Implementation Status & Known Limitations
 
 ### ✅ Completed (Production-Ready)
@@ -392,7 +433,7 @@ The **SCAN Algorithm** (Shell-Command And Natural-language) is the core input cl
 - **Precompiled Patterns**: Zero runtime regex compilation overhead
 - **Cross-Platform**: Windows/macOS/Linux support with platform-specific handlers
 - **Benchmarking**: Performance benchmarks in `benches/scan_benchmark.rs`
-- **Test Coverage**: 267+ tests passing, 0 clippy warnings, serial tests for shared state
+- **Test Coverage**: 229 tests passing, 0 clippy warnings
 - **Interactive Command Blocking**: 43 commands blocked with user-friendly suggestions
 - **Known Commands Module**: Single source of truth for 60+ DevOps commands
 - **Shell Builtin Support**: 45+ builtins recognized without PATH verification

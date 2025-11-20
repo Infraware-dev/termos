@@ -6,14 +6,14 @@ The **SCAN Algorithm** (Shell-Command And Natural-language) implements the **Cha
 
 **Status**: ✅ Production-Ready (M1 Complete)
 **Performance**: <100μs average classification
-**Test Coverage**: 157 tests passing
+**Test Coverage**: 229 tests passing
 
 ## Pattern Implementation
 
 ### SCAN Architecture
 
 ```
-User Input → InputClassifier → 7-Handler Chain (Strict Order)
+User Input → InputClassifier → 8-Handler Chain (Strict Order)
                                        ↓
         ┌────────────────────────────┼────────────────────────────┐
         ↓                            ↓                            ↓
@@ -41,7 +41,7 @@ Defines the interface for all handlers in the chain. Each handler can either:
 **Key Constraint**: Handlers execute in strict order - order matters for performance!
 
 #### 2. **InputClassifier**
-Coordinates the 7-handler chain and processes input sequentially.
+Coordinates the 8-handler chain and processes input sequentially.
 
 ```rust
 pub struct InputClassifier {
@@ -384,16 +384,16 @@ All expensive resources use `once_cell::Lazy` for zero-cost abstraction:
   - `src/input/patterns.rs` - Precompiled patterns (258 lines)
   - `src/input/discovery.rs` - Command cache (414 lines)
   - `src/input/typo_detection.rs` - Levenshtein distance (465 lines)
-- **Tests**: `tests/classifier_tests.rs` - 157 tests passing
+- **Tests**: `tests/classifier_tests.rs` - 229 tests passing
 - **Benchmarks**: `benches/scan_benchmark.rs` - Performance benchmarks
 - **Documentation**: `docs/SCAN_ARCHITECTURE.md` - Complete SCAN documentation (963 lines)
 
 ## Status
 
 **✅ Production-Ready (M1 Complete)**
-- All 7 handlers implemented and tested
+- All 8 handlers implemented and tested
 - Performance targets achieved (<100μs average)
 - Zero clippy warnings
-- 157 tests passing
+- 229 tests passing
 - 75% code coverage enforced by CI
 - Cross-platform support (Ubuntu, Windows, macOS)
