@@ -28,7 +28,9 @@ RUN apt-get update && \
 RUN uv pip install --system --upgrade \
     ruff \
     langgraph-cli \
-    'langgraph-cli[inmem]'
+    'langgraph-cli[inmem]' \
+    langchain-experimental 
+
 
 # Install package in editable mode (this will run after workspace is mounted)
 # Note: pip install -e . needs to run after the full codebase is available
