@@ -206,3 +206,39 @@ fn test_classify_shell_builtins() {
         _ => panic!("Expected Command for 'false'"),
     }
 }
+
+#[test]
+fn test_empty_quotes_no_panic() {
+    let classifier = InputClassifier::new();
+
+    // Empty quotes should not cause panic
+    let result1 = classifier.classify("\"\"");
+    assert!(result1.is_ok(), "Empty double quotes should not panic");
+
+    let result2 = classifier.classify("''");
+    assert!(result2.is_ok(), "Empty single quotes should not panic");
+
+    // Empty quotes with other content
+    let result3 = classifier.classify("\"\" --flag");
+    assert!(result3.is_ok(), "Empty quotes with flags should not panic");
+}
+
+#[test]
+fn test_malformed_input_no_panic() {
+    let classifier = InputClassifier::new();
+
+    // Malformed quotes - may return error, but should not panic
+    let result1 = classifier.classify("\"unclosed");
+    assert!(
+        result1.is_ok() || result1.is_err(),
+        "Unclosed quote should not panic"
+    );
+
+    // Multiple spaces
+    let result2 = classifier.classify("     ");
+    assert!(result2.is_ok(), "Multiple spaces should not panic");
+
+    // Special characters
+    let result3 = classifier.classify("@#$%^&*");
+    assert!(result3.is_ok(), "Special characters should not panic");
+}

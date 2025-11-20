@@ -68,8 +68,7 @@ impl TabCompletion {
         let prefix_part = if parts.len() > 1 { parts[1] } else { "" };
 
         // Split into directory and file prefix
-        let (dir, file_prefix) = if path_part.contains('/') {
-            let idx = path_part.rfind('/').unwrap();
+        let (dir, file_prefix) = if let Some(idx) = path_part.rfind('/') {
             (&path_part[..=idx], &path_part[idx + 1..])
         } else {
             (".", path_part)

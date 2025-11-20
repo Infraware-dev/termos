@@ -142,8 +142,8 @@ impl KnownCommandHandler {
         };
 
         Ok(InputType::Command {
-            command: parts[0].clone(),
-            args: parts[1..].to_vec(),
+            command: parts.first().cloned().unwrap_or_default(),
+            args: parts.get(1..).unwrap_or(&[]).to_vec(),
             original_input,
         })
     }
@@ -237,8 +237,8 @@ impl CommandSyntaxHandler {
         };
 
         Ok(InputType::Command {
-            command: parts[0].clone(),
-            args: parts[1..].to_vec(),
+            command: parts.first().cloned().unwrap_or_default(),
+            args: parts.get(1..).unwrap_or(&[]).to_vec(),
             original_input,
         })
     }
@@ -599,8 +599,8 @@ impl PathCommandHandler {
         };
 
         Ok(InputType::Command {
-            command: parts[0].clone(),
-            args: parts[1..].to_vec(),
+            command: parts.first().cloned().unwrap_or_default(),
+            args: parts.get(1..).unwrap_or(&[]).to_vec(),
             original_input,
         })
     }
