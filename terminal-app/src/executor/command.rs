@@ -276,7 +276,7 @@ impl CommandExecutor {
     }
 
     /// Execute a command with sudo privileges (M2/M3)
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Used by package_manager.rs
     pub async fn execute_sudo(cmd: &str, args: &[String]) -> Result<CommandOutput> {
         // Check if command exists
         if !Self::command_exists(cmd) {

@@ -2,10 +2,8 @@
 use anyhow::Result;
 
 /// Parser for shell commands
-#[allow(dead_code)]
 pub struct CommandParser;
 
-#[allow(dead_code)]
 impl CommandParser {
     /// Parse a command string into command and arguments
     pub fn parse(input: &str) -> Result<(String, Vec<String>)> {
@@ -19,6 +17,7 @@ impl CommandParser {
     }
 
     /// Quote an argument if it contains spaces
+    #[allow(dead_code)] // Used in tests
     pub fn quote_if_needed(arg: &str) -> String {
         if arg.contains(' ') || arg.contains('\t') {
             format!("\"{}\"", arg.replace('"', "\\\""))
@@ -28,6 +27,7 @@ impl CommandParser {
     }
 
     /// Join command and arguments back into a string
+    #[allow(dead_code)] // Used in tests
     pub fn join(command: &str, args: &[String]) -> String {
         let mut result = command.to_string();
         for arg in args {

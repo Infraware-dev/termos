@@ -1,6 +1,5 @@
 pub mod command;
 pub mod completion;
-pub mod facade;
 pub mod install;
 pub mod package_manager;
 

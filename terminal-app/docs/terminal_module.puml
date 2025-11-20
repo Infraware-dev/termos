@@ -1,0 +1,301 @@
+@startuml terminal-module-detail
+title "Terminal Module - TUI State & Buffer Components (Single Responsibility)"
+
+!define ACCENTCOLOR #4A90E2
+!define SRPCOLOR #E8F8F5
+!define EVENTCOLOR #FFE8E8
+
+skinparam style strictuml
+skinparam backgroundColor #FFFFFF
+skinparam NoteBackgroundColor #FFFACD
+skinparam NoteBorderColor #FFD700
+skinparam ClassBackgroundColor #F5F5F5
+skinparam ClassBorderColor ACCENTCOLOR
+
+' Terminal State & Mode
+package "Terminal State Management" {
+    class TerminalState {
+        + output: OutputBuffer
+        + input: InputBuffer
+        + history: CommandHistory
+        + mode: TerminalMode
+        --
+        + new(): Self
+        + add_output(line: String)
+        + add_output_lines(lines: Vec<String>)
+        + insert_char(c: char)
+        + delete_char()
+        + move_cursor_left()
+        + move_cursor_right()
+        + submit_input(): String
+        + clear_input()
+        + history_previous()
+        + history_next()
+        + scroll_up()
+        + scroll_down()
+        + get_mode(): TerminalMode
+        --
+        **Composition Pattern**:
+        Aggregates three SRP-compliant buffer components
+        **Single Responsibility**: Orchestrate buffer interactions
+    }
+
+    enum TerminalMode {
+        Normal            // Waiting for user input
+        ExecutingCommand  // Command running
+        WaitingLLM        // LLM query in progress
+        PromptingInstall  // Installation prompt (M2/M3)
+    }
+
+    note right of TerminalState
+        **Terminal State Lifecycle**:
+        1. Initialize with empty buffers
+        2. Poll events → modify state
+        3. On Submit: Extract input, add to history
+        4. Mode transitions based on input type
+        5. UI renders current state
+        6. Loop until quit
+    end note
+
+    note bottom of TerminalMode
+        **Mode Purposes**:
+        - Normal: Standard input waiting
+        - ExecutingCommand: UI shows spinner/progress
+        - WaitingLLM: UI shows waiting message
+        - PromptingInstall: (Future) Installation dialog
+    end note
+}
+
+' SRP-compliant Buffer Components
+package "Buffer Components (Single Responsibility Principle)" {
+    class OutputBuffer #SRPCOLOR {
+        - buffer: Vec<String>
+        - scroll_position: usize
+        --
+        + new(): Self
+        + add_line(line: String)
+        + add_lines(lines: Vec<String>)
+        + lines(&self): &[String]
+        + get_visible_lines(height: usize): Vec<&String>
+        + scroll_up()
+        + scroll_down()
+        + scroll_to_bottom()
+        + clear()
+        - trim_if_needed()
+        - auto_scroll_to_bottom()
+        --
+        **Single Responsibility**: Manage scrollable output
+        **Max lines**: 10,000 (auto-trim to prevent memory leak)
+        **Trim size**: 1,000 lines when limit exceeded
+    }
+
+    class InputBuffer #SRPCOLOR {
+        - content: String
+        - cursor_pos: usize
+        --
+        + new(): Self
+        + insert_char(c: char)
+        + delete_char()
+        + move_cursor_left()
+        + move_cursor_right()
+        + content(&self): &str
+        + clear()
+        - move_cursor_to_start()
+        - move_cursor_to_end()
+        --
+        **Single Responsibility**: Manage text input + cursor
+        **Unicode support**: Correct grapheme boundary handling
+        **Cursor movement**: Grapheme-aware for CJK, emoji
+
+        **NOTE**: Fixed Unicode bug that was causing
+        incorrect cursor positioning on multi-byte
+        characters. Now uses grapheme_indices
+        for proper boundary detection.
+    }
+
+    class CommandHistory #SRPCOLOR {
+        - history: Vec<String>
+        - position: Option<usize>
+        --
+        + new(): Self
+        + add(command: String)
+        + previous(): Option<String>
+        + next(): Option<String>
+        + all(&self): &[String]
+        + clear()
+        - move_position_backward()
+        - move_position_forward()
+        --
+        **Single Responsibility**: Manage command history navigation
+        **Semantics**: Navigate with up/down arrows
+        **Position tracking**: Optional index for current position
+    }
+
+    note bottom of OutputBuffer
+        **Memory Management**:
+        - Automatic trimming prevents unbounded growth
+        - Keeps recent 9,000 lines when trimmed
+        - Scroll position adjusted automatically
+        - Prevents memory issues in long sessions
+    end note
+
+    note bottom of InputBuffer
+        **Grapheme Boundary Handling**:
+        Previous bug: Direct char indexing broke on Unicode
+        - Multi-byte chars (é, 中) caused wrong position
+        - Emoji (👍) off by multiple bytes
+        - CJK chars stored as multiple UTF-8 bytes
+
+        Current fix: Uses grapheme_indices()
+        - Correct movement on all Unicode
+        - Supports emoji properly
+        - Handles combining characters
+    end note
+
+    note bottom of CommandHistory
+        **History Navigation UX**:
+        1. User types: "ls -la"
+        2. Press Up → shows previous command
+        3. Press Up again → shows command before that
+        4. Press Down → goes forward in history
+        5. Position = None means at current input
+    end note
+}
+
+' Event System
+package "Event Handling" {
+    enum TerminalEvent #EVENTCOLOR {
+        Quit
+        InputChar(char)
+        DeleteChar
+        MoveCursorLeft
+        MoveCursorRight
+        HistoryPrevious
+        HistoryNext
+        ScrollUp
+        ScrollDown
+        Submit
+        TabComplete
+        ClearScreen
+        Resize(u16, u16)
+        Unknown
+    }
+
+    class EventHandler {
+        + poll_event(timeout: Duration): Result<Option<TerminalEvent>>
+        --
+        **Responsibilities**:
+        - Poll crossterm events with timeout
+        - Convert terminal events to TerminalEvent
+        - Filter Windows duplicate events (KeyEventKind::Press only)
+        - Handle resize events
+    }
+
+    note right of EventHandler
+        **Keyboard Event Handling**:
+        - Uses crossterm for terminal event polling
+        - Non-blocking with configurable timeout
+        - Filters only Press events on Windows
+        (Crossterm generates multiple events per keystroke)
+        - Supports arrow keys, Enter, Tab, Ctrl+C
+    end note
+
+    note right of TerminalEvent
+        **Event Enum Variants**:
+        - InputChar(c): Printable character
+        - DeleteChar: Backspace
+        - MoveCursor*: Arrow keys
+        - History*: Up/Down arrows (context-aware)
+        - ScrollUp/Down: Page Up/Down
+        - Submit: Enter key
+        - TabComplete: Tab key
+        - ClearScreen: Ctrl+L
+        - Resize: Terminal size change
+        - Unknown: Unhandled key
+    end note
+}
+
+' TUI Rendering
+package "TUI Rendering" {
+    class TerminalUI {
+        - terminal: Terminal<CrosstermBackend<Stdout>>
+        --
+        + new(): Result<Self>
+        + render(state: &TerminalState): Result<()>
+        - render_output_pane(buf: &mut Buffer, area: Rect, state: &TerminalState)
+        - render_input_pane(buf: &mut Buffer, area: Rect, state: &TerminalState)
+        - render_status_bar(buf: &mut Buffer, area: Rect, mode: &TerminalMode)
+        --
+        **Technology**: ratatui (Rust TUI framework)
+        **Backend**: Crossterm (terminal control)
+        **Layout**: Flex layout system
+    }
+
+    note right of TerminalUI
+        **Rendering Pipeline**:
+        1. Create a new Frame (ratatui)
+        2. Layout terminal into 3 areas:
+           - Output pane (scrollable)
+           - Input pane (single line)
+           - Status bar
+        3. Render each pane based on state
+        4. Draw to terminal backend
+        5. Flush output
+    end note
+}
+
+' Relationships & Composition
+TerminalState *-- OutputBuffer
+TerminalState *-- InputBuffer
+TerminalState *-- CommandHistory
+TerminalState --> TerminalMode
+
+TerminalUI --> TerminalState
+EventHandler --> TerminalEvent
+
+OutputBuffer --|> "SRP: Scrollable output"
+InputBuffer --|> "SRP: Text input + cursor"
+CommandHistory --|> "SRP: History navigation"
+
+' Data flow diagram
+note top of TerminalState
+    **State Composition** (SRP Pattern):
+    TerminalState delegates to specialized components:
+    - OutputBuffer: Handles output display & scrolling
+    - InputBuffer: Handles text input & cursor
+    - CommandHistory: Handles history navigation
+    Each component has one responsibility
+    and can be tested in isolation
+end note
+
+note bottom of TerminalUI
+    **Rendering Interaction**:
+    1. TerminalUI::render() receives &TerminalState
+    2. Reads from all buffer components
+    3. Constructs ratatui widgets
+    4. Manages layout with Flex
+    5. Displays cursor position from InputBuffer
+    6. Shows visible lines from OutputBuffer
+    7. Displays history position indicator
+end note
+
+' Performance notes
+note right of OutputBuffer
+    **Performance Characteristics**:
+    - add_line: O(1) append + O(1) trim check
+    - trim_if_needed: O(n) slice copy (n = TRIM_LINES)
+    - scroll_up/down: O(1) position update
+    - get_visible_lines: O(visible_height)
+    - Prevents unbounded memory growth
+end note
+
+note right of InputBuffer
+    **Unicode Performance**:
+    - insert_char: O(n) string reallocation
+    - delete_char: O(n) string reallocation
+    - move_cursor: O(grapheme_count)
+    - Tradeoff: Correctness > performance
+    (Most inputs <1000 chars, O(n) acceptable)
+end note
+
+@enduml

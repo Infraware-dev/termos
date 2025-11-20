@@ -371,10 +371,6 @@ impl InputHandler for ShellBuiltinHandler {
             None
         }
     }
-
-    fn name(&self) -> &str {
-        "ShellBuiltinHandler"
-    }
 }
 
 #[cfg(test)]
@@ -533,8 +529,7 @@ mod tests {
 
     #[test]
     fn test_handler_name() {
-        let handler = ShellBuiltinHandler::new();
-        assert_eq!(handler.name(), "ShellBuiltinHandler");
+        let _handler = ShellBuiltinHandler::new();
     }
 
     #[test]

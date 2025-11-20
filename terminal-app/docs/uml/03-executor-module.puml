@@ -1,5 +1,5 @@
-@startuml "Executor Module - Facade and Strategy Patterns"
-title "Executor Module: Command Execution with Facade and Strategy Patterns"
+@startuml "Executor Module - Strategy Pattern"
+title "Executor Module: Command Execution with Strategy Pattern"
 
 ' Command Execution
 class CommandExecutor {
@@ -23,39 +23,13 @@ class CommandOutput {
 
 CommandExecutor --> CommandOutput : returns
 
-' Facade Pattern
-class CommandExecutionFacade {
-  - installer: PackageInstaller
-  --
-  + new(): Self
-  + with_installer(PackageInstaller): Self
-  + execute_with_fallback(cmd, args): Result<ExecutionResult>
-  + execute_or_install(cmd, args, auto_install): Result<ExecutionResult>
-  + is_command_available(cmd): bool
-  + can_install_packages(): bool
-  + get_package_manager(): Option<&str>
-}
+note top of CommandExecutor
+  **Direct Command Execution**
+  Simple, composable interface for executing
+  shell commands with proper error handling.
 
-enum ExecutionResult {
-  Success(CommandOutput)
-  CommandNotFound { command, can_install, package_manager }
-  ExecutionError { command, error }
-}
-
-CommandExecutionFacade --> ExecutionResult : returns
-CommandExecutionFacade --> CommandExecutor : delegates to
-CommandExecutionFacade --> PackageInstaller : uses for installation
-
-note top of CommandExecutionFacade
-  **Facade Pattern**
-  Simplifies complex command execution:
-  1. Check if command exists
-  2. Execute if found
-  3. Provide install suggestions
-  4. Handle errors gracefully
-
-  Combines CommandExecutor +
-  PackageInstaller into unified interface
+  Used directly by orchestrators without
+  additional facade abstraction layer.
 end note
 
 ' Package Manager Strategy Pattern
@@ -208,10 +182,6 @@ end note
 ' Relationships summary
 package "Design Patterns" as Patterns {
   note as PatternNote
-    **Facade Pattern**
-    - CommandExecutionFacade
-    - Simplifies: execute, install, error handling
-
     **Strategy Pattern**
     - PackageManager trait
     - 7 implementations for different OSes
@@ -225,6 +195,11 @@ package "Design Patterns" as Patterns {
     **Async/Await**
     - All execute methods are async
     - Tokio-based with timeout protection
+
+    **Direct Composition**
+    - Orchestrators use CommandExecutor directly
+    - No unnecessary abstraction layers
+    - Cleaner, more maintainable code
   end note
 }
 

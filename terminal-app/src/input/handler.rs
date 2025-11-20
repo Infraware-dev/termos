@@ -18,10 +18,6 @@ pub trait InputHandler: Send + Sync {
     /// - `Some(InputType)` if this handler can classify the input
     /// - `None` if the input should be passed to the next handler
     fn handle(&self, input: &str) -> Option<InputType>;
-
-    /// Get the name of this handler (for debugging/logging)
-    #[allow(dead_code)]
-    fn name(&self) -> &str;
 }
 
 /// Chain of handlers for input classification
@@ -54,18 +50,6 @@ impl ClassifierChain {
         }
         None
     }
-
-    /// Get the number of handlers in the chain
-    #[allow(dead_code)]
-    pub fn len(&self) -> usize {
-        self.handlers.len()
-    }
-
-    /// Check if the chain is empty
-    #[allow(dead_code)]
-    pub fn is_empty(&self) -> bool {
-        self.handlers.is_empty()
-    }
 }
 
 impl Default for ClassifierChain {
@@ -91,10 +75,6 @@ impl InputHandler for EmptyInputHandler {
         } else {
             None
         }
-    }
-
-    fn name(&self) -> &str {
-        "EmptyInputHandler"
     }
 }
 
@@ -147,14 +127,6 @@ impl KnownCommandHandler {
             original_input,
         })
     }
-
-    /// Add a command to the known commands list
-    #[allow(dead_code)]
-    pub fn add_command(&mut self, command: String) {
-        if !self.known_commands.contains(&command) {
-            self.known_commands.push(command);
-        }
-    }
 }
 
 impl InputHandler for KnownCommandHandler {
@@ -175,10 +147,6 @@ impl InputHandler for KnownCommandHandler {
             // Command in whitelist but not installed - pass to next handler
             None
         }
-    }
-
-    fn name(&self) -> &str {
-        "KnownCommandHandler"
     }
 }
 
@@ -249,10 +217,6 @@ impl InputHandler for CommandSyntaxHandler {
         } else {
             None
         }
-    }
-
-    fn name(&self) -> &str {
-        "CommandSyntaxHandler"
     }
 }
 
@@ -517,10 +481,6 @@ impl InputHandler for NaturalLanguageHandler {
             None
         }
     }
-
-    fn name(&self) -> &str {
-        "NaturalLanguageHandler"
-    }
 }
 
 impl Default for NaturalLanguageHandler {
@@ -623,10 +583,6 @@ impl InputHandler for PathCommandHandler {
             None
         }
     }
-
-    fn name(&self) -> &str {
-        "PathCommandHandler"
-    }
 }
 
 impl Default for PathCommandHandler {
@@ -655,10 +611,6 @@ impl InputHandler for DefaultHandler {
         } else {
             Some(InputType::NaturalLanguage(trimmed.to_string()))
         }
-    }
-
-    fn name(&self) -> &str {
-        "DefaultHandler"
     }
 }
 

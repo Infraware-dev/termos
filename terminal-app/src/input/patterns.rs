@@ -13,7 +13,6 @@ use regex::RegexSet;
 /// Precompiled regex patterns for command and natural language detection
 pub struct CompiledPatterns {
     /// Patterns that indicate command syntax (flags, pipes, redirects, env vars)
-    #[allow(dead_code)]
     pub command_syntax: RegexSet,
 
     /// Patterns that indicate natural language (question words, articles, punctuation)

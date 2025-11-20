@@ -19,7 +19,6 @@ class InfrawareTerminal {
 package "Orchestrators" {
   class CommandOrchestrator {
     - executor: CommandExecutor
-    - facade: CommandExecutionFacade
     --
     + execute_command(cmd, args): Result<String>
     + check_install_available(cmd): bool

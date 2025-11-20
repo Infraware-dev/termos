@@ -131,10 +131,6 @@ impl crate::input::handler::InputHandler for TypoDetectionHandler {
         // No typo detected, pass to next handler
         None
     }
-
-    fn name(&self) -> &str {
-        "TypoDetectionHandler"
-    }
 }
 
 impl Default for TypoDetectionHandler {

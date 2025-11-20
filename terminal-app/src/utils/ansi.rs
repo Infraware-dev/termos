@@ -1,10 +1,9 @@
 /// ANSI color utilities for terminal output
 use std::fmt;
-use std::sync::OnceLock;
 
 /// ANSI color codes for terminal output
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)]
+#[allow(dead_code)] // Complete ANSI color set, not all variants used
 pub enum AnsiColor {
     Black,
     Red,
@@ -61,56 +60,6 @@ impl fmt::Display for AnsiColor {
     }
 }
 
-/// ANSI formatting styles
-#[allow(dead_code)]
-pub struct AnsiStyle;
-
-#[allow(dead_code)]
-impl AnsiStyle {
-    pub const BOLD: &'static str = "\x1b[1m";
-    pub const DIM: &'static str = "\x1b[2m";
-    pub const ITALIC: &'static str = "\x1b[3m";
-    pub const UNDERLINE: &'static str = "\x1b[4m";
-    pub const BLINK: &'static str = "\x1b[5m";
-    pub const REVERSE: &'static str = "\x1b[7m";
-    pub const HIDDEN: &'static str = "\x1b[8m";
-    pub const STRIKETHROUGH: &'static str = "\x1b[9m";
-    pub const RESET: &'static str = "\x1b[0m";
-
-    /// Apply bold formatting
-    pub fn bold(text: &str) -> String {
-        format!("{}{}{}", Self::BOLD, text, Self::RESET)
-    }
-
-    /// Apply dim formatting
-    pub fn dim(text: &str) -> String {
-        format!("{}{}{}", Self::DIM, text, Self::RESET)
-    }
-
-    /// Apply italic formatting
-    pub fn italic(text: &str) -> String {
-        format!("{}{}{}", Self::ITALIC, text, Self::RESET)
-    }
-
-    /// Apply underline formatting
-    pub fn underline(text: &str) -> String {
-        format!("{}{}{}", Self::UNDERLINE, text, Self::RESET)
-    }
-}
-
-/// Lazy-initialized regex for stripping ANSI codes
-#[allow(dead_code)]
-static ANSI_REGEX: OnceLock<regex::Regex> = OnceLock::new();
-
-/// Strip ANSI codes from a string
-/// Kept for tests and potential future use (logging, export, etc.)
-#[allow(dead_code)]
-pub fn strip_ansi_codes(text: &str) -> String {
-    let re = ANSI_REGEX
-        .get_or_init(|| regex::Regex::new(r"\x1b\[[0-9;]*m").expect("Invalid ANSI regex pattern"));
-    re.replace_all(text, "").to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -121,21 +70,6 @@ mod tests {
         assert!(text.starts_with("\x1b[31m"));
         assert!(text.ends_with("\x1b[0m"));
         assert!(text.contains("Error"));
-    }
-
-    #[test]
-    fn test_bold() {
-        let text = AnsiStyle::bold("Important");
-        assert!(text.starts_with("\x1b[1m"));
-        assert!(text.ends_with("\x1b[0m"));
-        assert!(text.contains("Important"));
-    }
-
-    #[test]
-    fn test_strip_ansi_codes() {
-        let colored = AnsiColor::Green.colorize("Success");
-        let plain = strip_ansi_codes(&colored);
-        assert_eq!(plain, "Success");
     }
 
     // Test all color codes
@@ -209,52 +143,6 @@ mod tests {
         assert_eq!(format!("{}", AnsiColor::Red), "\x1b[31m");
         assert_eq!(format!("{}", AnsiColor::Green), "\x1b[32m");
         assert_eq!(format!("{}", AnsiColor::BrightCyan), "\x1b[96m");
-    }
-
-    #[test]
-    fn test_dim() {
-        let text = AnsiStyle::dim("Faded");
-        assert!(text.starts_with("\x1b[2m"));
-        assert!(text.ends_with("\x1b[0m"));
-        assert!(text.contains("Faded"));
-    }
-
-    #[test]
-    fn test_italic() {
-        let text = AnsiStyle::italic("Slanted");
-        assert!(text.starts_with("\x1b[3m"));
-        assert!(text.ends_with("\x1b[0m"));
-        assert!(text.contains("Slanted"));
-    }
-
-    #[test]
-    fn test_underline() {
-        let text = AnsiStyle::underline("Underlined");
-        assert!(text.starts_with("\x1b[4m"));
-        assert!(text.ends_with("\x1b[0m"));
-        assert!(text.contains("Underlined"));
-    }
-
-    #[test]
-    fn test_strip_ansi_multiple_codes() {
-        let text = format!(
-            "{}{}{}",
-            AnsiColor::Red.colorize("Red"),
-            AnsiColor::Green.colorize("Green"),
-            AnsiStyle::bold("Bold")
-        );
-        let plain = strip_ansi_codes(&text);
-        assert_eq!(plain, "RedGreenBold");
-    }
-
-    #[test]
-    fn test_strip_ansi_empty_string() {
-        assert_eq!(strip_ansi_codes(""), "");
-    }
-
-    #[test]
-    fn test_strip_ansi_plain_text() {
-        assert_eq!(strip_ansi_codes("plain text"), "plain text");
     }
 
     #[test]

@@ -1,31 +1,13 @@
 /// Centralized message formatting for consistent output styling
 use super::ansi::AnsiColor;
 
-/// Message type determines the styling and prefix
-#[derive(Debug, Clone, Copy)]
-#[allow(dead_code)]
-pub enum MessageType {
-    Error,
-    Warning,
-    Success,
-    Info,
-    Command,
-    Question,
-}
-
 /// Message formatter for creating consistently styled output
 pub struct MessageFormatter;
 
-#[allow(dead_code)]
 impl MessageFormatter {
     /// Format an error message
     pub fn error(message: impl AsRef<str>) -> String {
         format!("{} {}", AnsiColor::Red.colorize("✗"), message.as_ref())
-    }
-
-    /// Format a warning message
-    pub fn warning(message: impl AsRef<str>) -> String {
-        format!("{} {}", AnsiColor::Yellow.colorize("⚠"), message.as_ref())
     }
 
     /// Format a success message
@@ -43,26 +25,9 @@ impl MessageFormatter {
         format!("{} {}", AnsiColor::Cyan.colorize("❯"), message.as_ref())
     }
 
-    /// Format a question/prompt for user
-    pub fn question(message: impl AsRef<str>) -> String {
-        format!("{} {}", AnsiColor::Magenta.colorize("?"), message.as_ref())
-    }
-
     /// Format a suggestion/hint
     pub fn suggestion(message: impl AsRef<str>) -> String {
         format!("  {} {}", AnsiColor::Yellow.colorize("→"), message.as_ref())
-    }
-
-    /// Format a generic message with custom type
-    pub fn format(msg_type: MessageType, message: impl AsRef<str>) -> String {
-        match msg_type {
-            MessageType::Error => Self::error(message),
-            MessageType::Warning => Self::warning(message),
-            MessageType::Success => Self::success(message),
-            MessageType::Info => Self::info(message),
-            MessageType::Command => Self::command(message),
-            MessageType::Question => Self::question(message),
-        }
     }
 
     /// Format command not found error
@@ -131,20 +96,6 @@ mod tests {
     }
 
     #[test]
-    fn test_message_type_format() {
-        let msg = MessageFormatter::format(MessageType::Warning, "Test");
-        assert!(msg.contains("Test"));
-        assert!(msg.contains("⚠"));
-    }
-
-    #[test]
-    fn test_warning_message() {
-        let msg = MessageFormatter::warning("Be careful");
-        assert!(msg.contains("Be careful"));
-        assert!(msg.contains("⚠"));
-    }
-
-    #[test]
     fn test_info_message() {
         let msg = MessageFormatter::info("Information");
         assert!(msg.contains("Information"));
@@ -156,13 +107,6 @@ mod tests {
         let msg = MessageFormatter::command("ls -la");
         assert!(msg.contains("ls -la"));
         assert!(msg.contains("❯"));
-    }
-
-    #[test]
-    fn test_question_message() {
-        let msg = MessageFormatter::question("Continue?");
-        assert!(msg.contains("Continue?"));
-        assert!(msg.contains("?"));
     }
 
     #[test]
@@ -218,34 +162,10 @@ mod tests {
     }
 
     #[test]
-    fn test_format_all_types() {
-        let types = vec![
-            (MessageType::Error, "✗"),
-            (MessageType::Warning, "⚠"),
-            (MessageType::Success, "✓"),
-            (MessageType::Info, "ℹ"),
-            (MessageType::Command, "❯"),
-            (MessageType::Question, "?"),
-        ];
-
-        for (msg_type, symbol) in types {
-            let msg = MessageFormatter::format(msg_type, "test");
-            assert!(msg.contains("test"));
-            assert!(msg.contains(symbol));
-        }
-    }
-
-    #[test]
-    fn test_message_type_debug() {
-        let debug_str = format!("{:?}", MessageType::Error);
-        assert_eq!(debug_str, "Error");
-    }
-
-    #[test]
     fn test_as_ref_str_compatibility() {
         // Test that methods work with both &str and String
         let _ = MessageFormatter::error("string literal");
         let _ = MessageFormatter::error(String::from("owned string"));
-        let _ = MessageFormatter::warning("reference");
+        let _ = MessageFormatter::success("reference");
     }
 }

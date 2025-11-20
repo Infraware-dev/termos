@@ -37,12 +37,6 @@ impl PackageInstaller {
         Self { managers }
     }
 
-    /// Register a new package manager
-    #[allow(dead_code)]
-    pub fn register(&mut self, manager: Box<dyn PackageManager>) {
-        self.managers.push(manager);
-    }
-
     /// Install a package using the best available package manager
     ///
     /// # Errors
@@ -50,6 +44,7 @@ impl PackageInstaller {
     /// Returns an error if:
     /// - No package manager is available on the system
     /// - The selected package manager fails to install the package
+    #[allow(dead_code)] // Used via trait by package manager implementations
     pub async fn install_package(&self, package: &str) -> Result<()> {
         let manager = self.select_package_manager()?;
         manager.install(package).await
@@ -94,13 +89,6 @@ impl Default for PackageInstaller {
 
 // Static methods for backward compatibility
 impl PackageInstaller {
-    /// Install a package using the default installer (static method for compatibility)
-    #[allow(dead_code)]
-    pub async fn install_package_static(package: &str) -> Result<()> {
-        let installer = Self::new();
-        installer.install_package(package).await
-    }
-
     /// Check if any package manager is available (static method for compatibility)
     pub fn is_available_static() -> bool {
         Self::new().is_available()

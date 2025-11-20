@@ -49,7 +49,8 @@ This is the initial project setup with the complete module structure. Implementa
 - ✅ **Command History**: Navigate previous commands with arrow keys
 - ✅ **Cross-Platform**: Windows, macOS, and Linux support with platform-specific optimizations
 - ✅ **Benchmarking Suite**: Performance benchmarks for SCAN algorithm
-- ✅ **Code Quality**: 245 tests passing (including edge case tests for panic safety), 0 clippy warnings, serial tests for shared state, production-ready code
+- ✅ **Unicode Support**: Full Unicode support for international users (CJK, emoji, etc.) with character-count based cursor positioning
+- ✅ **Code Quality**: 233 tests passing with comprehensive edge case coverage, 0 clippy warnings, production-ready code
 
 ### Coming in M2/M3
 
@@ -106,7 +107,7 @@ infraware-terminal/
 │   ├── terminal/                  # TUI rendering and state
 │   │   ├── tui.rs                # ratatui rendering logic
 │   │   ├── state.rs              # Terminal state management
-│   │   ├── buffers.rs            # Buffer components (SRP)
+│   │   ├── buffers.rs            # Buffer components (SRP) - Unicode-safe
 │   │   └── events.rs             # Keyboard event handling
 │   ├── input/                     # SCAN Algorithm
 │   │   ├── classifier.rs         # InputClassifier coordinator
@@ -119,8 +120,7 @@ infraware-terminal/
 │   │   ├── typo_detection.rs     # Levenshtein distance typo detection
 │   │   └── parser.rs             # Shell command parsing
 │   ├── executor/                  # Command execution
-│   │   ├── command.rs            # Async command execution
-│   │   ├── facade.rs             # Facade pattern interface
+│   │   ├── command.rs            # Async command execution + 43 blocklist
 │   │   ├── package_manager.rs    # Strategy pattern (apt, yum, brew, etc.)
 │   │   ├── install.rs            # Auto-install workflow
 │   │   └── completion.rs         # Tab completion
@@ -133,12 +133,11 @@ infraware-terminal/
 │   │   └── renderer.rs           # Markdown rendering
 │   └── utils/                     # Shared utilities
 │       ├── ansi.rs               # ANSI color utilities
-│       ├── errors.rs             # Error types
 │       └── message.rs            # Message formatting
-├── tests/                         # Test suites
-│   ├── classifier_tests.rs       # SCAN algorithm tests
-│   ├── executor_tests.rs         # Command execution tests
-│   └── integration_tests.rs      # End-to-end tests
+├── tests/                         # Test suites (233 tests)
+│   ├── classifier_tests.rs       # SCAN algorithm tests (211 tests)
+│   ├── executor_tests.rs         # Command execution tests (8 tests)
+│   └── integration_tests.rs      # End-to-end tests (6 tests)
 ├── benches/                       # Performance benchmarks
 │   └── scan_benchmark.rs         # SCAN algorithm benchmarks
 └── docs/                          # Documentation
@@ -297,15 +296,17 @@ xdg-open target/criterion/report/index.html  # Linux
 - [x] Auto-install framework (prompt logic implemented)
 
 **Week 4: Testing & Optimization** ✅
-- [x] Comprehensive test suite (245 tests passing, including 2 new edge case tests for panic safety)
-- [x] History expansion tests (16 unit tests covering all edge cases)
-- [x] Panic safety improvements (safe indexing in 4 locations, no unwrap on array access)
+- [x] Comprehensive test suite (233 tests passing with edge case coverage)
+- [x] History expansion tests (comprehensive unit tests covering all patterns)
+- [x] Panic safety improvements (safe indexing throughout, no unwrap on array access)
+- [x] Unicode fix for international users (character-count based cursor positioning)
 - [x] Performance benchmarking suite
 - [x] Integration tests for end-to-end workflows
 - [x] Cross-platform testing (Ubuntu, Windows, macOS)
 - [x] CI/CD pipeline (fmt, clippy, coverage ≥75%)
 - [x] Documentation (CLAUDE.md, SCAN_ARCHITECTURE.md)
 - [x] Zero clippy warnings
+- [x] Dead code cleanup (removed facade.rs and errors.rs, 537 lines reduced)
 
 ### Next Steps (M2/M3)
 - [ ] Real LLM backend integration (endpoint/auth configuration)

@@ -107,15 +107,6 @@ impl InputClassifier {
         }
     }
 
-    /// Create a classifier with a custom chain
-    #[allow(dead_code)]
-    pub fn with_chain(chain: ClassifierChain) -> Self {
-        Self {
-            chain,
-            history: None,
-        }
-    }
-
     /// Set the command history for history expansion support
     ///
     /// This enables the HistoryExpansionHandler to expand patterns like !!,  !$, !^, !*
@@ -190,21 +181,6 @@ impl InputClassifier {
                 Ok(InputType::NaturalLanguage(input.trim().to_string()))
             }
         }
-    }
-
-    /// Add a command to the known commands list (legacy method for backward compatibility)
-    ///
-    /// Note: This is a legacy method. In the new architecture, you should
-    /// construct a custom KnownCommandHandler if you need custom commands.
-    #[deprecated(
-        since = "0.2.0",
-        note = "Use custom KnownCommandHandler in chain instead"
-    )]
-    #[allow(dead_code)]
-    pub fn add_known_command(&mut self, _command: String) {
-        // This is a no-op in the new architecture
-        // Users should create a custom KnownCommandHandler with their commands
-        // and build a custom chain using with_chain()
     }
 }
 

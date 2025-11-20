@@ -983,165 +983,21 @@ impl TerminalState {
 
 ---
 
-### ✅ 5. Facade Pattern - Command Execution
+### ✅ 5. Facade Pattern - REMOVED (Simplified Design)
 
-**Status**: ✅ **COMPLETATO** (Fase 2 - Week 3)
-**Priorità**: LOW
-**Effort**: Low
-**Impact**: Code cleanup + Interfaccia semplificata
+**Status**: ✅ **REMOVED** - Unnecessary abstraction
+**Rationale**: Direct executor access is simpler and clearer
+**Impact**: Cleaner codebase, reduced maintenance burden
 
-#### Problema Originale
+#### Previous Implementation Removed
 
-Command execution ripete logica:
+The Facade Pattern implementation (`src/executor/facade.rs`) that used `ExecutionResult` enum has been removed. Direct access to `CommandExecutor` methods is now the preferred approach.
 
-```rust
-// ❌ PROBLEMA: Duplicazione
-async fn handle_command(&mut self, cmd: &str, args: &[String]) -> Result<()> {
-    if !CommandExecutor::command_exists(cmd) {
-        // Handle error
-    }
-
-    match CommandExecutor::execute(cmd, args).await {
-        Ok(output) => {
-            // Format stdout
-            // Format stderr
-            // Check exit code
-        }
-        Err(e) => {
-            // Handle error
-        }
-    }
-}
-```
-
-#### Soluzione Proposta
-
-```rust
-pub struct CommandExecutionFacade {
-    executor: CommandExecutor,
-    installer: PackageInstaller,
-}
-
-pub enum ExecutionResult {
-    Success(CommandOutput),
-    CommandNotFound { command: String, can_install: bool },
-    Error(String),
-}
-
-impl CommandExecutionFacade {
-    pub async fn execute_with_fallback(
-        &self,
-        cmd: &str,
-        args: &[String],
-    ) -> Result<ExecutionResult> {
-        if !CommandExecutor::command_exists(cmd) {
-            return Ok(ExecutionResult::CommandNotFound {
-                command: cmd.to_string(),
-                can_install: self.installer.is_available(),
-            });
-        }
-
-        match CommandExecutor::execute(cmd, args).await {
-            Ok(output) => Ok(ExecutionResult::Success(output)),
-            Err(e) => Ok(ExecutionResult::Error(e.to_string())),
-        }
-    }
-}
-```
-
-#### Implementazione Completata
-
-Il Facade Pattern è stato implementato con successo:
-
-**File Creati:**
-- `src/executor/facade.rs` - Facade completo per command execution con:
-  - `ExecutionResult` enum con 3 varianti:
-    - `Success(CommandOutput)` - Esecuzione riuscita
-    - `CommandNotFound { command, can_install, package_manager }` - Comando non trovato
-    - `ExecutionError { command, error }` - Errore di esecuzione
-  - `CommandExecutionFacade` struct che coordina:
-    - `CommandExecutor` - per esecuzione
-    - `PackageInstaller` - per suggerimenti installazione
-
-**File Modificati:**
-- `src/executor/mod.rs` - Export del facade
-- `src/executor/command.rs` - Aggiunto `PartialEq` a `CommandOutput`
-
-**Architettura:**
-```rust
-#[derive(Debug, Clone, PartialEq)]
-pub enum ExecutionResult {
-    Success(CommandOutput),
-    CommandNotFound {
-        command: String,
-        can_install: bool,
-        package_manager: Option<String>,
-    },
-    ExecutionError { command: String, error: String },
-}
-
-#[derive(Debug)]
-pub struct CommandExecutionFacade {
-    installer: PackageInstaller,
-}
-
-impl CommandExecutionFacade {
-    // Simplified interface
-    pub async fn execute_with_fallback(
-        &self,
-        cmd: &str,
-        args: &[String],
-    ) -> Result<ExecutionResult> { ... }
-
-    pub async fn execute_or_install(
-        &self,
-        cmd: &str,
-        args: &[String],
-        auto_install: bool,
-    ) -> Result<ExecutionResult> { ... }
-
-    // Utility methods
-    pub fn is_command_available(&self, cmd: &str) -> bool { ... }
-    pub fn can_install_packages(&self) -> bool { ... }
-    pub fn get_package_manager(&self) -> Option<&str> { ... }
-}
-```
-
-**Benefici Ottenuti:**
-- ✅ Interfaccia semplificata: un solo metodo invece di 3+ chiamate
-- ✅ Gestione errori centralizzata e strutturata
-- ✅ Risultati tipizzati con enum invece di Result<Output>
-- ✅ Informazioni contestuali (può installare, quale PM, ecc.)
-- ✅ Metodo `execute_or_install` con auto-install opzionale
-
-**Test Coverage:**
-- 7 test nel modulo `facade.rs`
-- Test per tutti i casi: success, not found, error
-- Test per helper methods
-- Tutti i test passano ✅
-
-**Uso:**
-```rust
-let facade = CommandExecutionFacade::new();
-
-// Esecuzione semplice con fallback
-match facade.execute_with_fallback("htop", &[]).await? {
-    ExecutionResult::Success(output) => {
-        println!("{}", output.stdout);
-    }
-    ExecutionResult::CommandNotFound { command, can_install, package_manager } => {
-        if can_install {
-            println!("'{}' not found, install with {}?", command, package_manager.unwrap());
-        }
-    }
-    ExecutionResult::ExecutionError { command, error } => {
-        eprintln!("Error executing '{}': {}", command, error);
-    }
-}
-
-// Con auto-install
-let result = facade.execute_or_install("htop", &[], true).await?;
-```
+**Why it was removed:**
+- The facade added an extra layer of abstraction without significant benefit
+- Direct executor access is clearer and easier to understand
+- Reduced code complexity (294 lines removed)
+- Better alignment with Rust's philosophy of composability
 
 ---
 

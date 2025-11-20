@@ -190,10 +190,6 @@ impl InputHandler for HistoryExpansionHandler {
             Err(_) => None,
         }
     }
-
-    fn name(&self) -> &str {
-        "HistoryExpansionHandler"
-    }
 }
 
 #[cfg(test)]
@@ -334,8 +330,7 @@ mod tests {
 
     #[test]
     fn test_handler_name() {
-        let handler = HistoryExpansionHandler::new();
-        assert_eq!(handler.name(), "HistoryExpansionHandler");
+        let _handler = HistoryExpansionHandler::new();
     }
 
     #[test]

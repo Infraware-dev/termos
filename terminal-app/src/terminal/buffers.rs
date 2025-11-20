@@ -225,7 +225,7 @@ impl InputBuffer {
     /// Set the input buffer to a specific text and position cursor at end
     pub fn set_text(&mut self, text: String) {
         self.buffer = text;
-        self.cursor_position = self.buffer.len();
+        self.cursor_position = self.buffer.chars().count();
     }
 
     /// Take the current input, leaving the buffer empty
@@ -424,6 +424,28 @@ mod tests {
         buffer.delete_char();
         assert_eq!(buffer.text(), "😀a");
         assert_eq!(buffer.cursor_position(), 1);
+    }
+
+    #[test]
+    fn test_set_text_unicode() {
+        let mut buffer = InputBuffer::new();
+
+        // Test with Chinese characters (3 bytes each)
+        buffer.set_text("中文测试".to_string()); // 4 chars, 12 bytes
+        assert_eq!(buffer.cursor_position(), 4); // Should be 4 chars, not 12 bytes
+        assert_eq!(buffer.text(), "中文测试");
+
+        // Test with emoji (4 bytes each)
+        buffer.set_text("😀😃😄".to_string()); // 3 chars, 12 bytes
+        assert_eq!(buffer.cursor_position(), 3); // Should be 3 chars, not 12 bytes
+
+        // Test with mixed ASCII and multi-byte
+        buffer.set_text("Hello世界".to_string()); // 7 chars (5 ASCII + 2 CJK)
+        assert_eq!(buffer.cursor_position(), 7); // Should be 7 chars
+
+        // Test that cursor is at end (can't move right)
+        buffer.move_cursor_right();
+        assert_eq!(buffer.cursor_position(), 7); // Still at end
     }
 
     #[test]

@@ -2,9 +2,6 @@
 //!
 //! This module implements the Strategy pattern for package managers,
 //! allowing easy extension with new package managers without modifying existing code.
-//!
-//! TODO: Remove #![allow(dead_code)] once fully integrated
-#![allow(dead_code)]
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -34,6 +31,7 @@ pub trait PackageManager: Send + Sync + std::fmt::Debug {
     /// - The package manager command fails to execute
     /// - The installation returns a non-zero exit code
     /// - sudo privileges are required but not available
+    #[allow(dead_code)] // Trait method implemented by all package managers
     async fn install(&self, package: &str) -> Result<()>;
 
     /// Get the priority of this package manager (higher = preferred)
