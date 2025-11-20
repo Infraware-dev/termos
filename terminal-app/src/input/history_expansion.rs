@@ -93,10 +93,20 @@ impl HistoryExpansionHandler {
     }
 
     /// Expand `!$` to the last argument of previous command
+    ///
+    /// Bash-compatible behavior: If the previous command has no arguments,
+    /// `!$` expands to the command itself.
+    ///
+    /// Examples:
+    /// - `ls -la /tmp` → `!$` = `/tmp`
+    /// - `pwd` → `!$` = `pwd` (command itself when no args)
     fn expand_bang_dollar(&self, input: &str) -> Option<String> {
         let last_cmd = self.get_last_command()?;
-        let (_, args) = Self::parse_command_parts(&last_cmd);
-        let last_arg = args.last()?;
+        let (command, args) = Self::parse_command_parts(&last_cmd);
+
+        // Bash behavior: if no args, !$ expands to command itself
+        let last_arg = args.last().unwrap_or(&command);
+
         Some(input.replace("!$", last_arg))
     }
 
@@ -309,10 +319,17 @@ mod tests {
 
     #[test]
     fn test_bang_dollar_no_args() {
-        let handler = create_handler_with_history(vec!["pwd"]);
-        let result = handler.handle("echo !$");
-        // Should fail because pwd has no args
-        assert!(result.is_none());
+        // Bash behavior: !$ expands to command itself when no args
+        let handler = create_handler_with_history(vec!["pwd", "echo !$"]);
+        let result = handler.handle("echo !$").unwrap();
+
+        match result {
+            InputType::Command { command, args, .. } => {
+                assert_eq!(command, "echo");
+                assert_eq!(args, vec!["pwd"]); // !$ → pwd (command itself)
+            }
+            _ => panic!("Expected Command"),
+        }
     }
 
     #[test]
@@ -339,5 +356,49 @@ mod tests {
             }
             _ => panic!("Expected Command with original_input"),
         }
+    }
+
+    #[test]
+    fn test_bang_star_no_args() {
+        // !* should fail when no args (Bash behavior)
+        let handler = create_handler_with_history(vec!["pwd", "echo !*"]);
+        let result = handler.handle("echo !*");
+        // Should fail because pwd has no args and !* requires args
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_bang_caret_no_args() {
+        // !^ should fail when no args (Bash behavior)
+        let handler = create_handler_with_history(vec!["pwd", "echo !^"]);
+        let result = handler.handle("echo !^");
+        // Should fail because pwd has no args and !^ requires args
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_multiple_expansions() {
+        // Multiple expansions in same input
+        let handler = create_handler_with_history(vec!["echo hello world", "printf '%s %s' !^ !$"]);
+        let result = handler.handle("printf '%s %s' !^ !$").unwrap();
+
+        match result {
+            InputType::Command { command, args, .. } => {
+                assert_eq!(command, "printf");
+                // !^ = hello (first arg), !$ = world (last arg)
+                // Note: shell-words parser removes outer quotes from '%s %s'
+                assert_eq!(args, vec!["%s %s", "hello", "world"]);
+            }
+            _ => panic!("Expected Command"),
+        }
+    }
+
+    #[test]
+    fn test_history_with_only_current_input() {
+        // Edge case: history has only current input (no previous command)
+        let handler = create_handler_with_history(vec!["!!"]);
+        let result = handler.handle("!!");
+        // Should fail because there's no previous command (need at least 2 entries)
+        assert!(result.is_none());
     }
 }
