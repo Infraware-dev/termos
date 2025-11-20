@@ -97,7 +97,6 @@ impl CompiledPatterns {
 
     /// Check if input matches any command syntax pattern
     #[inline]
-    #[allow(dead_code)]
     pub fn has_command_syntax(&self, input: &str) -> bool {
         self.command_syntax.is_match(input)
     }
