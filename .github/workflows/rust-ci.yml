@@ -1,10 +1,14 @@
-name: CI
+name: Rust CI
 
 on:
   pull_request:
     branches: [main]
+    paths:
+      - 'terminal-app/**'
   push:
     branches: [main]
+    paths:
+      - 'terminal-app/**'
 
 env:
   CARGO_TERM_COLOR: always
@@ -14,6 +18,9 @@ jobs:
   fmt:
     name: Format Check
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: terminal-app
     steps:
       - uses: actions/checkout@v4
 
@@ -28,6 +35,9 @@ jobs:
   clippy:
     name: Clippy
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: terminal-app
     steps:
       - uses: actions/checkout@v4
 
@@ -60,6 +70,9 @@ jobs:
   test-coverage:
     name: Test Coverage
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: terminal-app
     steps:
       - uses: actions/checkout@v4
 
@@ -115,6 +128,9 @@ jobs:
   build:
     name: Build
     runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: terminal-app
     strategy:
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
