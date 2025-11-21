@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
@@ -70,6 +70,13 @@ impl TerminalUI {
     pub fn suspend(&mut self) -> Result<()> {
         // Show cursor before leaving
         self.terminal.show_cursor()?;
+
+        // Flush any pending draws to prevent artifacts
+        use std::io::Write;
+        self.terminal
+            .backend_mut()
+            .flush()
+            .context("Failed to flush terminal before suspension")?;
 
         // Leave alternate screen
         execute!(self.terminal.backend_mut(), LeaveAlternateScreen)?;

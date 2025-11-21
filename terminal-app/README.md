@@ -41,7 +41,7 @@ This is the initial project setup with the complete module structure. Implementa
 - ✅ **Command Execution**: Async shell command execution with stdout/stderr capture
 - ✅ **Shell Operator Support**: Full support for pipes (`|`), redirects (`>`/`<`), logical operators (`&&`/`||`), subshells
 - ✅ **Performance Optimizations**: Precompiled regex patterns, thread-safe command caching, RwLock poisoning recovery
-- ✅ **Interactive Command Blocking**: Safely blocks 43+ TTY-required commands (vim, top, python, ssh, etc.) with helpful alternatives
+- ✅ **Interactive Commands**: 18 commands with full TUI suspension (vim, nano, less, man, etc.) + 31 blocked commands with helpful alternatives
 - ✅ **Auto-Install Framework**: Detect missing commands and prompt for installation (execution deferred to M2)
 - ✅ **LLM Integration**: Mock client ready, route natural language queries to AI backend
 - ✅ **Syntax Highlighting**: Code blocks with syntax highlighting (Rust, Python, Bash, JSON)
@@ -183,17 +183,61 @@ cargo run
 Once running, you can:
 
 1. **Execute commands**: Type any shell command (e.g., `ls -la`, `docker ps`)
-2. **Use history expansion**: Use bash-style history patterns:
+2. **Use interactive commands**: Full terminal control for editors and pagers (Unix/Linux/macOS):
+   - Text editors: `vim file.txt`, `nano config.yml`, `emacs script.rs`
+   - Pagers: `less output.log`, `man docker`, `info grep`
+   - File managers: `mc`, `ranger`, `nnn`
+   - System monitoring: `watch -n 1 'ps aux'`
+3. **Use history expansion**: Use bash-style history patterns:
    - `!!` - Re-run previous command: `sudo !!`
    - `!$` - Use last argument: `vim !$` (if previous was `cat file.txt`)
    - `!^` - Use first argument: `echo !^` (if previous was `cat file1 file2`)
    - `!*` - Use all arguments: `find !*` (if previous was `ls -la /tmp`)
-3. **Use aliases**: Type user-defined aliases from `~/.bashrc`, `~/.bash_aliases`, `~/.zshrc` (e.g., `ll` → expands to `ls -la`)
-4. **Ask questions**: Type natural language queries (e.g., "how do I list files?")
-5. **Navigate history**: Use ↑/↓ arrow keys
-6. **Tab completion**: Press Tab to complete commands/paths
-7. **Reload aliases**: Type `reload-aliases` to refresh aliases from config files (useful if editing `.bashrc` during a session)
-8. **Quit**: Press Ctrl+C or Ctrl+D
+4. **Use aliases**: Type user-defined aliases from `~/.bashrc`, `~/.bash_aliases`, `~/.zshrc` (e.g., `ll` → expands to `ls -la`)
+5. **Ask questions**: Type natural language queries (e.g., "how do I list files?")
+6. **Navigate history**: Use ↑/↓ arrow keys
+7. **Tab completion**: Press Tab to complete commands/paths
+8. **Reload aliases**: Type `reload-aliases` to refresh aliases from config files (useful if editing `.bashrc` during a session)
+9. **Quit**: Press Ctrl+C or Ctrl+D
+
+#### Interactive Commands
+
+Infraware Terminal supports full interactive command execution with complete terminal control. When you run an interactive command, the TUI temporarily suspends, giving the command full access to your terminal. A total of 18 interactive commands are supported.
+
+**Supported Interactive Commands**:
+- **Text Editors** (7): vim, nvim, nano, emacs, pico, ed, vi
+- **Pagers** (5): less, more, most, man, info
+- **File Managers** (5): mc, ranger, nnn, lf, vifm
+- **Process Monitoring** (1): watch
+
+**Examples**:
+```bash
+vim file.txt          # Opens vim with full terminal control
+nano config.yml       # Opens nano editor
+less output.log       # Browse log file with less pager
+man docker            # View docker manual
+mc                    # Opens Norton Commander-style file manager
+ranger                # Opens ranger file browser
+watch -n 1 'ps aux'   # Monitor processes with watch
+```
+
+**Workflow**:
+1. Type the interactive command
+2. The TUI suspends (returns to normal terminal mode)
+3. Command runs with full terminal access
+4. When you exit the command, the TUI automatically resumes
+
+**Platform Notes**:
+- Interactive commands are supported on **Linux, macOS, and Unix systems**
+- Windows is not supported (shows helpful error message)
+
+**Blocked Interactive Commands**:
+Some interactive commands that require persistent TTY sessions cannot be supported in Infraware Terminal (ssh, tmux, screen, top, htop, python REPL, etc.). These commands show helpful error messages suggesting alternatives:
+- `top` → Use `ps aux` or `top -b -n 1` for batch mode
+- `ssh` → Use in a separate terminal window
+- `python` → Pass code with `-c` flag: `python -c "print(1+1)"`
+- `node` → Use REPL alternatives or run scripts directly
+- `mysql`/`psql` → Use connection flags or scripts
 
 #### Alias Support
 
@@ -321,8 +365,10 @@ xdg-open target/criterion/report/index.html  # Linux
 
 ### M1 Constraints (By Design)
 
-- **Interactive Commands Blocked**: 43+ commands that require TTY are blocked for safety (vim, top, python REPL, ssh, less, man, etc.)
-  - Use command-specific alternatives: e.g., `cat` instead of `less`, `ps aux` instead of `top`, `python -c` for one-liners
+- **Interactive Commands**: 18 commands supported with full TUI suspension. Some commands that require persistent TTY sessions are blocked (ssh, tmux, screen, top, htop, python REPL, etc.)
+  - Supported: vim, nano, less, man, mc, ranger, and more (see usage section for complete list)
+  - Blocked: 31 commands requiring long-running sessions or network access. Use alternatives or separate terminal
+  - Platform: Unix/Linux/macOS only (Windows shows error message)
 - **Alias Cache TTL**: No automatic TTL/invalidation - alias files modified externally during session require manual `reload-aliases` command to be recognized
 - **Command Cache TTL**: No automatic TTL/invalidation - commands installed during a session require terminal restart to be recognized
 - **Tab Completion**: Basic file and command completion only - no integration with bash/zsh completion systems

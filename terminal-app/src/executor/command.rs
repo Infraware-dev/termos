@@ -1,5 +1,7 @@
 /// Command execution module
 use anyhow::{Context, Result};
+use once_cell::sync::Lazy;
+use std::collections::HashSet;
 use std::process::Stdio;
 use tokio::process::Command as TokioCommand;
 use tokio::time::{timeout, Duration};
@@ -37,92 +39,87 @@ impl CommandOutput {
     }
 }
 
+/// Commands that require interactive execution (TUI suspension)
+const REQUIRES_INTERACTIVE: &[&str] = &[
+    // Text editors
+    "vim", "nvim", "nano", "emacs", "pico", "ed", "vi", // Pagers
+    "less", "more", "most", "man", "info", // File managers
+    "mc", "ranger", "nnn", "lf", "vifm", // Watchers
+    "watch",
+];
+
+/// Commands that are interactive but NOT supported (blocked entirely)
+const INTERACTIVE_BLOCKED: &[&str] = &[
+    // System monitors
+    "top",
+    "htop",
+    "btop",
+    "atop",
+    "iotop",
+    "iftop",
+    "nethogs",
+    // Remote/session
+    "ssh",
+    "telnet",
+    "ftp",
+    "sftp",
+    "screen",
+    "tmux",
+    // REPLs
+    "python",
+    "python3",
+    "irb",
+    "node",
+    "ipython",
+    "mysql",
+    "psql",
+    "sqlite3",
+    "mongo",
+    "redis-cli",
+    // Debuggers
+    "gdb",
+    "lldb",
+    "pdb",
+    // Terminal browsers
+    "w3m",
+    "lynx",
+    "links",
+    // Admin tools
+    "passwd",
+    "visudo",
+];
+
+/// All interactive commands (for is_interactive_command check)
+static ALL_INTERACTIVE: Lazy<HashSet<&'static str>> = Lazy::new(|| {
+    REQUIRES_INTERACTIVE
+        .iter()
+        .chain(INTERACTIVE_BLOCKED.iter())
+        .copied()
+        .collect()
+});
+
+/// Set of commands that require interactive execution (O(1) lookup)
+static REQUIRES_INTERACTIVE_SET: Lazy<HashSet<&'static str>> =
+    Lazy::new(|| REQUIRES_INTERACTIVE.iter().copied().collect());
+
 /// Command executor for running shell commands
 pub struct CommandExecutor;
 
 impl CommandExecutor {
-    /// List of interactive commands that should not be executed in non-interactive mode
-    /// These commands require a TTY and will block or behave incorrectly without one
-    const INTERACTIVE_COMMANDS: &'static [&'static str] = &[
-        // Text editors
-        "vi",
-        "vim",
-        "nvim",
-        "emacs",
-        "nano",
-        "pico",
-        "ed",
-        // Interactive system monitors
-        "top",
-        "htop",
-        "btop",
-        "atop",
-        "iotop",
-        "iftop",
-        "nethogs",
-        "watch", // Runs commands repeatedly
-        // Interactive file managers
-        "mc",
-        "ranger",
-        "nnn",
-        "lf",
-        "vifm",
-        // Interactive programs
-        "less",
-        "more",
-        "most",
-        "man",
-        "info",
-        "ssh",
-        "telnet",
-        "ftp",
-        "sftp",
-        "screen",
-        "tmux",
-        "python",
-        "python3",
-        "irb",
-        "node",
-        "ipython", // REPLs without args
-        "mysql",
-        "psql",
-        "sqlite3",
-        "mongo",
-        "redis-cli",
-        // Other interactive tools
-        "gdb",
-        "lldb",
-        "pdb",
-        "w3m",
-        "lynx",
-        "links",
-        // System administration
-        "passwd",
-        "visudo",
-        // Note: sh, bash, zsh, fish are NOT blocked when used with -c flag
-        // They are already used internally for shell operator interpretation
-    ];
-
     /// Check if a command is interactive and should be blocked
     fn is_interactive_command(cmd: &str) -> bool {
-        Self::INTERACTIVE_COMMANDS.contains(&cmd)
+        ALL_INTERACTIVE.contains(cmd)
     }
 
     /// Check if a command requires interactive execution with TUI suspension
     ///
     /// These commands need a real TTY and will be executed with the TUI suspended.
+    ///
+    /// # Platform Support
+    /// - **Unix/Linux/macOS**: Fully supported via TUI suspension
+    /// - **Windows**: Returns true but execution will fail with error message
     pub fn requires_interactive(cmd: &str) -> bool {
-        matches!(
-            cmd,
-            // Text editors
-            "vim" | "nvim" | "nano" | "emacs" | "pico" | "ed" | "vi" |
-            // Pagers
-            "less" | "more" | "most" | "man" | "info" |
-            // File managers
-            "mc" | "ranger" | "nnn" | "lf" | "vifm" |
-            // Watchers
-            "watch"
-        )
+        REQUIRES_INTERACTIVE_SET.contains(cmd)
     }
 
     /// Check if a command is a shell builtin that must be executed through a shell
@@ -310,14 +307,42 @@ impl CommandExecutor {
 
         #[cfg(not(target_os = "windows"))]
         {
+            // RAII guard that ensures resume() is called even on panic
+            struct TuiGuard<'a> {
+                ui: &'a mut crate::terminal::TerminalUI,
+                suspended: bool,
+            }
+
+            impl<'a> Drop for TuiGuard<'a> {
+                fn drop(&mut self) {
+                    if self.suspended {
+                        // Best-effort resume, ignore errors in panic path
+                        let _ = self.ui.resume();
+                    }
+                }
+            }
+
             // Suspend TUI
             ui.suspend().context("Failed to suspend TUI")?;
+            let mut guard = TuiGuard {
+                ui,
+                suspended: true,
+            };
 
-            // Run command in foreground (inherits stdin/stdout/stderr)
-            let result = std::process::Command::new(cmd).args(args).status();
+            // Clone for move into spawn_blocking
+            let cmd = cmd.to_string();
+            let args = args.to_vec();
 
-            // Always resume TUI, even if command failed
-            ui.resume().context("Failed to resume TUI")?;
+            // Run blocking command on dedicated thread pool
+            let result = tokio::task::spawn_blocking(move || {
+                std::process::Command::new(&cmd).args(&args).status()
+            })
+            .await
+            .context("Interactive command task panicked")?;
+
+            // Resume TUI (guard ensures this happens even on panic)
+            guard.ui.resume().context("Failed to resume TUI")?;
+            guard.suspended = false; // Mark as successfully resumed
 
             // Return result
             match result {

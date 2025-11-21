@@ -134,8 +134,11 @@ User Input → Alias Expansion → InputClassifier → [Command Path | Natural L
 - `parser.rs`: Shell command parsing with `shell-words` crate (handles quotes, escapes)
 
 **`executor/`** - Command execution (uses Strategy pattern)
-- `command.rs`: Async command execution with stdout/stderr capture + **43 interactive commands blocklist**
-  - Blocks: vim, top, python REPL, ssh, tmux, less, man, and 36+ other TTY-required commands
+- `command.rs`: Async command execution with stdout/stderr capture + **interactive command support**
+  - **18 supported interactive commands** with TUI suspension: vim, nvim, nano, emacs, pico, ed, vi, less, more, most, man, info, mc, ranger, nnn, lf, vifm, watch
+  - **31 blocked interactive commands** that cannot run in TUI (ssh, tmux, screen, top, htop, python, node, mysql, psql, gdb, etc.) with helpful error messages
+  - Interactive command execution: TUI suspends, command runs in foreground, TUI resumes (Unix/Linux/macOS only)
+  - Non-interactive mode for blocked commands: Helpful suggestions (e.g., "top -b -n 1" instead of "top")
   - User-friendly error messages with command-specific alternatives
 - `install.rs`: Auto-install workflow
 - `package_manager.rs`: **Strategy pattern** for package managers (apt, yum, dnf, pacman, brew, choco, winget)
@@ -288,6 +291,56 @@ DO NOT implement these yet (deferred to M2/M3):
 - Safe parsing with proper quote handling (single quotes, double quotes, escaped spaces)
 - Validation occurs during `parse_aliases()` - dangerous aliases are silently rejected with warning
 
+### Working with Interactive Commands
+
+**Interactive Command Support**:
+- 18 commands with full TUI suspension support (vim, nano, less, man, etc.)
+- 31 commands that are blocked with user-friendly error messages
+- Unix/Linux/macOS only (Windows shows helpful error message)
+
+**Supported Commands** (can be executed with full terminal control):
+```
+Text Editors: vim, nvim, nano, emacs, pico, ed, vi
+Pagers: less, more, most, man, info
+File Managers: mc, ranger, nnn, lf, vifm
+Others: watch
+```
+
+**Blocked Commands** (with non-interactive alternatives):
+- System monitors: top, htop, btop, atop, iotop, iftop, nethogs
+- Network: ssh, telnet, ftp, sftp
+- Multiplexers: tmux, screen
+- REPLs: python, python3, node, irb, ipython
+- Databases: mysql, psql, sqlite3, mongo, redis-cli
+- Debuggers: gdb, lldb, pdb
+- Others: w3m, lynx, links, passwd, visudo
+
+**Implementation Details**:
+1. **Detection**: `CommandExecutor::requires_interactive(cmd: &str) -> bool` checks if command is in supported list
+2. **Execution Flow**:
+   - `CommandOrchestrator::handle_command()` checks `CommandExecutor::requires_interactive()`
+   - If true, calls `CommandExecutor::execute_interactive(cmd, args, ui)`
+   - If false but interactive (in blocked list), executor returns error with suggestions
+3. **TUI Suspension** (Unix/Linux/macOS):
+   - `TerminalUI::suspend()` - disables raw mode, leaves alternate screen, shows cursor
+   - Command executes in foreground with full terminal (inherits stdin/stdout/stderr)
+   - `TerminalUI::resume()` - re-enables raw mode, enters alternate screen, clears screen
+4. **Windows Handling**: Returns error message on Windows (platform limitation)
+
+**Adding New Interactive Commands**:
+1. Add to `requires_interactive()` in `src/executor/command.rs` (line ~114)
+2. Ensure it's also in `INTERACTIVE_COMMANDS` list for blocked error handling
+3. Test on Unix/Linux/macOS
+4. Add test case to `test_requires_interactive()` in command.rs
+
+**Adding New Blocked Commands**:
+1. Add to `INTERACTIVE_COMMANDS` in `src/executor/command.rs` (line ~46)
+2. Do NOT add to `requires_interactive()`
+3. Add helpful suggestion in error message if applicable (around line ~175)
+4. Add test case to `test_is_interactive_command()` in command.rs
+
+---
+
 ### Working with SCAN Algorithm
 
 The **SCAN Algorithm** (Shell-Command And Natural-language) is the core input classification system. When modifying:
@@ -433,14 +486,31 @@ The **SCAN Algorithm** (Shell-Command And Natural-language) is the core input cl
    - Fix: Single source of truth for command list, eliminating 120+ lines of duplicated code
    - Benefit: Consistency across handlers, easier to maintain/add commands
 
-3. **Interactive Commands Blocking** (High Priority - FIXED)
-   - Location: `src/executor/command.rs:44-101`
-   - Issue: No blocking of interactive commands that require TTY (vim, top, python REPL, etc.)
-   - Fix: Added `INTERACTIVE_COMMANDS` blocklist with 43 commands + user-friendly error messages
-   - Examples:
-     - `top` → "Try 'ps aux' or 'top -b -n 1' for non-interactive output"
-     - `vim` → "Try 'cat' to view or edit externally"
-     - `python` → "Pass code with -c flag: 'python -c \"code\"'"
+3. **Interactive Commands Support** (High Priority - IMPLEMENTED)
+   - Location: `src/executor/command.rs:44-332`
+   - Implementation: Added dual-mode command handling with TUI suspension for interactive commands
+   - **Supported Interactive Commands (18)** - TUI suspension enabled:
+     - Text editors: vim, nvim, nano, emacs, pico, ed, vi
+     - Pagers: less, more, most, man, info
+     - File managers: mc, ranger, nnn, lf, vifm
+     - Process watchers: watch
+   - **Blocked Interactive Commands (31)** - Helpful error messages with alternatives:
+     - System monitors: top, htop, btop, atop, iotop, iftop, nethogs
+     - Network tools: ssh, telnet, ftp, sftp
+     - Multiplexers: tmux, screen
+     - REPLs: python, python3, node, irb, ipython
+     - Databases: mysql, psql, sqlite3, mongo
+     - Debuggers: gdb, lldb, pdb
+     - Others: w3m, lynx, links, passwd, visudo
+   - **Unix/Linux/macOS Only**: Interactive mode is Unix-only; Windows returns helpful error message
+   - **TUI Suspension Mechanism**:
+     - Suspend: Exit raw mode, leave alternate screen, show cursor
+     - Execute: Command runs in foreground with full terminal access
+     - Resume: Re-enable raw mode, enter alternate screen, clear screen
+   - Examples of user guidance:
+     - `top` → "Try 'ps aux' or 'top -b -n 1' for batch mode"
+     - `ssh` → "Use in a separate terminal window"
+     - `python` → "Pass code as argument (e.g., 'python -c \"print(1+1)\"')"
 
 4. **Orchestrator Shell Builtin Bug Fix** (High Priority - FIXED)
    - Location: `src/orchestrators/command.rs:59-67`
@@ -539,7 +609,11 @@ The **SCAN Algorithm** (Shell-Command And Natural-language) is the core input cl
 - **Benchmarking**: Performance benchmarks in `benches/scan_benchmark.rs`
 - **Test Coverage**: 233 tests passing with comprehensive edge case coverage, 0 clippy warnings
 - **Unicode Support**: Full character-count based cursor positioning for international users (CJK, emoji, etc.)
-- **Interactive Command Blocking**: 43 commands blocked with user-friendly suggestions
+- **Interactive Command Support**: 18 commands with full TUI suspension (vim, nano, less, man, mc, etc.) + 31 blocked commands with helpful alternatives
+  - Supports: vim, nvim, nano, emacs, pico, ed, vi, less, more, most, man, info, mc, ranger, nnn, lf, vifm, watch
+  - Blocks (with alternatives): ssh, tmux, screen, top, htop, python, node, mysql, psql, gdb, and 21+ others
+  - Unix/Linux/macOS only (Windows shows helpful error message)
+  - TUI suspension mechanism: Suspend → Execute → Resume
 - **Known Commands Module**: Single source of truth for 60+ DevOps commands
 - **Shell Builtin Support**: 45+ builtins recognized without PATH verification
 - **Clean Codebase**: Dead code removed (facade.rs, errors.rs) - 537 lines reduced, 8,292 SLOC
@@ -555,6 +629,7 @@ The **SCAN Algorithm** (Shell-Command And Natural-language) is the core input cl
 - **Alias Cache TTL**: No automatic TTL/invalidation - alias files changed externally require `reload-aliases` command
 - **Typo Detection Performance**: O(n) algorithm - could be optimized to O(log n) with BK-tree
 - **Regex Pattern Precision**: Some edge cases in multilingual pattern detection
+- **Interactive Commands**: Unix/Linux/macOS only - Windows returns error message (platform limitation)
 
 ## Windows-Specific Considerations
 
@@ -598,3 +673,6 @@ xdg-open target/criterion/report/index.html  # Linux
 - **regex**: https://docs.rs/regex/latest/regex/ (pattern matching)
 - **which**: https://docs.rs/which/latest/which/ (command discovery)
 - **strsim**: https://docs.rs/strsim/latest/strsim/ (Levenshtein distance)
+- non fare commit lunghe e con co-author, nemmeno con icone e nemmeno con "claude"
+- quando programmi, tiene sempre a mente i principi SOLID, lo skill di rust che ti ho passato, i design patterns e l'efficienza (evitare clone di paramentri dove possibile e usare zero copy e CoW ove possibile)
+- evita sempre codice morto.
