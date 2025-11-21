@@ -1,11 +1,12 @@
+"""GCP agent configuration and initialization."""
+
 from langchain.agents import create_agent
-from agents.gcp.tools import get_ip_gcp
-from agents.shared.models import model
 from langchain_community.tools import ShellTool
 
-shell_tool = ShellTool(
-    ask_human_input=True
-)
+from agents.gcp.tools import get_ip_gcp
+from agents.shared.models import model
+
+shell_tool = ShellTool(ask_human_input=True)
 
 gcp_agent = create_agent(
     model=model,
@@ -15,7 +16,7 @@ gcp_agent = create_agent(
         "INSTRUCTIONS:\n"
         "- Assist ONLY with gcp-related tasks, DO NOT do any action related to other cloud providers\n"
         "- After you're done with your tasks, respond to the supervisor directly\n"
-        "- Respond ONLY with the results of your work, do NOT include ANY other text." \
+        "- Respond ONLY with the results of your work, do NOT include ANY other text."
         "- Always try to execute operations with the MCP Server first, if they fail fallback to the shell tool and use gcp cli"
     ),
     name="gcp_agent",

@@ -1,1 +1,1 @@
-# Shared tools across all agents
+"""Shared tools across all agents."""

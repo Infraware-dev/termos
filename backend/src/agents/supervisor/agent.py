@@ -1,3 +1,5 @@
+"""Supervisor agent configuration and initialization."""
+
 from langchain.chat_models import init_chat_model
 from langgraph_supervisor import create_supervisor
 

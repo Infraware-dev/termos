@@ -1,9 +1,11 @@
+"""Local agent configuration and initialization."""
+
 from langchain.agents import create_agent
-from agents.gcp.tools import get_ip_gcp
-from agents.shared.models import model
 from langchain_community.tools import ShellTool
 from langchain_core.tools import tool
 from langgraph.types import interrupt
+
+from agents.shared.models import model
 
 # Create shell tool without asking for input (we'll handle approval via interrupt)
 base_shell_tool = ShellTool(ask_human_input=False)
@@ -11,8 +13,8 @@ base_shell_tool = ShellTool(ask_human_input=False)
 
 @tool
 def shell_with_approval(commands: str) -> str:
-    """
-    Execute shell commands with human approval.
+    """Execute shell commands with human approval.
+
     Asks for approval before running the command.
     """
     # Ask for approval using LangGraph's interrupt mechanism
@@ -20,7 +22,7 @@ def shell_with_approval(commands: str) -> str:
         {
             "type": "command_approval",
             "command": commands,
-            "message": f"Do you want to execute this command?\n\nCommand: {commands}\n\nApprove? (Y/n)"
+            "message": f"Do you want to execute this command?\n\nCommand: {commands}\n\nApprove? (Y/n)",
         }
     )
 

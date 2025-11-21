@@ -1,1 +1,1 @@
-# Shared agent resources
+"""Shared agent resources."""

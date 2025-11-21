@@ -1,1 +1,1 @@
-# Agent package initialization
+"""Agent package initialization."""
