@@ -1,5 +1,8 @@
 FROM mcr.microsoft.com/devcontainers/python:2-3.12-bullseye
 
+# Update pip
+RUN pip install --upgrade pip
+
 # Install uv package manager
 RUN pip3 install uv
 
