@@ -44,20 +44,14 @@ const REQUIRES_INTERACTIVE: &[&str] = &[
     // Text editors
     "vim", "nvim", "nano", "emacs", "pico", "ed", "vi", // Pagers
     "less", "more", "most", "man", "info", // File managers
-    "mc", "ranger", "nnn", "lf", "vifm", // Watchers
-    "watch",
+    "mc", "ranger", "nnn", "lf", "vifm",  // Watchers
+    "watch", // System monitors
+    "top", "htop", "btop", "atop", "iotop", "iftop", "nethogs", // Package managers
+    "apt", "apt-get", "yum", "dnf", "pacman",
 ];
 
 /// Commands that are interactive but NOT supported (blocked entirely)
 const INTERACTIVE_BLOCKED: &[&str] = &[
-    // System monitors
-    "top",
-    "htop",
-    "btop",
-    "atop",
-    "iotop",
-    "iftop",
-    "nethogs",
     // Remote/session
     "ssh",
     "telnet",
@@ -509,36 +503,57 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_top_command_blocked() {
-        // top is in INTERACTIVE_COMMANDS but NOT in requires_interactive
-        let output = CommandExecutor::execute("top", &[], None).await.unwrap();
+    async fn test_python_command_blocked() {
+        // python is in INTERACTIVE_BLOCKED, not in requires_interactive
+        let output = CommandExecutor::execute("python", &[], None).await.unwrap();
         assert!(!output.is_success());
         assert!(output.stderr.contains("Interactive command"));
-        assert!(output.stderr.contains("top -b -n 1"));
     }
 
     #[test]
     fn test_requires_interactive() {
-        // Test that supported interactive commands are detected
+        // Text editors
         assert!(CommandExecutor::requires_interactive("vim"));
         assert!(CommandExecutor::requires_interactive("nano"));
+
+        // Pagers
         assert!(CommandExecutor::requires_interactive("less"));
         assert!(CommandExecutor::requires_interactive("man"));
+
+        // File managers
         assert!(CommandExecutor::requires_interactive("mc"));
 
-        // Test that unsupported commands return false
+        // System monitors
+        assert!(CommandExecutor::requires_interactive("top"));
+        assert!(CommandExecutor::requires_interactive("htop"));
+        assert!(CommandExecutor::requires_interactive("iotop"));
+
+        // Package managers
+        assert!(CommandExecutor::requires_interactive("apt"));
+        assert!(CommandExecutor::requires_interactive("apt-get"));
+        assert!(CommandExecutor::requires_interactive("yum"));
+
+        // Test that blocked commands return false
         assert!(!CommandExecutor::requires_interactive("ssh"));
-        assert!(!CommandExecutor::requires_interactive("top"));
+        assert!(!CommandExecutor::requires_interactive("python"));
         assert!(!CommandExecutor::requires_interactive("ls"));
     }
 
     #[test]
     fn test_is_interactive_command() {
+        // Supported interactive
         assert!(CommandExecutor::is_interactive_command("vim"));
         assert!(CommandExecutor::is_interactive_command("top"));
         assert!(CommandExecutor::is_interactive_command("nano"));
         assert!(CommandExecutor::is_interactive_command("htop"));
         assert!(CommandExecutor::is_interactive_command("less"));
+        assert!(CommandExecutor::is_interactive_command("apt"));
+
+        // Blocked interactive
+        assert!(CommandExecutor::is_interactive_command("ssh"));
+        assert!(CommandExecutor::is_interactive_command("python"));
+
+        // Non-interactive
         assert!(!CommandExecutor::is_interactive_command("ls"));
         assert!(!CommandExecutor::is_interactive_command("ps"));
         assert!(!CommandExecutor::is_interactive_command("cat"));
