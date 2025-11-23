@@ -1,4 +1,5 @@
 use infraware_terminal::executor::CommandExecutor;
+use infraware_terminal::input::discovery::CommandCache;
 use infraware_terminal::input::{InputClassifier, InputType};
 
 #[test]
@@ -29,29 +30,44 @@ async fn test_classification_preserves_interactive_commands() {
 
     let classifier = InputClassifier::new();
 
-    // apt is a known command (in DevOps whitelist)
-    match classifier.classify("apt list").unwrap() {
-        InputType::Command { command, args, .. } => {
-            assert_eq!(command, "apt");
-            assert_eq!(args, vec!["list"]);
+    // apt is a known command (in DevOps whitelist) - test only if installed (Linux only)
+    if CommandCache::is_available("apt") {
+        match classifier.classify("apt list").unwrap() {
+            InputType::Command { command, args, .. } => {
+                assert_eq!(command, "apt");
+                assert_eq!(args, vec!["list"]);
+            }
+            other => panic!("Expected Command, got {other:?}"),
         }
-        other => panic!("Expected Command, got {other:?}"),
     }
 
-    // htop is a known command
-    match classifier.classify("htop").unwrap() {
-        InputType::Command { command, args, .. } => {
-            assert_eq!(command, "htop");
-            assert!(args.is_empty());
+    // htop is a known command - test only if installed
+    if CommandCache::is_available("htop") {
+        match classifier.classify("htop").unwrap() {
+            InputType::Command { command, args, .. } => {
+                assert_eq!(command, "htop");
+                assert!(args.is_empty());
+            }
+            other => panic!("Expected Command, got {other:?}"),
         }
-        other => panic!("Expected Command, got {other:?}"),
     }
 
-    // top is a known command
-    match classifier.classify("top").unwrap() {
+    // top is a known command - test only if installed
+    if CommandCache::is_available("top") {
+        match classifier.classify("top").unwrap() {
+            InputType::Command { command, args, .. } => {
+                assert_eq!(command, "top");
+                assert!(args.is_empty());
+            }
+            other => panic!("Expected Command, got {other:?}"),
+        }
+    }
+
+    // ls is universally available on Unix - always test
+    match classifier.classify("ls -la").unwrap() {
         InputType::Command { command, args, .. } => {
-            assert_eq!(command, "top");
-            assert!(args.is_empty());
+            assert_eq!(command, "ls");
+            assert_eq!(args, vec!["-la"]);
         }
         other => panic!("Expected Command, got {other:?}"),
     }
