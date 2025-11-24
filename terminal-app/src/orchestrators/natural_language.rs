@@ -93,7 +93,6 @@ impl NaturalLanguageOrchestrator {
 mod tests {
     use super::*;
     use crate::llm::MockLLMClient;
-    use crate::terminal::TerminalState;
 
     #[tokio::test]
     async fn test_handle_query_success() {

@@ -18,6 +18,18 @@ pub struct CompiledPatterns {
     pub articles: RegexSet,
 }
 
+impl std::fmt::Debug for CompiledPatterns {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CompiledPatterns")
+            .field("command_syntax", &"<RegexSet>")
+            .field("natural_language", &"<RegexSet>")
+            .field("shell_operators", &"<RegexSet>")
+            .field("question_words", &"<RegexSet>")
+            .field("articles", &"<RegexSet>")
+            .finish()
+    }
+}
+
 /// Global instance of precompiled patterns
 ///
 /// Initialized lazily on first access, then reused for all subsequent pattern matches.

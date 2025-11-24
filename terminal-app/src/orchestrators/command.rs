@@ -19,7 +19,10 @@ pub struct CommandOrchestrator;
 
 impl CommandOrchestrator {
     /// Create a new command orchestrator
-    #[allow(dead_code)]
+    #[allow(
+        dead_code,
+        reason = "Constructor used in tests, Default trait is preferred"
+    )]
     pub const fn new() -> Self {
         Self
     }
@@ -248,7 +251,6 @@ impl CommandOrchestrator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::terminal::TerminalState;
 
     #[tokio::test]
     async fn test_command_not_found() {

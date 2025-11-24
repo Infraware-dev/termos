@@ -33,7 +33,10 @@ impl PackageInstaller {
     }
 
     /// Create an installer with custom package managers
-    #[allow(dead_code)]
+    #[allow(
+        dead_code,
+        reason = "Constructor for custom manager list, used in testing"
+    )]
     #[must_use]
     pub fn with_managers(managers: Vec<Box<dyn PackageManager>>) -> Self {
         Self { managers }
@@ -46,7 +49,10 @@ impl PackageInstaller {
     /// Returns an error if:
     /// - No package manager is available on the system
     /// - The selected package manager fails to install the package
-    #[allow(dead_code)] // Used via trait by package manager implementations
+    #[allow(
+        dead_code,
+        reason = "Auto-install API for M2/M3, called by package manager implementations"
+    )]
     pub async fn install_package(&self, package: &str) -> Result<()> {
         let manager = self.select_package_manager()?;
         manager.install(package).await
@@ -77,7 +83,10 @@ impl PackageInstaller {
     }
 
     /// Get all available package managers
-    #[allow(dead_code)]
+    #[allow(
+        dead_code,
+        reason = "Diagnostic API for package manager discovery, used in M2/M3"
+    )]
     #[must_use]
     pub fn get_available_managers(&self) -> Vec<&str> {
         self.managers
@@ -103,7 +112,10 @@ impl PackageInstaller {
     }
 
     /// Get the name of the available package manager (static method for compatibility)
-    #[allow(dead_code)]
+    #[allow(
+        dead_code,
+        reason = "Static API for backward compatibility, used in M2/M3"
+    )]
     #[must_use]
     pub fn get_package_manager_static() -> Option<String> {
         Self::new()

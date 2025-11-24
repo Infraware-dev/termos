@@ -50,6 +50,21 @@ pub struct InfrawareTerminal {
     history_arc: Arc<std::sync::RwLock<Vec<String>>>,
 }
 
+impl std::fmt::Debug for InfrawareTerminal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InfrawareTerminal")
+            .field("ui", &self.ui)
+            .field("state", &self.state)
+            .field("classifier", &self.classifier)
+            .field("event_handler", &self.event_handler)
+            .field("command_orchestrator", &self.command_orchestrator)
+            .field("nl_orchestrator", &self.nl_orchestrator)
+            .field("tab_completion_handler", &self.tab_completion_handler)
+            .field("history_arc", &"<Arc<RwLock<Vec<String>>>>")
+            .finish()
+    }
+}
+
 /// Builder for InfrawareTerminal
 ///
 /// Implements the Builder Pattern to provide flexible, testable construction
@@ -211,7 +226,10 @@ impl InfrawareTerminal {
     /// Create a new terminal instance with provided LLM client
     ///
     /// This is a convenience method. For more control, use `builder()`.
-    #[allow(dead_code)]
+    #[allow(
+        dead_code,
+        reason = "Convenience method for tests, builder pattern is preferred"
+    )]
     fn new_with_client(llm_client: Arc<dyn LLMClientTrait>) -> Result<Self> {
         Self::builder().with_llm_client(llm_client).build()
     }
@@ -219,7 +237,10 @@ impl InfrawareTerminal {
     /// Create a new Infraware Terminal instance with mock LLM (for development/testing)
     ///
     /// This is a convenience method. For more control, use `builder()`.
-    #[allow(dead_code)]
+    #[allow(
+        dead_code,
+        reason = "Convenience method for tests, builder pattern is preferred"
+    )]
     fn new() -> Result<Self> {
         Self::builder().build()
     }

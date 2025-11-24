@@ -185,6 +185,11 @@ These commands are recognized early in the classification chain to prevent miscl
 - Config: Hardcoded defaults, no config file
 - Markdown: Basic rendering only, no tables/images
 - Cache TTL: No automatic invalidation (use `reload-commands` after installing new commands)
+- **Hardcoded English Fallback Words**:
+  - `typo_detection.rs:100-103` contains `NL_SINGLE_WORDS` list with 15 hardcoded English words
+  - `patterns.rs:60-68` contains regex patterns for English question words/articles
+  - These patterns should be replaced with language-agnostic heuristics like `NaturalLanguageHandler` (commit cc6b784)
+  - Issue: Single-word multilingual inputs (e.g., "cosa", "como") may be incorrectly classified as command typos
 
 ## Common Patterns
 

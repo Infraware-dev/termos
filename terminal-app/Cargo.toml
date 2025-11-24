@@ -4,6 +4,18 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 
+[lints.rust]
+missing_debug_implementations = "warn"
+redundant_imports = "warn"
+redundant_lifetimes = "warn"
+trivial_numeric_casts = "allow"  # Animation math requires casts
+unsafe_op_in_unsafe_fn = "forbid"
+unused_lifetimes = "warn"
+
+[lints.clippy]
+all = "warn"
+pedantic = "allow"  # Too strict for M1 scope
+
 [dependencies]
 # TUI
 ratatui = "0.29"

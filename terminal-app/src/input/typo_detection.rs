@@ -24,6 +24,7 @@ use strsim::levenshtein;
 /// let result = handler.handle("dokcer ps");
 /// // Returns CommandTypo with suggestion "docker"
 /// ```
+#[derive(Debug)]
 pub struct TypoDetectionHandler {
     known_commands: Vec<String>,
     max_distance: usize,

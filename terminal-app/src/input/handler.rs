@@ -25,6 +25,14 @@ pub struct ClassifierChain {
     handlers: Vec<Box<dyn InputHandler>>,
 }
 
+impl std::fmt::Debug for ClassifierChain {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClassifierChain")
+            .field("handlers_count", &self.handlers.len())
+            .finish()
+    }
+}
+
 impl ClassifierChain {
     /// Create a new empty chain
     pub fn new() -> Self {
@@ -59,6 +67,7 @@ impl Default for ClassifierChain {
 }
 
 /// Handler for empty input
+#[derive(Debug)]
 pub struct EmptyInputHandler;
 
 impl EmptyInputHandler {
@@ -93,6 +102,7 @@ impl Default for EmptyInputHandler {
 ///
 /// This handler has high priority (position 3 in chain) to prevent these
 /// commands from being misclassified as natural language by later handlers.
+#[derive(Debug)]
 pub struct ApplicationBuiltinHandler;
 
 impl ApplicationBuiltinHandler {
@@ -145,6 +155,14 @@ impl Default for ApplicationBuiltinHandler {
 /// Handler for known commands (whitelist-based)
 pub struct KnownCommandHandler {
     known_commands: Vec<String>,
+}
+
+impl std::fmt::Debug for KnownCommandHandler {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("KnownCommandHandler")
+            .field("known_commands_count", &self.known_commands.len())
+            .finish()
+    }
 }
 
 impl KnownCommandHandler {
@@ -209,6 +227,7 @@ impl InputHandler for KnownCommandHandler {
 }
 
 /// Handler for command syntax detection (flags, pipes, paths, etc.)
+#[derive(Debug)]
 pub struct CommandSyntaxHandler;
 
 impl CommandSyntaxHandler {
@@ -284,6 +303,7 @@ impl Default for CommandSyntaxHandler {
 }
 
 /// Handler for natural language detection (multilingual support)
+#[derive(Debug)]
 pub struct NaturalLanguageHandler;
 
 impl NaturalLanguageHandler {
@@ -403,6 +423,7 @@ impl Default for NaturalLanguageHandler {
 ///
 /// Detects inputs that start with path-like prefixes and verifies
 /// that the file exists and is executable.
+#[derive(Debug)]
 pub struct PathCommandHandler;
 
 impl PathCommandHandler {
@@ -505,6 +526,7 @@ impl Default for PathCommandHandler {
 ///
 /// This is the final handler in the chain that catches any input
 /// that wasn't classified by previous handlers.
+#[derive(Debug)]
 pub struct DefaultHandler;
 
 impl DefaultHandler {

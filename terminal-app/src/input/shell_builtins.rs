@@ -26,7 +26,6 @@ pub struct ShellBuiltinInfo {
     pub requires_shell: bool,
     /// Whether this is Unix-only (not available on Windows)
     /// Note: This field is used in conditional compilation for Windows targets
-    #[allow(dead_code)]
     pub unix_only: bool,
 }
 
@@ -62,7 +61,10 @@ impl ShellBuiltinHandler {
     }
 
     /// Create a handler with a custom list of builtins
-    #[allow(dead_code)]
+    #[allow(
+        dead_code,
+        reason = "Constructor for custom builtin lists, used in testing"
+    )]
     pub const fn with_builtins(builtins: Vec<&'static str>) -> Self {
         Self { builtins }
     }
@@ -319,7 +321,7 @@ impl ShellBuiltinHandler {
 
     /// Check if a command is Unix-only and not available on Windows
     /// Note: This function is used in conditional compilation for Windows targets
-    #[allow(dead_code)]
+    #[allow(dead_code)] // Used for Windows platform checks in M2/M3
     pub fn is_unix_only(cmd: &str) -> bool {
         Self::builtin_info()
             .iter()

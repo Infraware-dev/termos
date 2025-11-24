@@ -4,6 +4,7 @@ use std::fs;
 use std::path::PathBuf;
 
 /// Tab completion handler
+#[derive(Debug)]
 pub struct TabCompletion;
 
 impl TabCompletion {

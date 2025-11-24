@@ -124,6 +124,7 @@ impl Particle {
 }
 
 /// Splash screen state
+#[derive(Debug)]
 pub struct SplashScreen {
     particles: Vec<Particle>,
     start_time: Instant,

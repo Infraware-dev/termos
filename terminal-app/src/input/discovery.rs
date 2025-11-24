@@ -19,6 +19,16 @@ pub struct CommandCache {
     aliases: HashMap<String, String>,
 }
 
+impl std::fmt::Debug for CommandCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CommandCache")
+            .field("available_count", &self.available.len())
+            .field("unavailable_count", &self.unavailable.len())
+            .field("aliases_count", &self.aliases.len())
+            .finish()
+    }
+}
+
 impl CommandCache {
     /// Create a new empty command cache
     fn new() -> Self {
@@ -96,7 +106,7 @@ impl CommandCache {
     /// // Check if alias exists
     /// let is_alias = CommandCache::is_alias("ll");
     /// ```
-    #[allow(dead_code)]
+    #[allow(dead_code, reason = "Public API for alias checking, used in M2/M3")]
     pub fn is_alias(command: &str) -> bool {
         let cache = match COMMAND_CACHE.read() {
             Ok(cache) => cache,
@@ -111,7 +121,7 @@ impl CommandCache {
     /// Get the expanded command for an alias
     ///
     /// Returns `None` if not an alias, or `Some(expanded_command)` if found.
-    #[allow(dead_code)]
+    #[allow(dead_code, reason = "Public API for alias expansion, used in M2/M3")]
     pub fn get_alias_expansion(alias: &str) -> Option<String> {
         let cache = match COMMAND_CACHE.read() {
             Ok(cache) => cache,
@@ -138,7 +148,10 @@ impl CommandCache {
     ///
     /// CommandCache::load_user_aliases();
     /// ```
-    #[allow(dead_code)]
+    #[allow(
+        dead_code,
+        reason = "Called during startup, not from multiple callsites"
+    )]
     pub fn load_user_aliases() {
         let mut aliases = HashMap::new();
 
@@ -284,7 +297,10 @@ impl CommandCache {
     ///
     /// CommandCache::clear();
     /// ```
-    #[allow(dead_code)]
+    #[allow(
+        dead_code,
+        reason = "Public API for cache management, used for testing and reload-commands"
+    )]
     pub fn clear() {
         let mut cache = match COMMAND_CACHE.write() {
             Ok(cache) => cache,
@@ -325,7 +341,10 @@ impl CommandCache {
     }
 
     /// Get statistics about cache contents (for debugging/monitoring)
-    #[allow(dead_code)]
+    #[allow(
+        dead_code,
+        reason = "Diagnostic API for cache stats, reserved for monitoring in M2/M3"
+    )]
     pub fn stats() -> CacheStats {
         let cache = match COMMAND_CACHE.read() {
             Ok(cache) => cache,
@@ -344,7 +363,7 @@ impl CommandCache {
 
 /// Cache statistics
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
+#[allow(dead_code)] // Fields returned by stats() for diagnostics in M2/M3
 pub struct CacheStats {
     pub available_count: usize,
     pub unavailable_count: usize,
@@ -404,7 +423,6 @@ fn is_safe_alias(name: &str, value: &str) -> bool {
 ///
 /// # Returns
 /// HashMap of alias name to expanded command
-#[allow(dead_code)]
 fn parse_aliases(content: &str) -> HashMap<String, String> {
     let mut aliases = HashMap::new();
 

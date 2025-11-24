@@ -31,7 +31,7 @@ pub trait PackageManager: Send + Sync + std::fmt::Debug {
     /// - The package manager command fails to execute
     /// - The installation returns a non-zero exit code
     /// - sudo privileges are required but not available
-    #[allow(dead_code)] // Trait method implemented by all package managers
+    #[allow(dead_code)] // Trait method implemented by all 7 package managers, called in M2/M3
     async fn install(&self, package: &str) -> Result<()>;
 
     /// Get the priority of this package manager (higher = preferred)

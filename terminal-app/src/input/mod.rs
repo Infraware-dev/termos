@@ -12,13 +12,13 @@ pub mod typo_detection;
 pub use classifier::{InputClassifier, InputType};
 
 // Re-export handler types for external use (M2/M3)
-#[allow(unused_imports)]
+#[allow(unused_imports)] // Re-exported types for library API
 pub use handler::{
     ApplicationBuiltinHandler, ClassifierChain, CommandSyntaxHandler, DefaultHandler,
     EmptyInputHandler, InputHandler, KnownCommandHandler, NaturalLanguageHandler,
     PathCommandHandler,
 };
-#[allow(unused_imports)]
+#[allow(unused_imports)] // Re-exported for library API
 pub use history_expansion::HistoryExpansionHandler;
-#[allow(unused_imports)]
+#[allow(unused_imports)] // Re-exported for library API
 pub use shell_builtins::ShellBuiltinHandler;

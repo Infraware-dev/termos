@@ -2,6 +2,7 @@
 use super::ansi::AnsiColor;
 
 /// Message formatter for creating consistently styled output
+#[derive(Debug)]
 pub struct MessageFormatter;
 
 impl MessageFormatter {

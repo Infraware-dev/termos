@@ -86,7 +86,7 @@ impl Default for EventHandler {
 
 /// Custom terminal events
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
+#[allow(dead_code)] // Some event variants reserved for future terminal features
 pub enum TerminalEvent {
     /// User input character
     InputChar(char),
@@ -121,7 +121,6 @@ pub enum TerminalEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
     fn create_key_event(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
         KeyEvent::new(code, modifiers)

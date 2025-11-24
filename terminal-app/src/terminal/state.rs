@@ -3,7 +3,7 @@ use super::buffers::{CommandHistory, InputBuffer, OutputBuffer};
 
 /// Represents the current mode of the terminal
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)]
+#[allow(dead_code)] // PromptingInstall variant reserved for M2/M3 auto-install feature
 pub enum TerminalMode {
     Normal,           // Waiting for input
     ExecutingCommand, // Running shell command
