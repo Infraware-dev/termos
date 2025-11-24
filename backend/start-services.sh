@@ -1,12 +1,15 @@
 #!/bin/bash
 
-# Start LangGraph dev server in background with logging
-langgraph dev 2>&1 | sed 's/\x1b\[[0-9;]*m//g' > langgraph_server.log &
+# Create logs directory if it doesn't exist
+mkdir -p logs
 
-# Store the PID of the background process
+# Start LangGraph dev server in background with logging
+langgraph dev --no-browser 2>&1 | sed 's/\x1b\[[0-9;]*m//g' > logs/langgraph_server.log &
 LANGGRAPH_PID=$!
-echo "LangGraph server started (PID: $LANGGRAPH_PID)"
+
+echo "LangGraph server started (PID: $LANGGRAPH_PID) -> logs/langgraph_server.log"
+echo "Starting FastAPI server in foreground..."
+echo ""
 
 # Start FastAPI server in foreground
-echo "Starting FastAPI server..."
 uv run main.py

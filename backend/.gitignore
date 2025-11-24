@@ -208,3 +208,7 @@ __marimo__/
 
 # LangGraph runtime files
 **/.langgraph_api/
+
+# Server logs
+logs/
+langgraph_server.log
