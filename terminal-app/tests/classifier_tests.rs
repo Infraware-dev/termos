@@ -332,3 +332,101 @@ fn test_language_agnostic_classification() {
         _ => panic!("Expected Command for 'docker --hilfe'"),
     }
 }
+
+#[test]
+fn test_classify_single_word_typo() {
+    let classifier = InputClassifier::new();
+
+    // Test "doker" → should be detected as CommandTypo and suggest "docker"
+    match classifier.classify("doker").unwrap() {
+        InputType::CommandTypo {
+            input,
+            suggestion,
+            distance,
+        } => {
+            assert_eq!(input, "doker", "Input should be 'doker'");
+            assert_eq!(suggestion, "docker", "Should suggest 'docker'");
+            assert_eq!(distance, 1, "Levenshtein distance should be 1");
+        }
+        other => panic!("Expected CommandTypo for 'doker', got: {:?}", other),
+    }
+
+    // Test "dokcer" → should also be detected as CommandTypo
+    match classifier.classify("dokcer").unwrap() {
+        InputType::CommandTypo {
+            input,
+            suggestion,
+            distance,
+        } => {
+            assert_eq!(input, "dokcer");
+            assert_eq!(suggestion, "docker");
+            assert_eq!(distance, 2);
+        }
+        other => panic!("Expected CommandTypo for 'dokcer', got: {:?}", other),
+    }
+
+    // Test "grpe" → should suggest "grep"
+    match classifier.classify("grpe").unwrap() {
+        InputType::CommandTypo {
+            input,
+            suggestion,
+            distance,
+        } => {
+            assert_eq!(input, "grpe");
+            assert_eq!(suggestion, "grep");
+            assert!(distance <= 2);
+        }
+        other => panic!("Expected CommandTypo for 'grpe', got: {:?}", other),
+    }
+}
+
+#[test]
+fn test_classify_multi_word_typo() {
+    let classifier = InputClassifier::new();
+
+    // Test "doker ps" → 2 words, should be detected as typo
+    match classifier.classify("doker ps").unwrap() {
+        InputType::CommandTypo {
+            input,
+            suggestion,
+            distance,
+        } => {
+            assert_eq!(input, "doker ps");
+            assert_eq!(suggestion, "docker");
+            assert_eq!(distance, 1);
+        }
+        other => panic!("Expected CommandTypo for 'doker ps', got: {:?}", other),
+    }
+
+    // Test "doker ps get" → 3 words, should ALSO be detected as typo
+    // This is the critical fix - previously this was classified as NaturalLanguage
+    match classifier.classify("doker ps get").unwrap() {
+        InputType::CommandTypo {
+            input,
+            suggestion,
+            distance,
+        } => {
+            assert_eq!(input, "doker ps get");
+            assert_eq!(suggestion, "docker");
+            assert_eq!(distance, 1);
+        }
+        other => panic!("Expected CommandTypo for 'doker ps get', got: {:?}", other),
+    }
+
+    // Test "kubeclt create deployment" → 3 words, should be detected
+    match classifier.classify("kubeclt create deployment").unwrap() {
+        InputType::CommandTypo {
+            input,
+            suggestion,
+            distance,
+        } => {
+            assert_eq!(input, "kubeclt create deployment");
+            assert_eq!(suggestion, "kubectl");
+            assert!(distance <= 2);
+        }
+        other => panic!(
+            "Expected CommandTypo for 'kubeclt create deployment', got: {:?}",
+            other
+        ),
+    }
+}

@@ -56,21 +56,42 @@ impl TypoDetectionHandler {
     /// `Some((closest_match, distance))` if a close match is found,
     /// `None` if no match within max_distance
     fn find_closest_match(&self, input: &str) -> Option<(String, usize)> {
-        self.known_commands
+        log::debug!("Typo detection: checking '{}' for close matches", input);
+
+        let result = self
+            .known_commands
             .iter()
             .map(|cmd| (cmd.as_str(), levenshtein(input, cmd)))
             .filter(|(_, dist)| *dist <= self.max_distance && *dist > 0)
             .min_by_key(|(_, dist)| *dist)
-            .map(|(cmd, dist)| (cmd.to_string(), dist))
+            .map(|(cmd, dist)| (cmd.to_string(), dist));
+
+        match &result {
+            Some((cmd, dist)) => {
+                log::debug!(
+                    "Typo detection: '{}' → '{}' (distance: {})",
+                    input,
+                    cmd,
+                    dist
+                );
+            }
+            None => {
+                log::debug!("Typo detection: no close match found for '{}'", input);
+            }
+        }
+
+        result
     }
 
     /// Check if input looks like a command (not a natural language phrase)
     ///
     /// Language-agnostic algorithm:
     /// - Single word → check typo (with NL filter)
-    /// - 2 words → check if first word is a typo (catches "dokcer ps")
-    /// - Has flags (-/--) → might be a typo
-    /// - 3+ words without flags → likely natural language
+    /// - Has flags (-/--) or operators → might be a typo
+    /// - Has NL indicators (questions, articles) → definitely NOT a typo
+    /// - Multi-word (≤3 words) without NL indicators → check if first word is a typo
+    ///   (catches "dokcer ps", "doker ps get", "kubeclt create deployment")
+    /// - 4+ words without command structure → likely natural language
     fn looks_like_command(&self, input: &str) -> bool {
         let word_count = input.split_whitespace().count();
 
@@ -91,16 +112,29 @@ impl TypoDetectionHandler {
             return true;
         }
 
-        // 2 words without flags → check if first word is a typo
-        // Catches: "dokcer ps", "kubeclt get" but not "pippo ciao"
-        if word_count == 2 {
+        // Check for natural language indicators - if present, don't check for typos
+        // This prevents false positives like "how do I list files?" being detected
+        // as a typo just because "how" is close to some command
+        if patterns.has_natural_language_indicators(input)
+            || patterns.starts_with_question_word(input)
+            || patterns.has_articles(input)
+        {
+            return false;
+        }
+
+        // Multi-word without flags and without NL indicators → check if first word is a typo
+        // This handles cases like:
+        // - "doker ps" (2 words, no NL indicators)
+        // - "doker ps get" (3+ words, no NL indicators)
+        // - "kubeclt create deployment" (3+ words, no NL indicators)
+        // But avoids: "how do I list files?" (has question word + articles)
+        if word_count <= 3 {
             if let Some(first) = input.split_whitespace().next() {
-                // Only check if first word could be a typo of a known command
                 return self.find_closest_match(first).is_some();
             }
         }
 
-        // 3+ words without flags → likely natural language (language-agnostic)
+        // 4+ words without command structure → likely natural language
         false
     }
 
@@ -360,8 +394,17 @@ mod tests {
             assert_eq!(suggestion, "kubectl");
         }
 
-        // Multi-word without flags should NOT be detected as typo
+        // Multi-word without flags SHOULD be detected as typo (changed behavior)
+        // This is the fix - previously this was incorrectly returning None
         let result = handler.handle("kubeclt get pods");
-        assert_eq!(result, None); // Passes through to NL handler
+        assert!(
+            matches!(result, Some(InputType::CommandTypo { .. })),
+            "Expected CommandTypo for 'kubeclt get pods', got: {:?}",
+            result
+        );
+
+        if let Some(InputType::CommandTypo { suggestion, .. }) = result {
+            assert_eq!(suggestion, "kubectl");
+        }
     }
 }
