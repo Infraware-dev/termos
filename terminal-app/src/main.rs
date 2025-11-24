@@ -412,21 +412,45 @@ impl InfrawareTerminal {
 
     /// Handle command typo
     ///
-    /// Informs the user about a potential typo and suggests the correct command
+    /// Auto-corrects the typo and executes the suggested command
     async fn handle_command_typo(
         &mut self,
         input: &str,
         suggestion: &str,
         distance: usize,
     ) -> Result<()> {
-        let message = format!(
-            "Command not found: '{}'\nDid you mean '{}'? (Levenshtein distance: {})",
-            input.split_whitespace().next().unwrap_or(input),
-            suggestion,
-            distance
-        );
-        self.state.add_output(MessageFormatter::error(&message));
-        Ok(())
+        // Extract the mistyped first word and get the rest of the input
+        let parts: Vec<&str> = input.split_whitespace().collect();
+        let mistyped = parts.first().copied().unwrap_or(input);
+
+        // Show correction message
+        self.state.add_output(MessageFormatter::suggestion(format!(
+            "Correcting '{}' → '{}' (Levenshtein distance: {})",
+            mistyped, suggestion, distance
+        )));
+
+        // Reconstruct command with corrected first word
+        let corrected_input = if parts.len() > 1 {
+            format!("{} {}", suggestion, parts[1..].join(" "))
+        } else {
+            suggestion.to_string()
+        };
+
+        // Parse and execute the corrected command
+        use crate::input::parser::CommandParser;
+        match CommandParser::parse(&corrected_input) {
+            Ok((command, args)) => {
+                self.command_orchestrator
+                    .handle_command(&command, &args, None, &mut self.state, &mut self.ui)
+                    .await
+            }
+            Err(e) => {
+                self.state.add_output(MessageFormatter::error(format!(
+                    "Failed to parse command: {e}"
+                )));
+                Ok(())
+            }
+        }
     }
 
     /// Handle natural language query
