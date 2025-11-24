@@ -34,6 +34,11 @@ regex = "1.10"
 dirs = "6.0.0"  # For home directory, config paths
 strsim = "0.11"  # Levenshtein distance for typo detection
 
+# Logging
+log = "0.4"  # Logging facade
+log4rs = "1.3"  # Size-based log rotation
+dotenvy = "0.15"  # .env file loading
+
 [dev-dependencies]
 tokio-test = "0.4"
 criterion = "0.7.0"  # Performance benchmarking

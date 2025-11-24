@@ -1,6 +1,7 @@
 mod executor;
 mod input;
 mod llm;
+mod logging;
 mod orchestrators;
 /// Infraware Terminal - Hybrid Command Interpreter with AI Assistance
 ///
@@ -442,28 +443,41 @@ impl InfrawareTerminal {
 /// Main entry point
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Load environment variables from .env file (if present)
+    dotenvy::dotenv().ok();
+
+    // Initialize logging system
+    logging::init()?;
+
+    log::info!("Infraware Terminal starting...");
+
     // Configure LLM client based on environment variable
     let llm_client: Arc<dyn LLMClientTrait> = if let Ok(url) = std::env::var("INFRAWARE_LLM_URL") {
-        eprintln!("Using HTTP LLM client: {url}");
+        log::info!("Using HTTP LLM client: {}", url);
         Arc::new(HttpLLMClient::new(url))
     } else {
-        eprintln!("Using Mock LLM client (set INFRAWARE_LLM_URL to use real LLM)");
+        log::info!("Using Mock LLM client (set INFRAWARE_LLM_URL to use real LLM)");
         Arc::new(MockLLMClient::new())
     };
 
     // Create terminal using builder pattern
+    log::debug!("Building terminal UI...");
     let mut terminal = InfrawareTerminal::builder()
         .with_llm_client(llm_client)
         .build()?;
 
     // Show animated splash screen
+    log::debug!("Showing splash screen");
     SplashScreen::run(terminal.ui.inner_terminal())?;
 
     // Run the main loop
+    log::debug!("Starting main event loop");
     if let Err(e) = terminal.run().await {
+        log::error!("Fatal error: {}", e);
         eprintln!("Error: {e}");
         std::process::exit(1);
     }
 
+    log::info!("Infraware Terminal shutting down");
     Ok(())
 }
