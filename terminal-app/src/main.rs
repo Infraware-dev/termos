@@ -21,7 +21,7 @@ use llm::{HttpLLMClient, LLMClientTrait, MockLLMClient, ResponseRenderer};
 use orchestrators::{CommandOrchestrator, NaturalLanguageOrchestrator, TabCompletionHandler};
 use std::sync::Arc;
 use terminal::events::TerminalEvent;
-use terminal::{EventHandler, TerminalMode, TerminalState, TerminalUI};
+use terminal::{EventHandler, SplashScreen, TerminalMode, TerminalState, TerminalUI};
 use utils::MessageFormatter;
 
 /// Main application structure
@@ -37,7 +37,8 @@ use utils::MessageFormatter;
 /// - Route events to appropriate handlers
 /// - Coordinate between UI, state, and orchestrators
 pub struct InfrawareTerminal {
-    ui: TerminalUI,
+    /// Terminal UI - public for splash screen access
+    pub ui: TerminalUI,
     state: TerminalState,
     classifier: InputClassifier,
     event_handler: EventHandler,
@@ -306,7 +307,9 @@ impl InfrawareTerminal {
                 self.state.scroll_down();
             }
             TerminalEvent::Submit => {
-                self.handle_submit().await?;
+                if !self.handle_submit().await? {
+                    return Ok(false); // Exit requested
+                }
             }
             TerminalEvent::TabComplete => {
                 self.handle_tab_completion();
@@ -324,11 +327,19 @@ impl InfrawareTerminal {
     }
 
     /// Handle input submission
-    async fn handle_submit(&mut self) -> Result<()> {
+    /// Returns false if the terminal should exit
+    async fn handle_submit(&mut self) -> Result<bool> {
         let input = self.state.submit_input();
 
         if input.trim().is_empty() {
-            return Ok(());
+            return Ok(true);
+        }
+
+        // Handle built-in exit command
+        let trimmed = input.trim().to_lowercase();
+        if trimmed == "exit" || trimmed == "quit" {
+            self.state.add_output(MessageFormatter::info("Goodbye!"));
+            return Ok(false); // Signal to exit
         }
 
         // Sync history with Arc for history expansion
@@ -370,7 +381,7 @@ impl InfrawareTerminal {
         self.state.add_output(String::new()); // Empty line for spacing
         self.state.mode = TerminalMode::Normal;
 
-        Ok(())
+        Ok(true)
     }
 
     /// Handle command execution
@@ -444,6 +455,9 @@ async fn main() -> Result<()> {
     let mut terminal = InfrawareTerminal::builder()
         .with_llm_client(llm_client)
         .build()?;
+
+    // Show animated splash screen
+    SplashScreen::run(terminal.ui.inner_terminal())?;
 
     // Run the main loop
     if let Err(e) = terminal.run().await {

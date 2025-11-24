@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 **Infraware Terminal** is a hybrid command interpreter with AI assistance for DevOps operations. It intelligently routes user input to either shell command execution or an LLM backend for natural language queries.
 
 **Tech Stack**: Rust + TUI (ratatui/crossterm)
-**Status**: M1 Complete, Production-Ready (486 tests, 0 clippy warnings)
+**Status**: M1 Complete, Production-Ready (496 tests, 0 clippy warnings)
 **Target Users**: DevOps engineers working with cloud environments (AWS/Azure)
 
 **Prerequisites** (Linux): `sudo apt install -y pkg-config libssl-dev`
@@ -72,6 +72,7 @@ User Input → Alias Expansion → InputClassifier → [Command Path | Natural L
 - `state.rs`: Terminal state composition
 - `buffers.rs`: SRP-compliant buffers (OutputBuffer, InputBuffer, CommandHistory)
 - `events.rs`: Keyboard event handling (Windows: filter KeyEventKind::Press only)
+- `splash.rs`: Animated splash screen with particle assembly effect (5s duration, skippable)
 
 **`input/`** - SCAN Algorithm
 - `classifier.rs`: InputClassifier coordinating handler chain + alias expansion
@@ -130,6 +131,11 @@ User Input → Alias Expansion → InputClassifier → [Command Path | Natural L
 - Security: `is_safe_alias()` rejects dangerous patterns
 - Runtime reload: `reload-aliases` built-in command
 
+### Built-in Commands
+- `clear` - Clear terminal output buffer
+- `reload-aliases` - Reload aliases from system/user config files
+- `reload-commands` - Clear command cache (use after installing new commands)
+
 ### Interactive Commands
 - **28 supported** (TUI suspends): vim, nvim, nano, emacs, less, more, man, top, htop, sudo, watch, mc, ranger, etc.
 - **31 blocked** (helpful error): ssh, tmux, screen, python, mysql, gdb, etc.
@@ -172,7 +178,7 @@ User Input → Alias Expansion → InputClassifier → [Command Path | Natural L
 - History: Session-only, not persisted to disk
 - Config: Hardcoded defaults, no config file
 - Markdown: Basic rendering only, no tables/images
-- Cache TTL: No invalidation, restart required for new commands
+- Cache TTL: No automatic invalidation (use `reload-commands` after installing new commands)
 
 ## Common Patterns
 

@@ -55,6 +55,11 @@ impl TerminalUI {
         Ok(())
     }
 
+    /// Get mutable reference to inner terminal for splash screen
+    pub fn inner_terminal(&mut self) -> &mut Terminal<CrosstermBackend<io::Stdout>> {
+        &mut self.terminal
+    }
+
     /// Clean up the terminal on exit
     pub fn cleanup(&mut self) -> Result<()> {
         disable_raw_mode()?;
