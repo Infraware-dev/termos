@@ -56,6 +56,11 @@ impl CommandOrchestrator {
             return self.handle_reload_aliases_command(state).await;
         }
 
+        // Handle reload-commands built-in command
+        if cmd == "reload-commands" {
+            return self.handle_reload_commands_command(state);
+        }
+
         // Check if command exists BEFORE trying any execution
         // (skip check if using shell interpretation, shell builtin, or history expansion)
         // Shell builtins don't exist in PATH but are valid commands that must be executed via shell
@@ -120,6 +125,24 @@ impl CommandOrchestrator {
                 state.add_output(MessageFormatter::error(format!("Task panicked: {e}")));
             }
         }
+
+        Ok(())
+    }
+
+    /// Handle the built-in "reload-commands" command
+    ///
+    /// Clears the command cache (available/unavailable) so that newly installed
+    /// commands will be discovered on next use. Aliases are preserved.
+    fn handle_reload_commands_command(&self, state: &mut TerminalState) -> Result<()> {
+        use crate::input::discovery::CommandCache;
+
+        state.add_output(MessageFormatter::info("Clearing command cache..."));
+
+        CommandCache::clear_commands();
+
+        state.add_output(MessageFormatter::success(
+            "Command cache cleared. New commands will be discovered on next use.",
+        ));
 
         Ok(())
     }

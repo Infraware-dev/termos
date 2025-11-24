@@ -284,6 +284,76 @@ async fn test_reload_aliases_command() {
 }
 
 #[tokio::test]
+#[serial_test::serial]
+async fn test_reload_commands_command() {
+    use infraware_terminal::input::discovery::CommandCache;
+
+    // Clear cache first
+    CommandCache::clear();
+
+    // Populate command cache with some lookups
+    let _ = CommandCache::is_available("ls");
+    let _ = CommandCache::is_available("nonexistent-test-cmd-xyz");
+
+    // Verify cache is populated
+    let stats_before = CommandCache::stats();
+    assert!(
+        stats_before.available_count > 0 || stats_before.unavailable_count > 0,
+        "Cache should have entries after is_available calls"
+    );
+
+    // Clear only commands (not aliases)
+    CommandCache::clear_commands();
+
+    // Verify command cache is cleared but structure is intact
+    let stats_after = CommandCache::stats();
+    assert_eq!(
+        stats_after.available_count, 0,
+        "Available cache should be empty"
+    );
+    assert_eq!(
+        stats_after.unavailable_count, 0,
+        "Unavailable cache should be empty"
+    );
+
+    // Clean up
+    CommandCache::clear();
+}
+
+#[tokio::test]
+#[serial_test::serial]
+async fn test_reload_commands_preserves_aliases() {
+    use infraware_terminal::input::discovery::CommandCache;
+
+    // Clear cache first
+    CommandCache::clear();
+
+    // Load aliases
+    let _ = CommandCache::load_system_aliases();
+    let stats_with_aliases = CommandCache::stats();
+
+    // Also populate command cache
+    let _ = CommandCache::is_available("ls");
+
+    // Clear only commands
+    CommandCache::clear_commands();
+
+    // Verify aliases are preserved
+    let stats_after = CommandCache::stats();
+    assert_eq!(
+        stats_after.alias_count, stats_with_aliases.alias_count,
+        "Aliases should be preserved after clear_commands()"
+    );
+    assert_eq!(
+        stats_after.available_count, 0,
+        "Command cache should be empty"
+    );
+
+    // Clean up
+    CommandCache::clear();
+}
+
+#[tokio::test]
 async fn test_shell_builtin_colon_execution() {
     let classifier = InputClassifier::new();
 
