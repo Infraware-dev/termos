@@ -21,7 +21,7 @@ Comprehensive PlantUML diagrams documenting the complete architecture of the Inf
 
 3. **input_module.puml** (10-15 min)
    - SCAN Algorithm (Chain of Responsibility)
-   - 9-handler input classification chain
+   - 10-handler input classification chain
    - Performance optimization details
    - Alias expansion and history expansion
 

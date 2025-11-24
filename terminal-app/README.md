@@ -9,8 +9,9 @@ Infraware Terminal is a TUI-based terminal application that intelligently routes
 **Current Milestone:** M1 - Terminal Core MVP (Month 1)
 **Version:** 0.1.0
 **Tech Stack:** Rust + TUI (ratatui/crossterm)
+**Code Quality:** Microsoft Pragmatic Rust Guidelines compliant
 
-This is the initial project setup with the complete module structure. Implementation is following the 4-week timeline outlined in the project brief.
+This is the initial project setup with the complete module structure. Implementation is following the 4-week timeline outlined in the project brief. Codebase adheres to Microsoft's enterprise-scale Rust guidelines with strict compiler/clippy lints, Debug trait implementations on all public types, and #[expect] for all lint overrides.
 
 ## ✨ Features
 
@@ -31,7 +32,7 @@ This is the initial project setup with the complete module structure. Implementa
   - O(1) HashMap lookup for performance (<1μs expansion overhead)
   - Built-in `reload-aliases` command for runtime reloading
   - Security: Rejects dangerous patterns (rm -rf /, mkfs, dd, fork bombs, etc.)
-- ✅ **SCAN Algorithm**: Advanced input classification with 9-handler chain + alias + history expansion (<100μs avg)
+- ✅ **SCAN Algorithm**: Advanced input classification with 10-handler chain + alias + history expansion (<100μs avg)
   - Alias expansion before classification (single-level like Bash)
   - Shell builtin support (45+): `.`, `:`, `[`, `[[`, source, export, eval, exec, and more
   - Command recognition with PATH verification and caching
@@ -50,7 +51,7 @@ This is the initial project setup with the complete module structure. Implementa
 - ✅ **Cross-Platform**: Windows, macOS, and Linux support with platform-specific optimizations
 - ✅ **Benchmarking Suite**: Performance benchmarks for SCAN algorithm
 - ✅ **Unicode Support**: Full Unicode support for international users (CJK, emoji, etc.) with character-count based cursor positioning
-- ✅ **Code Quality**: 233 tests passing with comprehensive edge case coverage, 0 clippy warnings, production-ready code
+- ✅ **Code Quality**: 224 tests passing with comprehensive edge case coverage, 0 clippy warnings, Microsoft Pragmatic Rust Guidelines compliant (Debug on all public types, #[expect] for lint overrides, static verification lints enabled)
 
 ### Coming in M2/M3
 
@@ -76,16 +77,17 @@ User Input → Alias Expansion → InputClassifier (9-Handler Chain)
                           Shell Exec Suggest LLM Backend
 ```
 
-**9-Handler Chain** (executed in strict order):
+**10-Handler Chain** (executed in strict order):
 1. **EmptyInputHandler** - Fast path for empty input (<1μs)
 2. **HistoryExpansionHandler** - Bash-style history expansion: `!!`,  `!$`, `!^`, `!*` (~1-5μs)
-3. **ShellBuiltinHandler** - Shell builtins without PATH check: `.`, `:`, `[`, `[[`, source, export, eval, etc. (<1μs)
-4. **PathCommandHandler** - Executable paths: `./script.sh`, `/usr/bin/cmd` (~10μs)
-5. **KnownCommandHandler** - 60+ DevOps commands with PATH cache (<1μs hit)
-6. **CommandSyntaxHandler** - Language-agnostic: flags, pipes, redirects (~10μs)
-7. **TypoDetectionHandler** - Levenshtein distance ≤2: "dokcer" → "docker" (~100μs)
-8. **NaturalLanguageHandler** - English patterns (precompiled regex) (~5μs)
-9. **DefaultHandler** - Fallback to natural language (<1μs)
+3. **ApplicationBuiltinHandler** - App-specific commands: clear, reload-aliases, reload-commands (<1μs)
+4. **ShellBuiltinHandler** - Shell builtins without PATH check: `.`, `:`, `[`, `[[`, source, export, eval, etc. (<1μs)
+5. **PathCommandHandler** - Executable paths: `./script.sh`, `/usr/bin/cmd` (~10μs)
+6. **KnownCommandHandler** - 60+ DevOps commands with PATH cache (<1μs hit)
+7. **CommandSyntaxHandler** - Language-agnostic: flags, pipes, redirects (~10μs)
+8. **TypoDetectionHandler** - Levenshtein distance ≤2: "dokcer" → "docker" (~100μs)
+9. **NaturalLanguageHandler** - Language-agnostic heuristics (universal patterns) (~0.5μs)
+10. **DefaultHandler** - Fallback to LLM (<1μs)
 
 **Key Features**:
 - Average classification: <100μs
@@ -135,10 +137,10 @@ infraware-terminal/
 │   └── utils/                     # Shared utilities
 │       ├── ansi.rs               # ANSI color utilities
 │       └── message.rs            # Message formatting
-├── tests/                         # Test suites (233 tests)
-│   ├── classifier_tests.rs       # SCAN algorithm tests (211 tests)
-│   ├── executor_tests.rs         # Command execution tests (8 tests)
-│   └── integration_tests.rs      # End-to-end tests (6 tests)
+├── tests/                         # Test suites (224 tests)
+│   ├── classifier_tests.rs       # SCAN algorithm tests
+│   ├── executor_tests.rs         # Command execution tests
+│   └── integration_tests.rs      # End-to-end tests
 ├── benches/                       # Performance benchmarks
 │   └── scan_benchmark.rs         # SCAN algorithm benchmarks
 └── docs/                          # Documentation
@@ -375,7 +377,7 @@ xdg-open target/criterion/report/index.html  # Linux
 - [x] Auto-install framework (prompt logic implemented)
 
 **Week 4: Testing & Optimization** ✅
-- [x] Comprehensive test suite (233 tests passing with edge case coverage)
+- [x] Comprehensive test suite (224 tests passing with edge case coverage)
 - [x] History expansion tests (comprehensive unit tests covering all patterns)
 - [x] Panic safety improvements (safe indexing throughout, no unwrap on array access)
 - [x] Unicode fix for international users (character-count based cursor positioning)
@@ -386,6 +388,14 @@ xdg-open target/criterion/report/index.html  # Linux
 - [x] Documentation (CLAUDE.md, SCAN_ARCHITECTURE.md)
 - [x] Zero clippy warnings
 - [x] Dead code cleanup (removed facade.rs and errors.rs, 537 lines reduced)
+
+**Code Quality Improvements** ✅
+- [x] Microsoft Pragmatic Rust Guidelines compliance
+  - [x] Debug trait implementations on 5 complex types (InfrawareTerminal, CommandCache, CompiledPatterns, ClassifierChain, KnownCommandHandler)
+  - [x] Debug derives on 9 marker structs
+  - [x] Replaced 31 `#[allow]` with `#[expect]` for better lint management
+  - [x] Configured Microsoft-recommended lints in Cargo.toml (missing_debug_implementations, redundant_imports, unsafe_op_in_unsafe_fn, etc.)
+  - [x] Static verification: All 224 tests passing, 0 clippy warnings, 0 compiler warnings
 
 ### Next Steps (M2/M3)
 - [ ] Real LLM backend integration (endpoint/auth configuration)

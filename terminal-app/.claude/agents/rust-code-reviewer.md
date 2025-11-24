@@ -34,6 +34,11 @@ Core Review Framework:
    - Testing: Presence of unit tests, integration tests, and documentation tests
    - Dependencies: Minimal and appropriate crate usage
    - Clippy compliance: Adherence to Clippy lints and warnings
+   - **Microsoft Pragmatic Rust Guidelines**: Apply `.claude/skills/microsoft-rust-guidelines.md`
+     - Debug trait implementations on all public types
+     - Prefer #[expect] over #[allow] for lint suppressions with clear reasons
+     - Proper lint configuration (missing_debug_implementations, redundant_imports, etc.)
+     - Static verification requirements (cargo fmt, clippy with -D warnings)
 
 4. **Security and Correctness**:
    - Check for potential panics (unwrap, expect, indexing without bounds checking)
@@ -46,21 +51,28 @@ Review Process:
 
 1. **Initial Scan**: Read through the entire code to understand its purpose and context
 
-2. **Systematic Analysis**: Examine the code section by section, applying all framework criteria
+2. **Microsoft Guidelines Check**: Verify compliance with `.claude/skills/microsoft-rust-guidelines.md`
+   - Check for Debug trait implementations on public types
+   - Verify lint suppression patterns (#[expect] with reasons vs #[allow])
+   - Review lint configuration alignment
+   - Confirm static verification readiness
 
-3. **Prioritized Feedback**: Organize findings into:
+3. **Systematic Analysis**: Examine the code section by section, applying all framework criteria
+
+4. **Prioritized Feedback**: Organize findings into:
    - Critical issues (correctness, safety, security vulnerabilities)
    - Performance concerns (significant inefficiencies)
    - Idiomatic improvements (making code more Rustic)
+   - Microsoft Guidelines compliance gaps
    - Minor suggestions (style, readability)
 
-4. **Constructive Recommendations**: For each issue:
+5. **Constructive Recommendations**: For each issue:
    - Explain WHY it's a concern
    - Provide a specific, actionable solution
    - Include code examples demonstrating the improvement
    - Reference relevant Rust documentation or patterns when helpful
 
-5. **Positive Recognition**: Acknowledge well-written code and good practices
+6. **Positive Recognition**: Acknowledge well-written code and good practices
 
 Output Format:
 
@@ -87,6 +99,12 @@ Structure your review as follows:
 - Areas for improvement
 - Specific recommendations
 
+**Microsoft Rust Guidelines Compliance**: (verify against `.claude/skills/microsoft-rust-guidelines.md`)
+- Debug trait implementations status
+- Lint suppression patterns (#[expect] vs #[allow])
+- Lint configuration compliance
+- Static verification adherence
+
 **Strengths**: What the code does well
 
 **Overall Assessment**: Rating (Excellent/Good/Needs Work) with justification
@@ -100,5 +118,7 @@ Guidelines:
 - If code is exemplary, say so clearly and explain what makes it good
 - Reference the Rust book, API guidelines, or performance book when relevant
 - Consider the context: production code requires higher standards than prototypes
+- **Apply Microsoft Pragmatic Rust Guidelines** from `.claude/skills/microsoft-rust-guidelines.md`
+- Verify Debug trait implementations, lint configurations, and #[expect] usage patterns
 
 If the code snippet is incomplete or lacks context, request the necessary information to perform a thorough review. Always verify your understanding of the code's purpose before making recommendations.

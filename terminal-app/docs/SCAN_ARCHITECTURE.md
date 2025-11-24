@@ -4,7 +4,7 @@
 
 ## Overview
 
-SCAN is the core input classification system for Infraware Terminal. It uses **alias expansion** and **history expansion** followed by a **Chain of Responsibility** pattern with 9 optimized handlers to distinguish between shell commands and natural language queries in <100μs.
+SCAN is the core input classification system for Infraware Terminal. It uses **alias expansion** and **history expansion** followed by a **Chain of Responsibility** pattern with 10 optimized handlers to distinguish between shell commands and natural language queries in <100μs.
 
 ### Architecture Diagram
 
@@ -27,7 +27,7 @@ SCAN is the core input classification system for Infraware Terminal. It uses **a
                               ↓
               ╔═══════════════════════════════╗
               ║  Chain of Responsibility      ║
-              ║  (9 Handlers in strict order) ║
+              ║  (10 Handlers in strict order)║
               ╚═══════════════════════════════╝
                               ↓
     ┌────────────────────────┼────────────────────────┐
@@ -167,7 +167,7 @@ reload-aliases    # Reloads all system and user aliases from config files
 
 ---
 
-## Handler Chain (9 Handlers)
+## Handler Chain (10 Handlers)
 
 ### Order Matters!
 
@@ -176,15 +176,16 @@ Handlers are executed in strict order. Each returns:
 - `None` → pass to next handler
 
 ```rust
-1. EmptyInputHandler        // <1μs    - Fast path for empty input
-2. HistoryExpansionHandler  // ~1-5μs  - Bash-style history expansion (!!,  !$, !^, !*)
-3. ShellBuiltinHandler      // <1μs    - Shell builtins (., :, [, [[, source, export, etc.)
-4. PathCommandHandler        // ~10μs   - Executable paths (./script.sh)
-5. KnownCommandHandler       // <1μs    - Whitelist + PATH verification (cached)
-6. CommandSyntaxHandler      // ~10μs   - Flags, pipes, redirects
-7. TypoDetectionHandler      // ~100μs  - Levenshtein distance ≤2
-8. NaturalLanguageHandler    // ~5μs    - English patterns (precompiled)
-9. DefaultHandler            // <1μs    - Fallback to NaturalLanguage
+1. EmptyInputHandler              // <1μs    - Fast path for empty input
+2. HistoryExpansionHandler        // ~1-5μs  - Bash-style history expansion (!!,  !$, !^, !*)
+3. ApplicationBuiltinHandler      // <1μs    - App-specific commands (clear, reload-aliases, reload-commands)
+4. ShellBuiltinHandler            // <1μs    - Shell builtins (., :, [, [[, source, export, etc.)
+5. PathCommandHandler             // ~10μs   - Executable paths (./script.sh)
+6. KnownCommandHandler            // <1μs    - Whitelist + PATH verification (cached)
+7. CommandSyntaxHandler           // ~10μs   - Flags, pipes, redirects
+8. TypoDetectionHandler           // ~100μs  - Levenshtein distance ≤2
+9. NaturalLanguageHandler         // ~0.5μs  - Language-agnostic heuristics (universal patterns)
+10. DefaultHandler                // <1μs    - Fallback to LLM
 ```
 
 ---
@@ -213,7 +214,7 @@ Action: Ignored by main.rs
 
 ---
 
-### 2. HistoryExpansionHandler
+### 2. HistoryExpansionHandler (unchanged in position)
 
 **Purpose**: Expand bash-style history expansion patterns (!!,  !$, !^, !*)
 
@@ -273,7 +274,47 @@ Input: "echo !$" (history: ["pwd", "echo !$"])
 
 ---
 
-### 3. ShellBuiltinHandler
+### 3. ApplicationBuiltinHandler
+
+**Purpose**: Recognize application-specific builtin commands
+
+**Location**: `src/input/application_builtins.rs`
+
+**Recognizes** (3 commands):
+- `clear` - Clear terminal output buffer
+- `reload-aliases` - Reload aliases from system/user config files
+- `reload-commands` - Clear command cache (use after installing new commands)
+
+**Logic**:
+1. Is first word an application builtin? → Yes
+2. Parse as command (application will handle it internally)
+3. Return Command with first word as builtin name
+
+**Examples**:
+```
+Input: "clear"
+├─ "clear" in app builtins? YES
+└─ Output: Command("clear", [])
+
+Input: "reload-aliases"
+├─ "reload-aliases" in app builtins? YES
+└─ Output: Command("reload-aliases", [])
+
+Input: "reload-commands"
+├─ "reload-commands" in app builtins? YES
+└─ Output: Command("reload-commands", [])
+```
+
+**Performance**: <1μs (hash lookup in builtin list)
+
+**Why Position 3?**:
+- Must happen after HistoryExpansionHandler (expansion might target a builtin)
+- Must happen early before other checks (prevent misclassification as other types)
+- Before ShellBuiltinHandler to distinguish app commands from shell commands
+
+---
+
+### 4. ShellBuiltinHandler
 
 **Purpose**: Recognize shell builtin commands that don't exist in PATH
 
@@ -356,7 +397,7 @@ Input: "source /etc/profile"
 
 ---
 
-### 4. PathCommandHandler
+### 5. PathCommandHandler
 
 **Purpose**: Detect executable paths (unambiguous command intent)
 
@@ -386,7 +427,7 @@ Output: Command("../build.sh", [])
 
 ---
 
-### 5. KnownCommandHandler
+### 6. KnownCommandHandler
 
 **Purpose**: Fast path for whitelisted DevOps commands with PATH verification
 
@@ -442,7 +483,7 @@ static COMMAND_CACHE: Lazy<RwLock<CommandCache>> = Lazy::new(|| {
 
 ---
 
-### 6. CommandSyntaxHandler
+### 7. CommandSyntaxHandler
 
 **Purpose**: Detect command syntax even if command is unknown (language-agnostic)
 
@@ -496,7 +537,7 @@ Reason: Multi-word without flags → natural language (works for ANY language)
 
 ---
 
-### 7. TypoDetectionHandler
+### 8. TypoDetectionHandler
 
 **Purpose**: Catch typos before expensive LLM calls (language-agnostic)
 
@@ -576,9 +617,9 @@ Cost: $0 instead of $0.001-$0.01 per call
 
 ---
 
-### 8. NaturalLanguageHandler
+### 9. NaturalLanguageHandler
 
-**Purpose**: Detect English natural language patterns
+**Purpose**: Detect language-agnostic natural language patterns
 
 **Location**: `src/input/handler.rs:362-627`
 
@@ -639,7 +680,7 @@ static PATTERNS: Lazy<CompiledPatterns> = Lazy::new(|| {
 
 ---
 
-### 9. DefaultHandler
+### 10. DefaultHandler
 
 **Purpose**: Catch-all fallback (guarantees a result)
 
@@ -1528,4 +1569,4 @@ SCAN is a high-performance, maintainable input classification system that:
 ✅ Validates aliases for security (rejects dangerous patterns)
 ✅ Supports runtime alias reloading via `reload-aliases` command
 
-**Production-ready**: 229 tests passing, 0 clippy warnings, optimized for real-world DevOps workflows.
+**Production-ready**: 224 tests passing, 0 clippy warnings, Microsoft Pragmatic Rust Guidelines compliant, optimized for real-world DevOps workflows.

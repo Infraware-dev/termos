@@ -1,0 +1,317 @@
+@startuml "Terminal State and Buffer Components"
+title "Terminal State Management with SRP Buffer Separation"
+
+' ==================== TERMINAL STATE ====================
+
+package "Terminal State" {
+  class TerminalState {
+    + output: OutputBuffer
+    + input: InputBuffer
+    + history: CommandHistory
+    + mode: TerminalMode
+    --
+    + new(): Self
+    --
+    + add_output(line): void
+    + add_output_lines(lines): void
+    + clear_input(): void
+    + submit_input(): String
+    + insert_char(c): void
+    + delete_char(): void
+    + move_cursor_left(): void
+    + move_cursor_right(): void
+    + history_previous(): void
+    + history_next(): void
+    + scroll_up(): void
+    + scroll_down(): void
+  }
+
+  note right of TerminalState
+    **Single Responsibility**
+    Composes specialized buffers
+    Delegates to appropriate buffer
+
+    **State Composition**
+    - OutputBuffer: Display buffer with scrolling
+    - InputBuffer: Cursor-aware input line
+    - CommandHistory: Command history navigation
+    - TerminalMode: Current mode tracking
+
+    **Mode Enum**
+    - Normal: Waiting for input
+    - ExecutingCommand: Running shell command
+    - WaitingLLM: Querying LLM
+    - PromptingInstall: M2/M3 auto-install (reserved)
+  end note
+}
+
+' ==================== OUTPUT BUFFER ====================
+
+package "Output Buffer" {
+  class OutputBuffer {
+    - lines: Vec<String>
+    - scroll_offset: usize
+    - max_lines: usize
+    --
+    + new(): Self
+    + add_line(line): void
+    + add_lines(lines): void
+    + clear(): void
+    + all_lines(): &[String]
+    + visible_lines(height): Vec<&str>
+    + scroll_up(): void
+    + scroll_down(): void
+  }
+
+  note right of OutputBuffer
+    **Responsibilities**
+    - Manages display output
+    - Circular buffer (bounded memory)
+    - Scrolling support (up/down)
+    - Line wrapping capability
+
+    **Performance**
+    - Append: O(1) amortized
+    - Scroll: O(1)
+    - Display: O(viewport_height)
+
+    **Memory Management**
+    - max_lines: configurable limit
+    - Circular buffer pattern
+    - Old lines discarded when full
+  end note
+}
+
+' ==================== INPUT BUFFER ====================
+
+package "Input Buffer" {
+  class InputBuffer {
+    - buffer: String
+    - cursor_pos: usize
+    --
+    + new(): Self
+    + clear(): void
+    + insert_char(c): void
+    + delete_char(): void
+    + set_text(text): void
+    + take(): String
+    + move_cursor_left(): void
+    + move_cursor_right(): void
+    + current(): &str
+    + cursor_position(): usize
+  }
+
+  note right of InputBuffer
+    **Responsibilities**
+    - Manages user input line
+    - Cursor position tracking
+    - Character insertion/deletion
+    - Text replacement
+
+    **Performance**
+    - Insert: O(n) where n = text length
+    - Delete: O(n)
+    - Cursor movement: O(1)
+
+    **Cursor Tracking**
+    - Position: 0 to buffer.len()
+    - Move left/right: 1 position
+    - Prevents out-of-bounds
+  end note
+}
+
+' ==================== COMMAND HISTORY ====================
+
+package "Command History" {
+  class CommandHistory {
+    - entries: Vec<String>
+    - position: usize
+    --
+    + new(): Self
+    + add(command): void
+    + all(): &[String]
+    + previous(): Option<String>
+    + next(): Option<String>
+    + reset_position(): void
+  }
+
+  note right of CommandHistory
+    **Responsibilities**
+    - Stores command history
+    - Navigation (previous/next)
+    - Position tracking
+
+    **Semantics**
+    - get-second-to-last: History already
+      contains current input when classified
+    - previous(): Move back one entry
+    - next(): Move forward one entry
+    - reset_position(): Go to end (after submit)
+
+    **History Expansion Integration**
+    - HistoryExpansionHandler accesses via
+      Arc<RwLock<Vec<String>>>
+    - Patterns: !!, !$, !^, !*
+    - Synchronized in InfrawareTerminal
+    - Updated on each submit_input()
+
+    **Session-Only** (M1)
+    - Not persisted to disk
+    - Lost on terminal exit
+    - M2: Persist to ~/.infraware_history
+  end note
+}
+
+' ==================== EVENT HANDLING ====================
+
+package "Terminal Events" {
+  enum TerminalEvent {
+    Quit
+    InputChar(char)
+    DeleteChar
+    MoveCursorLeft
+    MoveCursorRight
+    HistoryPrevious
+    HistoryNext
+    ScrollUp
+    ScrollDown
+    Submit
+    TabComplete
+    ClearScreen
+    Resize(u16, u16)
+    Unknown
+  }
+
+  class EventHandler {
+    - events: crossterm::event::EventReader
+    --
+    + new(): Self
+    + poll_event(timeout): Result<Option<TerminalEvent>>
+    - handle_keyboard_event(): Option<TerminalEvent>
+  }
+
+  note right of EventHandler
+    **Responsibilities**
+    - Poll keyboard/resize events
+    - Translate to TerminalEvent
+    - Handle Windows quirks
+
+    **Event Translation**
+    - Key::Char(c) → InputChar
+    - Key::Backspace → DeleteChar
+    - Key::Left → MoveCursorLeft
+    - Key::Right → MoveCursorRight
+    - Key::Up → HistoryPrevious
+    - Key::Down → HistoryNext
+    - Key::Tab → TabComplete
+    - Key::Enter → Submit
+    - Ctrl+L → ClearScreen
+    - Ctrl+C → Quit
+
+    **Windows-Specific**
+    - Filter KeyEventKind::Press only
+    - Ignore Repeat/Release events
+    - Prevents duplicate processing
+  end note
+
+  class TerminalMode <<enum>> {
+    Normal
+    ExecutingCommand
+    WaitingLLM
+    PromptingInstall
+  }
+}
+
+' ==================== TUI RENDERING ====================
+
+package "TUI Rendering" {
+  class TerminalUI {
+    - terminal: Terminal<CrosstermBackend>
+    --
+    + new(): Result<Self>
+    + render(state): Result<()>
+    + clear(): Result<()>
+    + suspend(): Result<()>
+    + resume(): Result<()>
+    + cleanup(): Result<()>
+    + inner_terminal(): &mut Terminal
+  }
+
+  note right of TerminalUI
+    **Responsibilities**
+    - Ratatui rendering
+    - Raw mode management
+    - Alternate screen handling
+    - Interactive command suspension
+
+    **Render Layout**
+    - Header: banner + mode indicator
+    - Output: scrollable display area
+    - Input: user input line
+    - Cursor: blinking at input position
+
+    **Interactive Command Flow**
+    1. suspend(): Leave TUI mode
+    2. Command runs in normal terminal
+    3. resume(): Re-enter TUI mode
+    4. Screen repainted
+
+    **Error Handling**
+    - Panic-safe via RAII (TuiGuard)
+    - Cleanup on exit guaranteed
+    - Raw mode disabled safely
+  end note
+}
+
+' ==================== SPLASH SCREEN ====================
+
+package "Splash Screen" {
+  class SplashScreen {
+    + run(terminal): Result<()>
+    - animate_particles(): async Result<()>
+  }
+
+  note right of SplashScreen
+    **5-Second Animated Intro**
+    - Particle assembly effect
+    - 5 second duration
+    - Skippable with Enter/Escape
+    - Runs before main event loop
+  end note
+}
+
+' Relationships
+TerminalState --> OutputBuffer : owns
+TerminalState --> InputBuffer : owns
+TerminalState --> CommandHistory : owns
+TerminalState --> TerminalMode : tracks
+EventHandler --> TerminalEvent : generates
+TerminalUI --> TerminalState : renders
+CommandHistory --> "Arc<RwLock>" : synced with history_arc
+EventHandler --> "crossterm" : uses for events
+TerminalUI --> "ratatui" : uses for rendering
+
+' Data flow
+note top
+  **Data Flow (Simplified)**
+
+  EventHandler polls events
+         ↓
+  TerminalEvent (e.g., InputChar('a'))
+         ↓
+  InfrawareTerminal::handle_event()
+         ↓
+  Updates TerminalState buffer/history
+         ↓
+  TerminalUI::render() displays new state
+         ↓
+  Event loop repeats
+
+  **History Expansion Sync**
+  - HistoryExpansionHandler uses Arc<RwLock>
+  - Updated in handle_submit()
+  - Lock contention: minimal (submit only)
+  - Poisoning recovery: in place
+end note
+
+@enduml

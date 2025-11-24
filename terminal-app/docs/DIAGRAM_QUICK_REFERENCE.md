@@ -72,11 +72,12 @@ Read in this order:
 **Read Time**: 5-10 minutes
 
 ### 2. input_module.puml
-**What**: SCAN algorithm with 9-handler chain
+**What**: SCAN algorithm with 10-handler chain
 **Key Classes**: ClassifierChain, InputHandler, CommandCache, CompiledPatterns
 **Best For**: Understanding input classification
 **Read Time**: 10-15 minutes
 **Performance**: <100μs average, <1μs for known commands
+**Quality**: Microsoft Pragmatic Rust Guidelines compliant
 
 ### 3. executor_module.puml
 **What**: Command execution and package managers
@@ -124,7 +125,7 @@ Read in this order:
 
 | Concept | File Location |
 |---------|---------------|
-| 9 handlers in SCAN algorithm | `src/input/handler.rs` + `src/input/classifier.rs` |
+| 10 handlers in SCAN algorithm | `src/input/handler.rs` + `src/input/classifier.rs` |
 | History expansion (!!,  !$, !^, !*) | `src/input/history_expansion.rs` |
 | Shell builtins (45+) | `src/input/shell_builtins.rs` |
 | Package managers (7 types) | `src/executor/package_manager.rs` |
@@ -142,7 +143,7 @@ Read in this order:
 
 | Pattern | Used For | Example |
 |---------|----------|---------|
-| **Chain of Responsibility** | Input classification | 9 handlers in SCAN algorithm |
+| **Chain of Responsibility** | Input classification | 10 handlers in SCAN algorithm |
 | **Strategy Pattern** | Package managers | Apt, Yum, Brew, Choco, Winget, etc. |
 | **Builder Pattern** | Terminal construction | InfrawareTerminalBuilder |
 | **Single Responsibility** | Buffer components | OutputBuffer, InputBuffer, CommandHistory |

@@ -44,7 +44,7 @@ The Infraware Terminal is a hybrid command interpreter with AI assistance for De
 
 **Shows:**
 - InputClassifier with ClassifierChain
-- Complete 9-handler chain with ordering
+- Complete 10-handler chain with ordering
 - Handler responsibilities and performance characteristics
 - Supporting services: CommandCache, CompiledPatterns
 - History expansion details (!!,  !$, !^, !*)
@@ -53,13 +53,14 @@ The Infraware Terminal is a hybrid command interpreter with AI assistance for De
 **Handler Chain (in order):**
 1. EmptyInputHandler - <1μs
 2. HistoryExpansionHandler - ~1-5μs (Bash history expansion)
-3. ShellBuiltinHandler - <1μs (., :, [, [[, export, etc.)
-4. PathCommandHandler - ~10μs (./script.sh, /usr/bin/cmd)
-5. KnownCommandHandler - <1μs cache hit (60+ DevOps whitelist)
-6. CommandSyntaxHandler - ~10μs (flags, pipes, redirects)
-7. TypoDetectionHandler - ~100μs (Levenshtein distance ≤2)
-8. NaturalLanguageHandler - ~5μs (English patterns)
-9. DefaultHandler - <1μs (fallback to NL)
+3. ApplicationBuiltinHandler - <1μs (clear, reload-aliases, reload-commands)
+4. ShellBuiltinHandler - <1μs (., :, [, [[, export, etc.)
+5. PathCommandHandler - ~10μs (./script.sh, /usr/bin/cmd)
+6. KnownCommandHandler - <1μs cache hit (60+ DevOps whitelist)
+7. CommandSyntaxHandler - ~10μs (flags, pipes, redirects)
+8. TypoDetectionHandler - ~100μs (Levenshtein distance ≤2)
+9. NaturalLanguageHandler - ~0.5μs (language-agnostic heuristics)
+10. DefaultHandler - <1μs (fallback to LLM)
 
 **Performance Optimizations:**
 - Precompiled RegexSet (10-100x faster)
@@ -247,7 +248,7 @@ Rust, Python, Bash/Shell, JSON, JavaScript/TypeScript, YAML, Go, C/C++
 **Patterns Documented:**
 
 1. **Chain of Responsibility** (Input Classification)
-   - 9 handlers in strict order
+   - 10 handlers in strict order
    - Flexible handler composition
    - Each handler can pass to next
 
@@ -368,7 +369,7 @@ code --install-extension evilz.vscode-plantuml
 ```
 User Input → Alias Expansion → InputClassifier → [Command | Natural Language]
               (CommandCache)   (SCAN Algorithm)         ↓              ↓
-                                 (9 handlers)    CommandOrchestrator  NLOrchestrator
+                                 (10 handlers)   CommandOrchestrator  NLOrchestrator
                                                           ↓                   ↓
                                                   CommandExecutor       LLMClient
                                                           ↓                   ↓

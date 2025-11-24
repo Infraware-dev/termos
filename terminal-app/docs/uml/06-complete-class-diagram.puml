@@ -1,0 +1,338 @@
+@startuml "Complete System Class Diagram"
+title "Infraware Terminal: Complete Class Diagram with Debug Implementations"
+
+' ==================== MAIN APPLICATION ====================
+
+package "Main Application" {
+  class InfrawareTerminal {
+    + ui: TerminalUI
+    - state: TerminalState
+    - classifier: InputClassifier
+    - event_handler: EventHandler
+    - command_orchestrator: CommandOrchestrator
+    - nl_orchestrator: NaturalLanguageOrchestrator
+    - tab_completion_handler: TabCompletionHandler
+    - history_arc: Arc<RwLock<Vec<String>>>
+    --
+    + builder(): InfrawareTerminalBuilder
+    + run(): async Result<()>
+  }
+
+  class InfrawareTerminalBuilder {
+    - ui: Option<TerminalUI>
+    - state: Option<TerminalState>
+    - classifier: Option<InputClassifier>
+    - llm_client: Option<Arc<dyn LLMClientTrait>>
+    --
+    + new(): Self
+    + with_llm_client(client): Self
+    + build(): Result<InfrawareTerminal>
+  }
+
+  InfrawareTerminalBuilder --|> InfrawareTerminal : builds
+}
+
+' ==================== INPUT CLASSIFICATION ====================
+
+package "Input Classification (SCAN)" {
+  interface InputHandler {
+    + handle(input): Option<InputType>
+  }
+
+  enum InputType {
+    Command { command, args, original_input }
+    NaturalLanguage(String)
+    Empty
+    CommandTypo { input, suggestion, distance }
+  }
+
+  class ClassifierChain {
+    - handlers: Vec<Box<dyn InputHandler>>
+    --
+    + new(): Self
+    + add_handler(handler): Self
+    + process(input): Option<InputType>
+  }
+
+  class InputClassifier {
+    - chain: ClassifierChain
+    - history: Option<Arc<RwLock<Vec<String>>>>
+    --
+    + new(): Self
+    + with_history(history): Self
+    + classify(input): Result<InputType>
+  }
+
+  class EmptyInputHandler
+  class HistoryExpansionHandler
+  class ApplicationBuiltinHandler
+  class ShellBuiltinHandler
+  class PathCommandHandler
+  class KnownCommandHandler
+  class CommandSyntaxHandler
+  class TypoDetectionHandler
+  class NaturalLanguageHandler
+  class DefaultHandler
+
+  InputClassifier --> ClassifierChain : uses
+  ClassifierChain --> InputHandler : contains 10×
+  EmptyInputHandler ..|> InputHandler
+  HistoryExpansionHandler ..|> InputHandler
+  ApplicationBuiltinHandler ..|> InputHandler
+  ShellBuiltinHandler ..|> InputHandler
+  PathCommandHandler ..|> InputHandler
+  KnownCommandHandler ..|> InputHandler
+  CommandSyntaxHandler ..|> InputHandler
+  TypoDetectionHandler ..|> InputHandler
+  NaturalLanguageHandler ..|> InputHandler
+  DefaultHandler ..|> InputHandler
+}
+
+' ==================== PATTERNS AND CACHES ====================
+
+package "Caching Infrastructure" {
+  class CompiledPatterns {
+    + command_syntax: RegexSet
+    + natural_language: RegexSet
+    + shell_operators: RegexSet
+    + question_words: RegexSet
+    + articles: RegexSet
+    --
+    + get(): &'static Self
+    + has_command_syntax(input): bool
+    + has_shell_operators(input): bool
+  }
+
+  class CommandCache {
+    - available: HashSet<String>
+    - unavailable: HashSet<String>
+    - aliases: HashMap<String, String>
+    --
+    + is_available(command): bool
+    + expand_alias(command): Option<String>
+    + load_user_aliases()
+  }
+
+  note right of CompiledPatterns
+    **Debug Compliance**
+    Implements Debug trait
+  end note
+
+  note right of CommandCache
+    **Debug Compliance**
+    Implements Debug trait
+  end note
+}
+
+' ==================== ORCHESTRATORS ====================
+
+package "Orchestrators (SRP)" {
+  class CommandOrchestrator {
+    + handle_command(cmd, args, original, state, ui): async Result<()>
+  }
+
+  class NaturalLanguageOrchestrator {
+    - llm_client: Arc<dyn LLMClientTrait>
+    - renderer: ResponseRenderer
+    --
+    + handle_query(query, state, ui): async Result<()>
+  }
+
+  class TabCompletionHandler {
+    + handle_tab_completion(state)
+  }
+}
+
+' ==================== EXECUTION ====================
+
+package "Command Execution" {
+  class CommandExecutor {
+    + execute(cmd, args, original): async Result<CommandOutput>
+    + command_exists(cmd): bool
+    + requires_interactive(cmd): bool
+  }
+
+  class CommandOutput {
+    + stdout: String
+    + stderr: String
+    + exit_code: i32
+    --
+    + is_success(): bool
+  }
+
+  class PackageInstaller {
+    - package_manager: Box<dyn PackageManager>
+    --
+    + detect_package_manager(): Result<()>
+  }
+
+  interface PackageManager {
+    + name(): &str
+    + is_available(): bool
+    + install(package): async Result<()>
+  }
+
+  class AptPackageManager
+  class YumPackageManager
+  class DnfPackageManager
+  class PacmanPackageManager
+  class BrewPackageManager
+  class ChocoPackageManager
+  class WingetPackageManager
+
+  AptPackageManager ..|> PackageManager
+  YumPackageManager ..|> PackageManager
+  DnfPackageManager ..|> PackageManager
+  PacmanPackageManager ..|> PackageManager
+  BrewPackageManager ..|> PackageManager
+  ChocoPackageManager ..|> PackageManager
+  WingetPackageManager ..|> PackageManager
+
+  CommandExecutor --> CommandOutput : returns
+  PackageInstaller --> PackageManager : selects
+}
+
+' ==================== LLM INTEGRATION ====================
+
+package "LLM Integration" {
+  interface LLMClientTrait {
+    + query(text): async Result<String>
+    + query_with_context(text, context): async Result<String>
+  }
+
+  class MockLLMClient {
+    + new(): Self
+  }
+
+  class HttpLLMClient {
+    - base_url: String
+    - client: reqwest::Client
+    --
+    + new(base_url): Self
+  }
+
+  class ResponseRenderer {
+    + render(response): String
+    + highlight_code(code, lang): String
+  }
+
+  MockLLMClient ..|> LLMClientTrait
+  HttpLLMClient ..|> LLMClientTrait
+  NaturalLanguageOrchestrator --> "Arc<dyn LLMClientTrait>" : uses
+  NaturalLanguageOrchestrator --> ResponseRenderer : uses
+}
+
+' ==================== TERMINAL INTERFACE ====================
+
+package "Terminal UI & State" {
+  class TerminalUI {
+    - terminal: Terminal<CrosstermBackend>
+    --
+    + new(): Result<Self>
+    + render(state): Result<()>
+    + suspend(): Result<()>
+    + resume(): Result<()>
+  }
+
+  class TerminalState {
+    + output: OutputBuffer
+    + input: InputBuffer
+    + history: CommandHistory
+    + mode: TerminalMode
+    --
+    + add_output(line)
+    + insert_char(c)
+    + submit_input(): String
+  }
+
+  class OutputBuffer {
+    - lines: Vec<String>
+    - scroll_offset: usize
+    --
+    + add_line(line)
+    + clear()
+    + scroll_up()
+  }
+
+  class InputBuffer {
+    - buffer: String
+    - cursor_pos: usize
+    --
+    + insert_char(c)
+    + delete_char()
+  }
+
+  class CommandHistory {
+    - entries: Vec<String>
+    - position: usize
+    --
+    + add(command)
+    + previous(): Option<String>
+  }
+
+  enum TerminalMode {
+    Normal
+    ExecutingCommand
+    WaitingLLM
+    PromptingInstall
+  }
+
+  class EventHandler {
+    + poll_event(timeout): Result<Option<TerminalEvent>>
+  }
+
+  enum TerminalEvent {
+    Quit
+    InputChar(char)
+    Submit
+    TabComplete
+    HistoryPrevious
+    HistoryNext
+  }
+
+  TerminalState --> OutputBuffer : owns
+  TerminalState --> InputBuffer : owns
+  TerminalState --> CommandHistory : owns
+  TerminalState --> TerminalMode : tracks
+  EventHandler --> TerminalEvent : generates
+  TerminalUI --> TerminalState : renders
+}
+
+' ==================== RELATIONSHIPS ====================
+
+InfrawareTerminal --> TerminalUI : owns
+InfrawareTerminal --> TerminalState : owns
+InfrawareTerminal --> InputClassifier : owns
+InfrawareTerminal --> EventHandler : owns
+InfrawareTerminal --> CommandOrchestrator : owns
+InfrawareTerminal --> NaturalLanguageOrchestrator : owns
+InfrawareTerminal --> TabCompletionHandler : owns
+
+InputClassifier --> CompiledPatterns : uses (global)
+InputClassifier --> CommandCache : uses (global)
+KnownCommandHandler --> CommandCache : verifies via
+NaturalLanguageHandler --> CommandCache : checks via
+HistoryExpansionHandler --> "Arc<RwLock<Vec<String>>>" : manages
+
+CommandOrchestrator --> CommandExecutor : uses
+CommandOrchestrator --> PackageInstaller : uses
+CommandExecutor --> ShellBuiltinHandler : checks via
+
+TabCompletionHandler --> CommandCache : finds via
+
+' Notes
+note top of InfrawareTerminal
+  **Microsoft Rust Guidelines Compliance**
+  All complex types now implement Debug trait:
+  - InfrawareTerminal (Debug)
+  - InfrawareTerminalBuilder (Debug)
+  - CompiledPatterns (Debug)
+  - CommandCache (Debug)
+  - ClassifierChain (Debug)
+  - KnownCommandHandler (Debug)
+  - InputClassifier (Debug)
+  - TerminalUI (Debug)
+  - HttpLLMClient (Debug)
+end note
+
+@enduml

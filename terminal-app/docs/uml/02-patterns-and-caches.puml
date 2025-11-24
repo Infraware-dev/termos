@@ -1,0 +1,199 @@
+@startuml "Patterns and Cache Infrastructure"
+title "CompiledPatterns, CommandCache, and Cache Infrastructure"
+
+' ==================== COMPILED PATTERNS ====================
+
+package "Pattern Compilation" {
+  class CompiledPatterns {
+    + command_syntax: RegexSet
+    + natural_language: RegexSet
+    + shell_operators: RegexSet
+    + question_words: RegexSet
+    + articles: RegexSet
+    --
+    + get(): &'static Self
+    + has_command_syntax(input): bool
+    + has_natural_language_indicators(input): bool
+    + has_shell_operators(input): bool
+    + starts_with_question_word(input): bool
+    + has_articles(input): bool
+  }
+
+  impl std::fmt::Debug for CompiledPatterns {
+    note right
+      **Microsoft Rust Guidelines**
+      Now implements Debug trait
+      Returns "<RegexSet>" placeholders
+      instead of full pattern lists
+    end note
+  }
+
+  note right of CompiledPatterns
+    **Global LazyLock Instance**
+    PATTERNS: LazyLock<CompiledPatterns>
+    Initialized on first access, reused forever
+
+    **Performance Impact**
+    - Compilation: one-time only
+    - Lookup: 10-100x faster than runtime compilation
+    - Memory: negligible (5 RegexSet instances)
+
+    **Patterns Compiled**
+    1. Command syntax (flags, paths, env vars)
+    2. Natural language indicators (punctuation)
+    3. Shell operators (pipes, redirects, subshells)
+    4. Question words (how, what, why, etc.)
+    5. Articles (the, a, an, un, el, la, etc.)
+  end note
+}
+
+' ==================== COMMAND CACHE ====================
+
+package "Command Discovery & Caching" {
+  class CommandCache {
+    - available: HashSet<String>
+    - unavailable: HashSet<String>
+    - aliases: HashMap<String, String>
+    --
+    + is_available(command): bool
+    + is_alias(command): bool
+    + expand_alias(command): Option<String>
+    + clear()
+    + load_system_aliases()
+    + load_user_aliases()
+  }
+
+  impl std::fmt::Debug for CommandCache {
+    note right
+      **Microsoft Rust Guidelines**
+      Now implements Debug trait
+      Returns counts instead of
+      full set/map contents
+    end note
+  }
+
+  note right of CommandCache
+    **Global Static Cache**
+    COMMAND_CACHE: LazyLock<RwLock<CommandCache>>
+
+    **Three-Set Strategy**
+    - available: Commands verified in PATH
+    - unavailable: Commands checked, not found
+    - aliases: User-defined shell aliases
+
+    **Performance**
+    - Cache hit (available/unavailable): O(1) read
+    - Cache miss (first check): O(PATH_length)
+    - Alias expansion: O(1) HashMap lookup
+
+    **Thread Safety**
+    - RwLock<CommandCache> for multiple readers
+    - Poisoning recovery for resilience
+    - Lock timeout: none (blocks briefly)
+
+    **Alias Loading**
+    - System: /etc/bash.bashrc, /etc/bashrc, /etc/profile
+    - User: ~/.bashrc, ~/.bash_aliases, ~/.zshrc
+    - Single-level expansion (no chaining)
+    - Security: is_safe_alias() prevents dangerous patterns
+
+    **Cache Invalidation**
+    - reload-commands builtin clears cache
+    - Manual call required after installing new commands
+  end note
+}
+
+' ==================== CACHE USAGE ====================
+
+package "Cache Integration" {
+  class "KnownCommandHandler" as KCH {
+    Verifies command existence via CommandCache
+  }
+
+  class "NaturalLanguageHandler" as NLH {
+    Uses CommandCache for word analysis
+  }
+
+  class "TypoDetectionHandler" as TDH {
+    Uses known commands from CommandCache
+  }
+
+  class "HistoryExpansionHandler" as HEH {
+    Manages Arc<RwLock<Vec<String>>> history
+  }
+
+  note right of KCH
+    **Handler 6 Integration**
+    - Checks whitelist (hardcoded)
+    - Verifies in PATH via CommandCache
+    - Falls through if not available
+  end note
+
+  note right of HEH
+    **History Synchronization**
+    - Created in InfrawareTerminal::builder()
+    - Shared via Arc<RwLock>
+    - Updated on each submit_input()
+    - Thread-safe with poisoning recovery
+  end note
+}
+
+' ==================== ALIAS EXPANSION ====================
+
+package "Alias System" {
+  class "InputClassifier" as IC {
+    + classify(input): Result<InputType>
+    - classify_internal(input): Result<InputType>
+  }
+
+  note right of IC
+    **Alias Expansion Flow**
+
+    1. Extract first word from input
+    2. Check if word is alias via CommandCache
+    3. If alias found:
+       - Expand to replacement text
+       - Append remaining arguments
+       - Classify expanded input recursively
+    4. If not alias:
+       - Classify original input directly
+
+    **Example**
+    Input: "ll -la /etc"
+    Expansion: "ls -lA /etc"
+    (if 'll' is aliased to 'ls -lA')
+  end note
+}
+
+' Relationships
+CompiledPatterns --> "RegexSet" : contains 5×
+CommandCache --> "which" : uses for PATH lookup
+CommandCache --> "fs::read_to_string" : loads aliases from
+KCH --> CommandCache : verifies via
+NLH --> CommandCache : checks via
+TDH --> CommandCache : uses known commands
+HEH --> "Arc<RwLock>" : manages history
+IC --> CommandCache : expands aliases via
+
+' Global instances
+note top right
+  **Global Instances (LazyLock)**
+
+  1. PATTERNS: CompiledPatterns
+     - Compiled once on first access
+     - Used by all handlers
+     - Immutable after initialization
+
+  2. COMMAND_CACHE: RwLock<CommandCache>
+     - Initially empty
+     - Populated on first command lookup
+     - Read-heavy workload (99% hits after warmup)
+
+  **Architecture Benefit**
+  - Single source of truth
+  - No redundant compilations
+  - Thread-safe by design
+  - Transparent caching
+end note
+
+@enduml

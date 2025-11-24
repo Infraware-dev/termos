@@ -1,0 +1,258 @@
+@startuml "LLM Integration and Response Rendering"
+title "LLM Client Architecture with Multiple Backend Support"
+
+' ==================== LLM CLIENT TRAIT ====================
+
+package "LLM Client Interface" {
+  interface LLMClientTrait <<interface>> {
+    + query(text): async Result<String>
+    + query_with_context(text, context): async Result<String>
+    + query_with_history(text, history): async Result<String>
+  }
+
+  class LLMRequest {
+    + query: String
+    + context: Option<String>
+    --
+    Note: Serialized to JSON for HTTP backends
+  }
+
+  class LLMResponse {
+    + text: String
+    + metadata: Option<serde_json::Value>
+    --
+    Note: Deserialized from JSON response
+  }
+
+  note right of LLMClientTrait
+    **Trait Design**
+    Supports dependency injection of different backends
+
+    **Method Semantics**
+    - query(): Simple text query
+    - query_with_context(): Query with additional context
+    - query_with_history(): Query with command history (M2)
+
+    **Default Implementations**
+    - query_with_context: passes context to query
+    - query_with_history: formats history as context
+    Allows backend-specific overrides
+
+    **Serialization**
+    - LLMRequest: serde::Serialize
+    - LLMResponse: serde::Deserialize
+    - JSON format for HTTP transmission
+  end note
+}
+
+' ==================== MOCK CLIENT ====================
+
+package "Development & Testing" {
+  class MockLLMClient {
+    + new(): Self
+    --
+    + query(text): async Result<String>
+    + query_with_context(text, context): async Result<String>
+  }
+
+  impl std::fmt::Debug for MockLLMClient
+
+  MockLLMClient ..|> LLMClientTrait : implements
+
+  note right of MockLLMClient
+    **Purpose**
+    - Development testing
+    - CI/CD without real LLM endpoint
+    - Default in builder pattern
+
+    **Behavior**
+    - Returns hardcoded responses
+    - Simulates LLM latency (optional)
+    - No external dependencies
+    - Deterministic output
+
+    **Example Responses**
+    - "How do I list files?" → "Use ls command"
+    - "Deploy to AWS" → "Use aws cli with deploy"
+  end note
+}
+
+' ==================== HTTP CLIENT ====================
+
+package "Production" {
+  class HttpLLMClient {
+    - base_url: String
+    - client: reqwest::Client
+    --
+    + new(base_url): Self
+    + with_timeout(base_url, timeout_secs): Result<Self>
+    --
+    + query(text): async Result<String>
+    + query_with_context(text, context): async Result<String>
+  }
+
+  impl std::fmt::Debug for HttpLLMClient {
+    note right
+      **Microsoft Rust Guidelines**
+      Debug implementation returns
+      base_url and <reqwest::Client>
+      placeholder
+    end note
+  }
+
+  HttpLLMClient ..|> LLMClientTrait : implements
+
+  note right of HttpLLMClient
+    **Configuration**
+    - base_url: LLM backend URL
+    - Timeout: 30 seconds (default)
+    - Custom timeout via with_timeout()
+
+    **HTTP Protocol**
+    - Method: POST /query (assumed)
+    - Content-Type: application/json
+    - Body: LLMRequest (serialized)
+    - Response: LLMResponse (deserialized)
+
+    **Error Handling**
+    - Connection failures → Result::Err
+    - Timeout → Result::Err
+    - Invalid JSON → Result::Err
+    - Non-200 status → Result::Err
+
+    **Environment Configuration**
+    - INFRAWARE_LLM_URL env var
+    - If set: Use HttpLLMClient
+    - If unset: Default to MockLLMClient
+  end note
+
+  note bottom of HttpLLMClient
+    **M2/M3 Enhancement**
+    - Real LLM endpoint integration
+    - API key/auth support
+    - Streaming responses
+    - Rate limiting
+    - Response caching
+  end note
+}
+
+' ==================== RESPONSE RENDERING ====================
+
+package "Response Formatting" {
+  class ResponseRenderer {
+    + new(): Self
+    + render(response): String
+    + highlight_code(code, language): String
+    + format_markdown(text): String
+    - apply_ansi_colors(text): String
+    - escape_special_chars(text): String
+  }
+
+  note right of ResponseRenderer
+    **Rendering Pipeline**
+    1. Input: Raw LLM response text
+    2. Markdown parsing (headers, lists, code)
+    3. ANSI color codes for syntax highlighting
+    4. Format output for terminal display
+    5. Return formatted String
+
+    **Markdown Support** (M1: Basic)
+    - Headers: # → ANSI bold
+    - Code blocks: ``` → ANSI background
+    - Inline code: ` ` → ANSI inverse
+    - Bold/italic: **text** → ANSI bold/dim
+    - Lists: - → preserve with indentation
+
+    **Syntax Highlighting** (M1: Basic)
+    - Detects common languages (bash, python, etc.)
+    - Applies ANSI 256-color codes
+    - Preserves readability in terminal
+
+    **M2/M3 Enhancements**
+    - Table rendering
+    - Image/link display
+    - Copy-to-clipboard support
+    - Pagination for long responses
+  end note
+}
+
+' ==================== ORCHESTRATOR INTEGRATION ====================
+
+package "Natural Language Orchestrator" {
+  class NaturalLanguageOrchestrator {
+    - llm_client: Arc<dyn LLMClientTrait>
+    - renderer: ResponseRenderer
+    --
+    + new(client, renderer): Self
+    --
+    + handle_query(query, state, ui): async Result<()>
+    - stream_response(): async Result<()>
+    - format_output(response): String
+  }
+
+  note right of NaturalLanguageOrchestrator
+    **Query Processing**
+
+    1. Receive NL query from InputClassifier
+    2. Call llm_client.query(query)
+    3. Receive response text
+    4. Format via ResponseRenderer
+    5. Add to TerminalState output
+    6. Render to screen
+
+    **Async Execution**
+    - Non-blocking LLM query
+    - TUI remains responsive
+    - Timeout handling (30s default)
+
+    **Error Handling**
+    - LLM failure → user-friendly error
+    - Formatting failure → raw response
+    - Display failure → logged error
+  end note
+}
+
+' ==================== DEPENDENCY INJECTION ====================
+
+package "Builder Configuration" {
+  class InfrawareTerminalBuilder {
+    - llm_client: Option<Arc<dyn LLMClientTrait>>
+    - renderer: Option<ResponseRenderer>
+    --
+    + with_llm_client(client): Self
+    + with_renderer(renderer): Self
+  }
+
+  note right of InfrawareTerminalBuilder
+    **Builder Pattern**
+    Flexible LLM client selection
+
+    **Usage**
+    1. Development:
+       .build() → MockLLMClient (default)
+
+    2. Production (via INFRAWARE_LLM_URL):
+       → HttpLLMClient(url)
+
+    3. Custom Backend:
+       .with_llm_client(Arc::new(MyClient))
+       .build()
+
+    **Dependency Flow**
+    Builder → NaturalLanguageOrchestrator
+           → InfrawareTerminal
+           → Main event loop
+  end note
+}
+
+' Relationships
+LLMClientTrait --> LLMRequest : sends
+LLMClientTrait --> LLMResponse : receives
+MockLLMClient ..|> LLMClientTrait : implements
+HttpLLMClient ..|> LLMClientTrait : implements
+HttpLLMClient --> "reqwest::Client" : uses
+NaturalLanguageOrchestrator --> "Arc<dyn LLMClientTrait>" : owns
+NaturalLanguageOrchestrator --> ResponseRenderer : owns
+ResponseRenderer --> "ANSI Colors" : applies
+
+@enduml
