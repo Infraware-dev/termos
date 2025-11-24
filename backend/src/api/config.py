@@ -2,7 +2,6 @@
 
 import os
 from pathlib import Path
-from typing import Optional
 
 from dotenv import load_dotenv, set_key
 
@@ -16,11 +15,11 @@ class Config:
         self.env_file = self.backend_dir / ".env"
         load_dotenv(self.env_file)
 
-    def get_api_key(self) -> Optional[str]:
+    def get_api_key(self) -> str | None:
         """Get the Anthropic API key from environment.
 
         Returns:
-            Optional[str]: API key if set, None otherwise
+            str | None: API key if set, None otherwise
         """
         return os.getenv("ANTHROPIC_API_KEY")
 
