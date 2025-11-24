@@ -58,39 +58,50 @@ impl TypoDetectionHandler {
     fn find_closest_match(&self, input: &str) -> Option<(String, usize)> {
         self.known_commands
             .iter()
-            .map(|cmd| (cmd.clone(), levenshtein(input, cmd)))
+            .map(|cmd| (cmd.as_str(), levenshtein(input, cmd)))
             .filter(|(_, dist)| *dist <= self.max_distance && *dist > 0)
             .min_by_key(|(_, dist)| *dist)
+            .map(|(cmd, dist)| (cmd.to_string(), dist))
     }
 
-    /// Check if input looks like a command (not a long natural language phrase)
+    /// Check if input looks like a command (not a natural language phrase)
+    ///
+    /// Language-agnostic algorithm:
+    /// - Single word → check typo (with NL filter)
+    /// - 2 words → check if first word is a typo (catches "dokcer ps")
+    /// - Has flags (-/--) → might be a typo
+    /// - 3+ words without flags → likely natural language
     fn looks_like_command(&self, input: &str) -> bool {
         let word_count = input.split_whitespace().count();
 
-        // Long phrases are likely natural language, not typos
-        if word_count > 5 {
-            return false;
+        // Single word → might be a command typo, but filter common NL words
+        if word_count == 1 {
+            const NL_SINGLE_WORDS: &[&str] = &[
+                "what", "how", "why", "when", "where", "who", "which", "hello", "hi", "hey", "yes",
+                "no", "ok", "thanks", "help",
+            ];
+
+            let lower = input.to_lowercase();
+            return !NL_SINGLE_WORDS.contains(&lower.as_str());
         }
 
-        // Check for clear natural language indicators (question marks, exclamation marks)
-        if input.contains('?') || input.contains('!') {
-            return false;
-        }
-
-        let lowercase = input.to_lowercase();
-
-        // Check for common English articles (multilingual handled by LLM)
-        if lowercase.contains(" the ") || lowercase.contains(" a ") || lowercase.contains(" an ") {
-            return false;
-        }
-
-        // Very short input is likely a command attempt
-        if word_count <= 2 {
+        // Has flags/operators → might be a command typo (e.g., "dokcer -v")
+        let patterns = crate::input::patterns::CompiledPatterns::get();
+        if patterns.has_command_syntax(input) || patterns.has_shell_operators(input) {
             return true;
         }
 
-        // Medium length (3-5 words) - assume command if no NL indicators found
-        true
+        // 2 words without flags → check if first word is a typo
+        // Catches: "dokcer ps", "kubeclt get" but not "pippo ciao"
+        if word_count == 2 {
+            if let Some(first) = input.split_whitespace().next() {
+                // Only check if first word could be a typo of a known command
+                return self.find_closest_match(first).is_some();
+            }
+        }
+
+        // 3+ words without flags → likely natural language (language-agnostic)
+        false
     }
 
     /// Check if a command is actually incorrect (not in the known commands list)
@@ -203,8 +214,8 @@ mod tests {
     fn test_handle_typo() {
         let handler = TypoDetectionHandler::with_defaults();
 
-        // Typo should be detected
-        let result = handler.handle("dokcer ps");
+        // Single word typo should be detected
+        let result = handler.handle("dokcer");
         assert!(matches!(result, Some(InputType::CommandTypo { .. })));
 
         if let Some(InputType::CommandTypo {
@@ -216,6 +227,10 @@ mod tests {
             assert_eq!(suggestion, "docker");
             assert!(distance <= 2);
         }
+
+        // Typo with flags should be detected
+        let result = handler.handle("dokcer --version");
+        assert!(matches!(result, Some(InputType::CommandTypo { .. })));
     }
 
     #[test]
@@ -243,15 +258,24 @@ mod tests {
     fn test_looks_like_command() {
         let handler = TypoDetectionHandler::with_defaults();
 
-        // Command-like
-        assert!(handler.looks_like_command("dokcer ps"));
+        // Single word → might be command typo
         assert!(handler.looks_like_command("ls"));
-        assert!(handler.looks_like_command("git status"));
+        assert!(handler.looks_like_command("dokcer"));
 
-        // Not command-like
-        assert!(!handler.looks_like_command("how do I list files?"));
-        assert!(!handler.looks_like_command("show me the docker containers"));
-        assert!(!handler.looks_like_command("what is kubernetes and how does it work?"));
+        // Multi-word with flags → might be command typo
+        assert!(handler.looks_like_command("dokcer -v"));
+        assert!(handler.looks_like_command("kubeclt --help"));
+
+        // 2 words: typo + subcommand → detected as typo
+        assert!(handler.looks_like_command("dokcer ps")); // dokcer → docker
+        assert!(handler.looks_like_command("kubeclt get")); // kubeclt → kubectl
+
+        // 2 words: no typo match → NOT command-like
+        assert!(!handler.looks_like_command("bonjour monde")); // no close command match
+
+        // 3+ words without flags → NOT command-like (language-agnostic)
+        assert!(!handler.looks_like_command("pippo ciao come stai"));
+        assert!(!handler.looks_like_command("how do I list files"));
     }
 
     #[test]
@@ -328,12 +352,16 @@ mod tests {
     fn test_with_flags() {
         let handler = TypoDetectionHandler::with_defaults();
 
-        // Typo with flags
-        let result = handler.handle("kubeclt get pods");
+        // Typo with flags should be detected
+        let result = handler.handle("kubeclt --help");
         assert!(matches!(result, Some(InputType::CommandTypo { .. })));
 
         if let Some(InputType::CommandTypo { suggestion, .. }) = result {
             assert_eq!(suggestion, "kubectl");
         }
+
+        // Multi-word without flags should NOT be detected as typo
+        let result = handler.handle("kubeclt get pods");
+        assert_eq!(result, None); // Passes through to NL handler
     }
 }

@@ -57,6 +57,59 @@ fn test_classify_natural_language() {
 }
 
 #[test]
+fn test_classify_single_word_natural_language() {
+    let classifier = InputClassifier::new();
+
+    // Question words (English)
+    assert!(matches!(
+        classifier.classify("what").unwrap(),
+        InputType::NaturalLanguage(_)
+    ));
+    assert!(matches!(
+        classifier.classify("how").unwrap(),
+        InputType::NaturalLanguage(_)
+    ));
+    assert!(matches!(
+        classifier.classify("why").unwrap(),
+        InputType::NaturalLanguage(_)
+    ));
+
+    // Greetings (in minimal filter list)
+    assert!(matches!(
+        classifier.classify("hello").unwrap(),
+        InputType::NaturalLanguage(_)
+    ));
+    assert!(matches!(
+        classifier.classify("hi").unwrap(),
+        InputType::NaturalLanguage(_)
+    ));
+    // Note: Single-word greetings in other languages ("ciao", "hola")
+    // may be caught as typos of short commands. This is acceptable since
+    // the language-agnostic algorithm works for multi-word inputs:
+    // "ciao come stai" → NaturalLanguage ✓
+
+    // Case insensitive
+    assert!(matches!(
+        classifier.classify("HELLO").unwrap(),
+        InputType::NaturalLanguage(_)
+    ));
+    assert!(matches!(
+        classifier.classify("What").unwrap(),
+        InputType::NaturalLanguage(_)
+    ));
+
+    // Common NL starters
+    assert!(matches!(
+        classifier.classify("help").unwrap(),
+        InputType::NaturalLanguage(_)
+    ));
+    assert!(matches!(
+        classifier.classify("thanks").unwrap(),
+        InputType::NaturalLanguage(_)
+    ));
+}
+
+#[test]
 fn test_classify_command_syntax() {
     let classifier = InputClassifier::new();
 
@@ -241,4 +294,41 @@ fn test_malformed_input_no_panic() {
     // Special characters
     let result3 = classifier.classify("@#$%^&*");
     assert!(result3.is_ok(), "Special characters should not panic");
+}
+
+#[test]
+fn test_language_agnostic_classification() {
+    let classifier = InputClassifier::new();
+
+    // Multi-word without flags → Natural Language (any language)
+    assert!(matches!(
+        classifier.classify("pippo ciao come stai").unwrap(),
+        InputType::NaturalLanguage(_)
+    ));
+    assert!(matches!(
+        classifier.classify("comment faire cela").unwrap(),
+        InputType::NaturalLanguage(_)
+    ));
+    assert!(matches!(
+        classifier.classify("wie mache ich das").unwrap(),
+        InputType::NaturalLanguage(_)
+    ));
+
+    // With flags → Command (let the command handle validation)
+    match classifier.classify("cargo --aiuto").unwrap() {
+        InputType::Command { command, args, .. } => {
+            assert_eq!(command, "cargo");
+            assert_eq!(args, vec!["--aiuto"]);
+        }
+        _ => panic!("Expected Command for 'cargo --aiuto'"),
+    }
+
+    // Invalid flag still goes to shell (command will error)
+    match classifier.classify("docker --hilfe").unwrap() {
+        InputType::Command { command, args, .. } => {
+            assert_eq!(command, "docker");
+            assert_eq!(args, vec!["--hilfe"]);
+        }
+        _ => panic!("Expected Command for 'docker --hilfe'"),
+    }
 }

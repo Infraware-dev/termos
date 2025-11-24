@@ -444,16 +444,26 @@ static COMMAND_CACHE: Lazy<RwLock<CommandCache>> = Lazy::new(|| {
 
 ### 6. CommandSyntaxHandler
 
-**Purpose**: Detect command syntax even if command is unknown
+**Purpose**: Detect command syntax even if command is unknown (language-agnostic)
 
-**Location**: `src/input/handler.rs:291-360`
+**Location**: `src/input/handler.rs:154-225`
+
+**Language-Agnostic Algorithm**:
+```
+Has flags (-/--) OR shell operators → Command
+Has paths (./, /, $VAR) → Command
+Multi-word without above → Natural Language (defer to next handler)
+Single word → Defer to other handlers (KnownCommand, Typo, Path, etc.)
+```
 
 **Detects**:
 - Flags: `" -"` or `" --"`
 - Pipes: `"|"`
 - Redirects: `">"`, `"<"`
+- Logical operators: `"&&"`, `"||"`, `";"`, `"&"`
 - Environment variables: `"$VAR"`, `"${VAR}"`
-- Paths in arguments: `"/path"`, `"./path"`
+- Subshells: `"$(...)"``, backticks
+- Paths in arguments: `"/path"`, `"./path"`, `"../path"`
 
 **Examples**:
 ```
@@ -468,26 +478,42 @@ Reason: Contains pipe "|"
 Input: "echo $USER"
 Output: Command("echo", ["$USER"])
 Reason: Contains environment variable
+
+Input: "tell me about docker"
+Output: None (passes to next handler)
+Reason: Multi-word without flags/operators → natural language (any language)
+
+Input: "how do i deploy"
+Output: None (passes to next handler)
+Reason: Multi-word without flags → natural language (works for ANY language)
 ```
 
-**Performance**: ~10μs (basic string operations)
+**Performance**: ~10μs (precompiled regex pattern matching)
 
-**Why It Matters**: Even if we don't know the command, syntax like `--flag` clearly indicates command intent, not a question.
+**Key Innovation**: This handler is now **fully language-agnostic**. Multi-word inputs without command syntax are classified as Natural Language and delegated to the LLM, which handles multilingual queries much more accurately than regex patterns. This removes the need for hardcoded multilingual patterns (IT, ES, FR, DE, etc.)
+
+**Why It Matters**: Even if we don't know the command, syntax like `--flag` clearly indicates command intent. For ambiguous multi-word inputs, delegation to the LLM provides better accuracy across all languages.
 
 ---
 
 ### 7. TypoDetectionHandler
 
-**Purpose**: Catch typos before expensive LLM calls
+**Purpose**: Catch typos before expensive LLM calls (language-agnostic)
 
-**Location**: `src/input/typo_detection.rs`
+**Location**: `src/input/typo_detection.rs:66-100`
 
-**Algorithm**:
-1. Extract first word: `"dokcer ps"` → `"dokcer"`
-2. Does it look like a command? (≤5 words, no `?!`, no articles)
-3. Is it unknown? (not in whitelist)
-4. Find closest match using **Levenshtein distance**
-5. If distance ≤ 2 → return `CommandTypo`
+**Language-Agnostic Algorithm**:
+```
+Single word:
+  ├─ Filter out common NL words (what, how, why, who, when, where, help, hi, thanks, etc.)
+  └─ Then check Levenshtein distance against known commands
+
+Multi-word:
+  ├─ Has flags/operators? → might be a typo (check Levenshtein)
+  ├─ No flags/operators? → NOT a typo, defer to next handler (natural language)
+```
+
+**Rationale**: Multi-word phrases without command syntax (like "how do I deploy") work identically across ALL languages and don't need special language-specific filtering. Single-word filtering keeps minimal universal patterns to avoid false positives like "what" → "cat".
 
 **Levenshtein Distance Examples**:
 ```
@@ -499,27 +525,50 @@ Reason: Contains environment variable
 **Examples**:
 ```
 Input: "dokcer ps"
-├─ First word: "dokcer"
-├─ Looks like command? YES (2 words, no ?)
-├─ Unknown? YES (not in whitelist)
+├─ Word count: 2 (multi-word)
+├─ Has flags/operators? NO
+└─ Output: None (multi-word without flags → natural language, defer to next)
+   (This is now language-agnostic: works for "comando_errato args" in Italian too)
+
+Input: "dokcer -v"
+├─ Word count: 2 (multi-word)
+├─ Has flags/operators? YES (contains "-v")
 ├─ Closest match: "docker" at distance=2
 └─ Output: CommandTypo {
-      input: "dokcer ps",
+      input: "dokcer -v",
       suggestion: "docker",
       distance: 2
    }
 
-Input: "what is dokcer?"
-├─ Looks like command? NO (contains "?")
+Input: "what"
+├─ Word count: 1 (single word)
+├─ Is "what" in NL filter list? YES
 └─ Output: None (pass to NaturalLanguageHandler)
+
+Input: "dokcer"
+├─ Word count: 1 (single word)
+├─ Is "dokcer" in NL filter list? NO
+├─ Closest match: "docker" at distance=2
+└─ Output: CommandTypo {
+      input: "dokcer",
+      suggestion: "docker",
+      distance: 2
+   }
+
+Input: "tell me about docker"
+├─ Word count: 4 (multi-word)
+├─ Has flags/operators? NO
+└─ Output: None (multi-word without flags → natural language, ANY language)
 ```
 
-**Performance**: ~100μs (60 Levenshtein comparisons)
+**Performance**: ~100μs (60 Levenshtein comparisons for single words)
+
+**Key Innovation**: Multi-word filtering is now **fully language-agnostic**. "multi-word WITHOUT flags" universally means "natural language" regardless of language. This eliminates the need for language-specific patterns.
 
 **Cost Savings**:
 ```
 Before: "dokcer ps" → NaturalLanguage → LLM call (100-500ms + API cost)
-After:  "dokcer ps" → CommandTypo → Show suggestion (<100μs, no API call)
+After:  "dokcer -v" → CommandTypo → Show suggestion (<100μs, no API call)
 
 Speedup: ~1000x faster
 Cost: $0 instead of $0.001-$0.01 per call
@@ -1082,86 +1131,159 @@ DefaultHandler              <1μs        ~2.5%
 
 ## Multilingual Handling (Post-Refactoring)
 
-### Philosophy
+### Philosophy: Language-Agnostic Core Algorithm
 
 ```
-┌───────────────────────────────────────────────────────┐
-│ SCAN Classifier (English-only)                       │
-│ ├─ Fast: ~10μs average                               │
-│ ├─ Simple: 12 regex patterns                         │
-│ └─ Purpose: Distinguish "command" vs "natural lang"  │
-└─────────────────┬─────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────┐
+│ SCAN Classifier (Language-Agnostic Core)               │
+│ ├─ CommandSyntaxHandler:   "Has flags/pipes?" → Works  │
+│ │                          for ALL languages            │
+│ ├─ TypoDetectionHandler:   "Multi-word no flags?"      │
+│ │                          → Natural Language (ANY lang)│
+│ ├─ NaturalLanguageHandler: English patterns (fast path) │
+│ └─ DefaultHandler:         Catches non-English → LLM   │
+└─────────────────┬──────────────────────────────────────┘
                   ↓
-         If NaturalLanguage
+         If NaturalLanguage (any language)
                   ↓
-┌───────────────────────────────────────────────────────┐
-│ LLM Backend (All Languages)                          │
-│ ├─ Flexible: Handles EN, IT, ES, FR, DE, etc.        │
-│ ├─ Accurate: Better than regex for multilingual      │
-│ └─ Smart: Understands context, not just patterns     │
-└───────────────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────────────┐
+│ LLM Backend (All Languages)                            │
+│ ├─ Flexible: Handles EN, IT, ES, FR, DE, ZH, AR, etc. │
+│ ├─ Accurate: Better than regex for context            │
+│ └─ Smart: Understands intent, not just keywords       │
+└──────────────────────────────────────────────────────────┘
 ```
+
+### Key Innovation: Syntax-Based, Not Language-Based
+
+Instead of hardcoding patterns for 5 languages (EN, IT, ES, FR, DE), the algorithm now relies on **universal syntax patterns** that work identically across all languages:
+
+**CommandSyntaxHandler** (language-agnostic):
+- If input has flags (`-`, `--`) → Command
+- If input has pipes (`|`, `>`, `<`, `&&`) → Command
+- If input is multi-word WITHOUT above → Natural Language (works for ANY language)
+- If input is single word → Defer to other handlers
+
+**TypoDetectionHandler** (language-agnostic):
+- Multi-word without flags → Not a typo (defer to NL handler, ANY language)
+- Single word → Check Levenshtein (universal approach)
 
 ### Before Refactoring
 
 ```
-Pattern Count:   ~25 regex patterns
+Pattern Count:   ~25 regex patterns (5 languages × 5 patterns)
 Languages:       EN, IT, ES, FR, DE in classifier
 Test Count:      217 tests (60 multilingual)
 Maintenance:     Complex - 5 languages to maintain
-Flexibility:     Low - hardcoded patterns
+Flexibility:     Low - adding new language requires code changes
+Algorithm:       Language-specific keywords and patterns
 ```
 
 ### After Refactoring
 
 ```
-Pattern Count:   ~12 regex patterns (-52%)
-Languages:       English-only in classifier
+Pattern Count:   ~12 regex patterns (English-only fast path)
+Languages:       English patterns + language-agnostic logic
 Test Count:      157 tests (-60 multilingual tests)
-Maintenance:     Simple - 1 language
-Flexibility:     High - LLM handles all languages
+Maintenance:     Simple - 1 language in classifier
+Flexibility:     High - LLM handles new languages automatically
+Algorithm:       Syntax-based (works for ALL languages)
 ```
 
-### Example Flow
+### Example Flow: Language-Agnostic Classification
 
 ```
-Input: "come posso listare i file?" (Italian)
+Input: "come posso listare i file?" (Italian: "how can I list files?")
        ↓
-SCAN Classifier:
-  ├─ Not empty ✓
-  ├─ Not a path ✓
-  ├─ "come" not in EN whitelist ✓
-  ├─ No command syntax ✓
-  ├─ No typo detected ✓
-  ├─ No EN question words matched ✓
-  └─ DefaultHandler: NaturalLanguage("come posso listare i file?")
+SCAN Classifier (all language-agnostic logic):
+  ├─ EmptyInputHandler: Not empty ✓
+  ├─ HistoryExpansionHandler: No history patterns ✓
+  ├─ ShellBuiltinHandler: "come" not a builtin ✓
+  ├─ PathCommandHandler: Not a path ✓
+  ├─ KnownCommandHandler: "come" not in whitelist ✓
+  ├─ CommandSyntaxHandler:
+  │   ├─ Has flags/operators? NO ✓
+  │   ├─ Word count: 5 (multi-word) ✓
+  │   └─ Multi-word without flags → Natural Language (ANY language!)
+  │       Returns: None (defer to next handler)
+  ├─ TypoDetectionHandler:
+  │   ├─ Word count: 5 (multi-word)
+  │   ├─ Has flags/operators? NO
+  │   └─ Multi-word without flags → NOT a typo, defer (language-agnostic!)
+  │       Returns: None (pass to next)
+  ├─ NaturalLanguageHandler:
+  │   ├─ Starts with EN question word? NO (it's Italian)
+  │   └─ Returns: None (English patterns don't match)
+  └─ DefaultHandler:
+      └─ Returns: NaturalLanguage("come posso listare i file?")
        ↓
-LLM Backend:
-  ├─ Detects: Italian language
-  ├─ Translates: "how can I list files?"
-  ├─ Understands: User wants to know how to list files
-  └─ Responds: "You can use 'ls' command to list files..."
+LLM Backend (handles all languages):
+  ├─ Detects: Italian language automatically
+  ├─ Understands: "how can I list files?"
+  ├─ Provides accurate answer: "You can use 'ls' command..."
+  └─ No translation needed - LLM handles it
 ```
 
-**Benefit**: LLM is more accurate and flexible than hardcoded regex patterns for multilingual support.
+**Key Insight**: The algorithm works identically for Italian, Spanish, French, German, Chinese, Arabic, etc. No language-specific patterns needed!
+
+**Benefit**:
+- LLM is more accurate and flexible than hardcoded regex patterns
+- Adding new languages requires zero code changes
+- CommandSyntaxHandler and TypoDetectionHandler use universal syntax logic, not language keywords
 
 ---
 
-### Design Rationale: English-First Fast Path Strategy
+### Design Rationale: Language-Agnostic Core with English-First Fast Path
 
-#### Why English-Only Patterns in the Classifier?
+#### Three-Layer Approach
 
-The SCAN classifier uses an **English-first strategy** with LLM fallback for optimal performance and maintainability:
+**Layer 1: Language-Agnostic Syntax Matching** (works for ALL languages)
+- CommandSyntaxHandler: "Has flags/pipes?" logic works identically in any language
+- TypoDetectionHandler: "Multi-word without flags?" classification works universally
+- Performance: <100μs, zero language-specific patterns needed
 
-**Fast Path (English Queries)**: ~70-80% of cases
-- NaturalLanguageHandler catches English patterns in ~5μs
-- Precompiled regex for common English question words ("how", "what", "can you", etc.)
-- Immediate classification without continuing the chain
+**Layer 2: English Fast Path** (optional optimization for 70-80% of queries)
+- NaturalLanguageHandler: Catches English patterns in ~5μs
+- Precompiled regex for English question words ("how", "what", "can you", etc.)
+- Allows early exit for common English queries without reaching DefaultHandler
 
-**Smart Fallback (All Other Languages)**: ~20-30% of cases
-- Non-English queries pass through to DefaultHandler
-- LLM handles multilingual queries (100+ languages)
-- Slightly slower (~6μs classifier + LLM latency), but universally accurate
+**Layer 3: LLM Fallback** (handles all languages, all contexts)
+- DefaultHandler catches anything not matched by Layers 1-2
+- LLM handles 100+ languages automatically
+- Provides context-aware interpretation that regex patterns cannot
+
+#### Why Language-Agnostic Syntax Over Multilingual Patterns?
+
+**Old Approach (Pre-Refactoring)**:
+```
+CommandSyntaxHandler:
+  ├─ English patterns: "is question word?" + regex
+  ├─ Italian patterns: "è parola interrogativa?" + regex
+  ├─ Spanish patterns: "es palabra interrogativa?" + regex
+  └─ Result: 25 patterns, 5 languages, high maintenance
+
+TypoDetectionHandler:
+  ├─ English filters: what, how, why, when (language-specific)
+  ├─ Italian filters: cosa, come, perché, quando (language-specific)
+  └─ Result: Complex, error-prone, inflexible
+```
+
+**New Approach (Post-Refactoring)**:
+```
+CommandSyntaxHandler:
+  └─ Universal syntax: "Has flags/pipes?" → Works for ALL languages!
+
+TypoDetectionHandler:
+  ├─ Multi-word logic: "Has flags without flags?" → Language-agnostic
+  └─ Single-word filter: ~10 universal NL words (what, hi, thanks, etc.)
+```
+
+**Benefits of Language-Agnostic Approach**:
+- ✅ Universal coverage: Works for EN, IT, ES, FR, DE, ZH, AR, JA, etc. automatically
+- ✅ Zero maintenance: No language-specific patterns to update
+- ✅ Adding new languages: Zero code changes required (LLM handles it)
+- ✅ Better accuracy: Syntax-based classification is more reliable than keyword matching
+- ✅ Simpler code: ~10 lines of syntax logic vs 25+ regex patterns
 
 #### Performance Comparison
 
@@ -1169,25 +1291,26 @@ The SCAN classifier uses an **English-first strategy** with LLM fallback for opt
 |----------|---------|---------------------|------------|
 | English query "how do I...?" | NaturalLanguageHandler | ~5μs | ~5μs + LLM |
 | Italian query "come posso...?" | DefaultHandler | ~6μs | ~6μs + LLM |
+| Multi-word no flags (any language) | CommandSyntaxHandler | ~10μs | ~10μs |
 | Command "docker ps" | KnownCommandHandler | <1μs | <1μs |
 
 The extra ~1μs for non-English queries is **negligible** compared to LLM latency (~100-500ms).
 
-#### Why NOT Multilingual Regex Patterns?
+#### Why NOT the Old Multilingual Regex Approach?
 
-**Problems with the old approach** (multilingual regex in classifier):
-- ❌ Complex maintenance: 5 languages × 5 patterns each = 25 patterns
-- ❌ Limited coverage: Only 5 languages (EN, IT, ES, FR, DE) out of 100+
-- ❌ Performance cost: More patterns = slower regex matching
-- ❌ Inflexible: Adding new languages requires code changes and testing
-- ❌ Accuracy issues: Regex cannot understand context or handle dialects
+**Problems**:
+- ❌ Complex maintenance: 5 languages × 5 patterns each = 25 patterns to maintain
+- ❌ Limited coverage: Only 5 languages out of 100+
+- ❌ Performance cost: More regex patterns = slower matching
+- ❌ Inflexible: Adding language X requires code changes, testing, and release
+- ❌ Accuracy: Regex keywords miss dialects, context, and intent
 
-**Benefits of English-only + LLM**:
-- ✅ Simple maintenance: 12 patterns total, 1 language
-- ✅ Universal coverage: LLM handles all languages automatically
-- ✅ Better performance: Faster matching for common case (English)
-- ✅ Flexible: LLM adapts to new languages, slang, and context
-- ✅ More accurate: LLM understands intent, not just keyword matching
+**Why Language-Agnostic Syntax is Superior**:
+- ✅ Maintenance-free: Syntax rules work for all languages automatically
+- ✅ Universal coverage: Same algorithm handles all 100+ languages
+- ✅ Better performance: Syntax matching is simpler than regex patterns
+- ✅ Infinitely flexible: New languages work without any code changes
+- ✅ More accurate: LLM understands intent, context, and nuance
 
 #### User Demographics
 

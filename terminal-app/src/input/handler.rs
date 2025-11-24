@@ -160,28 +160,27 @@ impl CommandSyntaxHandler {
 
     /// Check if input looks like a command based on syntax
     ///
-    /// Uses precompiled regex patterns for 3-10x performance improvement.
-    /// Checks for: flags (--/-), paths (/,./, ../), env vars ($), pipes/redirects
+    /// Language-agnostic algorithm:
+    /// - Has flags (-/--) → Command (let the command validate)
+    /// - Has shell operators (|, >, <, &&) → Command
+    /// - Has paths (./, ../, /) or env vars ($VAR) → Command
+    /// - Multi-word without above → Natural Language (defer to next handler)
     fn looks_like_command(&self, input: &str) -> bool {
-        // Use precompiled patterns for performance (3-10x faster than inline checks)
         let patterns = crate::input::patterns::CompiledPatterns::get();
 
-        // Check for command syntax patterns (flags, paths, environment variables)
-        if patterns.has_command_syntax(input) {
-            return true;
-        }
-
-        // Check for shell operators (pipes, redirects, logical operators)
+        // Shell operators (|, >, <, &&, ||, ;) → definitely a command
         if patterns.has_shell_operators(input) {
             return true;
         }
 
-        // Single word without spaces (might be a command)
-        // Simple heuristic - no regex needed, already optimal
-        if !input.contains(' ') && input.len() < 20 {
+        // Command syntax (flags, paths, env vars) → definitely a command
+        // Even invalid flags like --aiuto will be handled by the command itself
+        if patterns.has_command_syntax(input) {
             return true;
         }
 
+        // Multi-word without flags/operators → likely natural language
+        // Single word → defer to other handlers (KnownCommand, Typo, Path, etc.)
         false
     }
 

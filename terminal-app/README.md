@@ -37,7 +37,7 @@ This is the initial project setup with the complete module structure. Implementa
   - Command recognition with PATH verification and caching
   - Typo detection with Levenshtein distance (e.g., "dokcer" → "docker")
   - Shell operator support (pipes, redirects, logical operators)
-  - English natural language patterns with LLM fallback for multilingual
+  - Language-agnostic classification (works for any language)
 - ✅ **Command Execution**: Async shell command execution with stdout/stderr capture
 - ✅ **Shell Operator Support**: Full support for pipes (`|`), redirects (`>`/`<`), logical operators (`&&`/`||`), subshells
 - ✅ **Performance Optimizations**: Precompiled regex patterns, thread-safe command caching, RwLock poisoning recovery
@@ -82,17 +82,18 @@ User Input → Alias Expansion → InputClassifier (9-Handler Chain)
 3. **ShellBuiltinHandler** - Shell builtins without PATH check: `.`, `:`, `[`, `[[`, source, export, eval, etc. (<1μs)
 4. **PathCommandHandler** - Executable paths: `./script.sh`, `/usr/bin/cmd` (~10μs)
 5. **KnownCommandHandler** - 60+ DevOps commands with PATH cache (<1μs hit)
-6. **CommandSyntaxHandler** - Flags, pipes, redirects detection (~10μs)
+6. **CommandSyntaxHandler** - Language-agnostic: flags, pipes, redirects (~10μs)
 7. **TypoDetectionHandler** - Levenshtein distance ≤2: "dokcer" → "docker" (~100μs)
 8. **NaturalLanguageHandler** - English patterns (precompiled regex) (~5μs)
 9. **DefaultHandler** - Fallback to natural language (<1μs)
 
 **Key Features**:
 - Average classification: <100μs
+- Language-agnostic core algorithm (works for any language)
 - Precompiled regex patterns (10-100x faster)
 - Thread-safe command cache (RwLock) with poisoning recovery
 - Panic-safe indexing on all array access (no unwrap() on array indices)
-- English-first with LLM fallback for multilingual support
+- English-first fast path with universal LLM fallback
 
 See `docs/SCAN_ARCHITECTURE.md` for complete documentation.
 
@@ -198,7 +199,8 @@ Once running, you can:
 6. **Navigate history**: Use ↑/↓ arrow keys
 7. **Tab completion**: Press Tab to complete commands/paths
 8. **Reload aliases**: Type `reload-aliases` to refresh aliases from config files (useful if editing `.bashrc` during a session)
-9. **Quit**: Press Ctrl+C or Ctrl+D
+9. **Reload commands**: Type `reload-commands` to clear the command cache (useful after installing new commands during a session)
+10. **Quit**: Press Ctrl+C or Ctrl+D
 
 #### Interactive Commands
 
@@ -403,7 +405,7 @@ xdg-open target/criterion/report/index.html  # Linux
   - Blocked: 31 commands requiring long-running sessions or network access. Use alternatives or separate terminal
   - Platform: Unix/Linux/macOS only (Windows shows error message)
 - **Alias Cache TTL**: No automatic TTL/invalidation - alias files modified externally during session require manual `reload-aliases` command to be recognized
-- **Command Cache TTL**: No automatic TTL/invalidation - commands installed during a session require terminal restart to be recognized
+- **Command Cache TTL**: No automatic TTL/invalidation - commands installed during a session require `reload-commands` to be recognized
 - **Tab Completion**: Basic file and command completion only - no integration with bash/zsh completion systems
 - **Command History**: Session-only persistence - history is not saved to disk when the terminal closes
 - **Configuration**: Uses hardcoded defaults - no config file support yet
@@ -411,7 +413,7 @@ xdg-open target/criterion/report/index.html  # Linux
 
 ### Future Improvements (M2/M3)
 
-- Command cache invalidation and TTL support
+- Automatic command cache invalidation with TTL
 - Full bash/zsh completion integration
 - Persistent command history across sessions
 - Configuration file support (.infraware-terminal.toml)

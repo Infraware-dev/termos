@@ -298,6 +298,32 @@ impl CommandCache {
         cache.aliases.clear();
     }
 
+    /// Clear only the command cache (available/unavailable), keeping aliases intact
+    ///
+    /// This is useful when new commands are installed during a session.
+    /// The next `is_available()` call will re-check PATH for the command.
+    ///
+    /// # Example
+    /// ```
+    /// use infraware_terminal::input::discovery::CommandCache;
+    ///
+    /// // After installing a new command
+    /// CommandCache::clear_commands();
+    /// // Now is_available() will re-check PATH
+    /// ```
+    pub fn clear_commands() {
+        let mut cache = match COMMAND_CACHE.write() {
+            Ok(cache) => cache,
+            Err(poisoned) => {
+                eprintln!("Warning: Command cache write lock was poisoned, recovering...");
+                poisoned.into_inner()
+            }
+        };
+        cache.available.clear();
+        cache.unavailable.clear();
+        // Note: aliases are NOT cleared - use reload-aliases for that
+    }
+
     /// Get statistics about cache contents (for debugging/monitoring)
     #[allow(dead_code)]
     pub fn stats() -> CacheStats {

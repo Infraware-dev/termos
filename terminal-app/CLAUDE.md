@@ -58,7 +58,7 @@ User Input → Alias Expansion → InputClassifier → [Command Path | Natural L
 | 3 | ShellBuiltinHandler | 45+ builtins (., :, [, [[, export) | <1μs |
 | 4 | PathCommandHandler | ./script.sh, /usr/bin/cmd | ~10μs |
 | 5 | KnownCommandHandler | 60+ DevOps commands + PATH cache | <1μs hit |
-| 6 | CommandSyntaxHandler | Flags, pipes, redirects, subshells | ~10μs |
+| 6 | CommandSyntaxHandler | Language-agnostic: flags, pipes, redirects | ~10μs |
 | 7 | TypoDetectionHandler | Levenshtein ≤2 ("dokcer" → "docker") | ~100μs |
 | 8 | NaturalLanguageHandler | English patterns (precompiled regex) | ~5μs |
 | 9 | DefaultHandler | Fallback to LLM | <1μs |
