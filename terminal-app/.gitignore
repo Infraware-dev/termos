@@ -1,5 +1,8 @@
 /target/
 
+# Environment variables (use .env.example as template)
+.env
+
 # Editor temporary files
 *.swp
 *.swo
