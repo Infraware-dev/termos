@@ -17,6 +17,7 @@ pub struct PackageInstaller {
 
 impl PackageInstaller {
     /// Create a new package installer with all supported package managers
+    #[must_use]
     pub fn new() -> Self {
         let managers: Vec<Box<dyn PackageManager>> = vec![
             Box::new(AptPackageManager),
@@ -33,6 +34,7 @@ impl PackageInstaller {
 
     /// Create an installer with custom package managers
     #[allow(dead_code)]
+    #[must_use]
     pub fn with_managers(managers: Vec<Box<dyn PackageManager>>) -> Self {
         Self { managers }
     }
@@ -56,22 +58,27 @@ impl PackageInstaller {
             .iter()
             .filter(|m| m.is_available())
             .max_by_key(|m| m.priority())
-            .map(|m| m.as_ref())
+            .map(std::convert::AsRef::as_ref)
             .ok_or_else(|| anyhow::anyhow!("No supported package manager found"))
     }
 
     /// Check if any package manager is available
+    #[must_use]
     pub fn is_available(&self) -> bool {
         self.managers.iter().any(|m| m.is_available())
     }
 
     /// Get the name of the selected package manager
+    #[must_use]
     pub fn get_package_manager(&self) -> Option<&str> {
-        self.select_package_manager().ok().map(|m| m.name())
+        self.select_package_manager()
+            .ok()
+            .map(super::package_manager::PackageManager::name)
     }
 
     /// Get all available package managers
     #[allow(dead_code)]
+    #[must_use]
     pub fn get_available_managers(&self) -> Vec<&str> {
         self.managers
             .iter()
@@ -90,14 +97,18 @@ impl Default for PackageInstaller {
 // Static methods for backward compatibility
 impl PackageInstaller {
     /// Check if any package manager is available (static method for compatibility)
+    #[must_use]
     pub fn is_available_static() -> bool {
         Self::new().is_available()
     }
 
     /// Get the name of the available package manager (static method for compatibility)
     #[allow(dead_code)]
+    #[must_use]
     pub fn get_package_manager_static() -> Option<String> {
-        Self::new().get_package_manager().map(|s| s.to_string())
+        Self::new()
+            .get_package_manager()
+            .map(std::string::ToString::to_string)
     }
 }
 

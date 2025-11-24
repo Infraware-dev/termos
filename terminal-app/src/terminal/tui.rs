@@ -1,4 +1,4 @@
-use anyhow::Result;
+use anyhow::{Context, Result};
 use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
@@ -60,6 +60,46 @@ impl TerminalUI {
         disable_raw_mode()?;
         execute!(self.terminal.backend_mut(), LeaveAlternateScreen)?;
         self.terminal.show_cursor()?;
+        Ok(())
+    }
+
+    /// Suspend TUI mode for interactive command execution
+    ///
+    /// Disables raw mode, leaves alternate screen, shows cursor.
+    /// Terminal returns to normal state for interactive commands like vim, less, etc.
+    pub fn suspend(&mut self) -> Result<()> {
+        // Show cursor before leaving
+        self.terminal.show_cursor()?;
+
+        // Flush any pending draws to prevent artifacts
+        use std::io::Write;
+        self.terminal
+            .backend_mut()
+            .flush()
+            .context("Failed to flush terminal before suspension")?;
+
+        // Leave alternate screen
+        execute!(self.terminal.backend_mut(), LeaveAlternateScreen)?;
+
+        // Disable raw mode
+        disable_raw_mode()?;
+
+        Ok(())
+    }
+
+    /// Resume TUI mode after interactive command completes
+    ///
+    /// Re-enables raw mode, enters alternate screen, clears screen.
+    pub fn resume(&mut self) -> Result<()> {
+        // Enable raw mode
+        enable_raw_mode()?;
+
+        // Enter alternate screen
+        execute!(self.terminal.backend_mut(), EnterAlternateScreen)?;
+
+        // Clear screen to prevent artifacts
+        self.terminal.clear()?;
+
         Ok(())
     }
 }
@@ -153,7 +193,7 @@ fn render_status_bar(frame: &mut Frame, area: Rect, state: &TerminalState) {
 
     let status_text = Line::from(vec![
         Span::styled(
-            format!(" {} ", mode_text),
+            format!(" {mode_text} "),
             Style::default()
                 .fg(Color::Black)
                 .bg(mode_color)

@@ -35,7 +35,7 @@ impl TypoDetectionHandler {
     /// # Arguments
     /// * `known_commands` - List of valid commands to check against
     /// * `max_distance` - Maximum Levenshtein distance to consider (default: 2)
-    pub fn new(known_commands: Vec<String>, max_distance: usize) -> Self {
+    pub const fn new(known_commands: Vec<String>, max_distance: usize) -> Self {
         Self {
             known_commands,
             max_distance,
@@ -187,13 +187,9 @@ mod tests {
 
         for typo in typos {
             let result = handler.find_closest_match(typo);
-            assert!(
-                result.is_some(),
-                "Typo '{}' should find a close match",
-                typo
-            );
+            assert!(result.is_some(), "Typo '{typo}' should find a close match");
             if let Some((_, distance)) = result {
-                assert!(distance <= 2, "Distance should be <= 2 for typo '{}'", typo);
+                assert!(distance <= 2, "Distance should be <= 2 for typo '{typo}'");
             }
         }
 

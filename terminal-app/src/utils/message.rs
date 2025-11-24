@@ -37,7 +37,7 @@ impl MessageFormatter {
 
     /// Format command exit code error
     pub fn command_failed(exit_code: i32) -> String {
-        Self::error(format!("Command exited with code {}", exit_code))
+        Self::error(format!("Command exited with code {exit_code}"))
     }
 
     /// Format execution error

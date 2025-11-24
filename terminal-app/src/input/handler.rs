@@ -62,7 +62,7 @@ impl Default for ClassifierChain {
 pub struct EmptyInputHandler;
 
 impl EmptyInputHandler {
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self
     }
 }
@@ -90,7 +90,7 @@ pub struct KnownCommandHandler {
 }
 
 impl KnownCommandHandler {
-    pub fn new(known_commands: Vec<String>) -> Self {
+    pub const fn new(known_commands: Vec<String>) -> Self {
         Self { known_commands }
     }
 
@@ -154,7 +154,7 @@ impl InputHandler for KnownCommandHandler {
 pub struct CommandSyntaxHandler;
 
 impl CommandSyntaxHandler {
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self
     }
 
@@ -230,7 +230,7 @@ impl Default for CommandSyntaxHandler {
 pub struct NaturalLanguageHandler;
 
 impl NaturalLanguageHandler {
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self
     }
 
@@ -496,7 +496,7 @@ impl Default for NaturalLanguageHandler {
 pub struct PathCommandHandler;
 
 impl PathCommandHandler {
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self
     }
 
@@ -598,7 +598,7 @@ impl Default for PathCommandHandler {
 pub struct DefaultHandler;
 
 impl DefaultHandler {
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self
     }
 }
@@ -655,15 +655,15 @@ mod tests {
 
         // Test 3: Command in whitelist but not installed should return None
         // This is the CORRECT behavior - handler passes to next handler
-        if !crate::input::discovery::CommandCache::is_available("docker") {
-            // If docker not installed, handler should return None (correct)
-            assert_eq!(handler.handle("docker ps"), None);
-        } else {
+        if crate::input::discovery::CommandCache::is_available("docker") {
             // If docker IS installed, handler should recognize it
             assert!(matches!(
                 handler.handle("docker ps"),
                 Some(InputType::Command { .. })
             ));
+        } else {
+            // If docker not installed, handler should return None (correct)
+            assert_eq!(handler.handle("docker ps"), None);
         }
     }
 

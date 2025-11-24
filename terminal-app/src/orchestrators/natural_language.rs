@@ -84,8 +84,7 @@ impl NaturalLanguageOrchestrator {
 
         // Show error message
         state.add_output(MessageFormatter::error(format!(
-            "Error querying LLM: {}",
-            error
+            "Error querying LLM: {error}"
         )));
     }
 }
@@ -144,7 +143,7 @@ mod tests {
         let llm_client = Arc::new(MockLLMClient::new());
         let renderer = ResponseRenderer::new();
         let orchestrator = NaturalLanguageOrchestrator::new(llm_client, renderer);
-        let debug_str = format!("{:?}", orchestrator);
+        let debug_str = format!("{orchestrator:?}");
         assert!(debug_str.contains("NaturalLanguageOrchestrator"));
     }
 

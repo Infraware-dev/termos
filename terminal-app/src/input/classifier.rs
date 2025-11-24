@@ -14,7 +14,7 @@ use super::typo_detection::TypoDetectionHandler;
 use std::sync::{Arc, RwLock};
 
 /// Represents the type of user input
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InputType {
     /// A shell command with its name and arguments
     ///
@@ -158,7 +158,7 @@ impl InputClassifier {
                 let expanded_input = if rest.is_empty() {
                     expansion
                 } else {
-                    format!("{} {}", expansion, rest)
+                    format!("{expansion} {rest}")
                 };
 
                 // Classify the expanded input
@@ -225,8 +225,7 @@ mod tests {
         let result = classifier.classify("show me the logs").unwrap();
         assert!(
             matches!(result, InputType::NaturalLanguage(_)),
-            "Expected NaturalLanguage, got: {:?}",
-            result
+            "Expected NaturalLanguage, got: {result:?}"
         );
 
         // Questions starting with "what" - should match question_words pattern

@@ -1,13 +1,3 @@
-/// Precompiled regex patterns for SCAN algorithm performance optimization
-///
-/// This module uses `once_cell::Lazy` to compile regex patterns once at startup,
-/// providing 10-100x faster pattern matching compared to repeated compilation.
-///
-/// # Design Pattern: Lazy Singleton
-/// - Patterns are compiled once and cached globally
-/// - Thread-safe access via `once_cell::Lazy`
-/// - Zero-cost abstraction (no runtime overhead after initialization)
-use once_cell::sync::Lazy;
 use regex::RegexSet;
 
 /// Precompiled regex patterns for command and natural language detection
@@ -32,7 +22,7 @@ pub struct CompiledPatterns {
 ///
 /// Initialized lazily on first access, then reused for all subsequent pattern matches.
 /// This provides significant performance gains over compiling regex on every classification.
-static PATTERNS: Lazy<CompiledPatterns> = Lazy::new(|| {
+static PATTERNS: std::sync::LazyLock<CompiledPatterns> = std::sync::LazyLock::new(|| {
     CompiledPatterns {
         // Command syntax patterns
         command_syntax: RegexSet::new([
@@ -90,7 +80,7 @@ impl CompiledPatterns {
     /// let patterns = CompiledPatterns::get();
     /// assert!(patterns.question_words.is_match("how do I list files?"));
     /// ```
-    pub fn get() -> &'static CompiledPatterns {
+    pub fn get() -> &'static Self {
         &PATTERNS
     }
 

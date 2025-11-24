@@ -2,7 +2,7 @@
 use super::buffers::{CommandHistory, InputBuffer, OutputBuffer};
 
 /// Represents the current mode of the terminal
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 #[allow(dead_code)]
 pub enum TerminalMode {
     Normal,           // Waiting for input
@@ -27,7 +27,7 @@ pub struct TerminalState {
 
 impl TerminalState {
     /// Create a new terminal state
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             output: OutputBuffer::new(),
             input: InputBuffer::new(),
@@ -70,7 +70,7 @@ impl TerminalState {
     }
 
     /// Move cursor left
-    pub fn move_cursor_left(&mut self) {
+    pub const fn move_cursor_left(&mut self) {
         self.input.move_cursor_left();
     }
 
@@ -95,12 +95,12 @@ impl TerminalState {
     }
 
     /// Scroll output up
-    pub fn scroll_up(&mut self) {
+    pub const fn scroll_up(&mut self) {
         self.output.scroll_up();
     }
 
     /// Scroll output down
-    pub fn scroll_down(&mut self) {
+    pub const fn scroll_down(&mut self) {
         self.output.scroll_down();
     }
 }

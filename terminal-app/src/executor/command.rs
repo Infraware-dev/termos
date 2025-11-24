@@ -1,5 +1,6 @@
 /// Command execution module
 use anyhow::{Context, Result};
+use std::collections::HashSet;
 use std::process::Stdio;
 use tokio::process::Command as TokioCommand;
 use tokio::time::{timeout, Duration};
@@ -7,7 +8,7 @@ use tokio::time::{timeout, Duration};
 use crate::input::shell_builtins::ShellBuiltinHandler;
 
 /// Output from a command execution
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandOutput {
     pub stdout: String,
     pub stderr: String,
@@ -16,12 +17,14 @@ pub struct CommandOutput {
 
 impl CommandOutput {
     /// Check if the command was successful
-    pub fn is_success(&self) -> bool {
+    #[must_use]
+    pub const fn is_success(&self) -> bool {
         self.exit_code == 0
     }
 
     /// Get combined output (stdout + stderr)
     #[allow(dead_code)]
+    #[must_use]
     pub fn combined_output(&self) -> String {
         let mut result = String::new();
         if !self.stdout.is_empty() {
@@ -37,75 +40,86 @@ impl CommandOutput {
     }
 }
 
+/// Commands that require interactive execution (TUI suspension)
+const REQUIRES_INTERACTIVE: &[&str] = &[
+    // Text editors
+    "vim", "nvim", "nano", "emacs", "pico", "ed", "vi", // Pagers
+    "less", "more", "most", "man", "info", // File managers
+    "mc", "ranger", "nnn", "lf", "vifm",  // Watchers
+    "watch", // System monitors (non-root)
+    "top", "htop", "btop", "atop", // Privilege escalation (needs password input)
+    "sudo",
+];
+
+/// Commands that are interactive but NOT supported (blocked entirely)
+const INTERACTIVE_BLOCKED: &[&str] = &[
+    // Remote/session
+    "ssh",
+    "telnet",
+    "ftp",
+    "sftp",
+    "screen",
+    "tmux",
+    // REPLs
+    "python",
+    "python3",
+    "irb",
+    "node",
+    "ipython",
+    "mysql",
+    "psql",
+    "sqlite3",
+    "mongo",
+    "redis-cli",
+    // Debuggers
+    "gdb",
+    "lldb",
+    "pdb",
+    // Terminal browsers
+    "w3m",
+    "lynx",
+    "links",
+    // Admin tools
+    "passwd",
+    "visudo",
+    // System monitors that require root
+    "iotop",
+    "iftop",
+    "nethogs",
+];
+
+/// All interactive commands (for `is_interactive_command` check)
+static ALL_INTERACTIVE: std::sync::LazyLock<HashSet<&'static str>> =
+    std::sync::LazyLock::new(|| {
+        REQUIRES_INTERACTIVE
+            .iter()
+            .chain(INTERACTIVE_BLOCKED.iter())
+            .copied()
+            .collect()
+    });
+
+/// Set of commands that require interactive execution (O(1) lookup)
+static REQUIRES_INTERACTIVE_SET: std::sync::LazyLock<HashSet<&'static str>> =
+    std::sync::LazyLock::new(|| REQUIRES_INTERACTIVE.iter().copied().collect());
+
 /// Command executor for running shell commands
 pub struct CommandExecutor;
 
 impl CommandExecutor {
-    /// List of interactive commands that should not be executed in non-interactive mode
-    /// These commands require a TTY and will block or behave incorrectly without one
-    const INTERACTIVE_COMMANDS: &'static [&'static str] = &[
-        // Text editors
-        "vi",
-        "vim",
-        "nvim",
-        "emacs",
-        "nano",
-        "pico",
-        "ed",
-        // Interactive system monitors
-        "top",
-        "htop",
-        "btop",
-        "atop",
-        "iotop",
-        "iftop",
-        "nethogs",
-        "watch", // Runs commands repeatedly
-        // Interactive file managers
-        "mc",
-        "ranger",
-        "nnn",
-        "lf",
-        "vifm",
-        // Interactive programs
-        "less",
-        "more",
-        "most",
-        "man",
-        "info",
-        "ssh",
-        "telnet",
-        "ftp",
-        "sftp",
-        "screen",
-        "tmux",
-        "python",
-        "python3",
-        "irb",
-        "node",
-        "ipython", // REPLs without args
-        "mysql",
-        "psql",
-        "sqlite3",
-        "mongo",
-        "redis-cli",
-        // Other interactive tools
-        "gdb",
-        "lldb",
-        "pdb",
-        "w3m",
-        "lynx",
-        "links",
-        // System administration
-        "passwd",
-        "visudo",
-        // Note: sh, bash, zsh, fish are NOT blocked when used with -c flag
-        // They are already used internally for shell operator interpretation
-    ];
-
     /// Check if a command is interactive and should be blocked
     fn is_interactive_command(cmd: &str) -> bool {
-        Self::INTERACTIVE_COMMANDS.contains(&cmd)
+        ALL_INTERACTIVE.contains(cmd)
+    }
+
+    /// Check if a command requires interactive execution with TUI suspension
+    ///
+    /// These commands need a real TTY and will be executed with the TUI suspended.
+    ///
+    /// # Platform Support
+    /// - **Unix/Linux/macOS**: Fully supported via TUI suspension
+    /// - **Windows**: Returns true but execution will fail with error message
+    pub fn requires_interactive(cmd: &str) -> bool {
+        REQUIRES_INTERACTIVE_SET.contains(cmd)
     }
 
     /// Check if a command is a shell builtin that must be executed through a shell
@@ -115,10 +129,10 @@ impl CommandExecutor {
 
     /// Get the platform-appropriate shell and shell command flag
     ///
-    /// Returns a tuple of (shell_executable, command_flag):
+    /// Returns a tuple of (`shell_executable`, `command_flag`):
     /// - Unix/Linux/macOS: ("sh", "-c")
     /// - Windows: ("cmd", "/C")
-    fn get_platform_shell() -> (&'static str, &'static str) {
+    const fn get_platform_shell() -> (&'static str, &'static str) {
         #[cfg(target_os = "windows")]
         {
             ("cmd", "/C")
@@ -151,19 +165,17 @@ impl CommandExecutor {
         args: &[String],
         original_input: Option<&str>,
     ) -> Result<CommandOutput> {
-        // Block interactive commands
-        if Self::is_interactive_command(cmd) {
+        // Block interactive commands that are NOT supported via TUI suspension
+        // Commands in requires_interactive() will be handled separately
+        if Self::is_interactive_command(cmd) && !Self::requires_interactive(cmd) {
             return Ok(CommandOutput {
                 stdout: String::new(),
                 stderr: format!(
-                    "Interactive command '{}' is not supported in this terminal.\n\
+                    "Interactive command '{cmd}' is not supported in this terminal.\n\
                      Suggestions:\n\
                      - For 'top': use 'ps aux' or 'top -b -n 1' for batch mode\n\
-                     - For 'vim/nano': use 'cat' to view files, or edit externally\n\
-                     - For 'less': use 'cat' or 'head/tail'\n\
-                     - For shells: commands are already executed in a shell\n\
-                     - For REPLs: pass code as argument (e.g., 'python -c \"print(1+1)\"')",
-                    cmd
+                     - For 'ssh/tmux/screen': use in a separate terminal window\n\
+                     - For REPLs: pass code as argument (e.g., 'python -c \"print(1+1)\"')"
                 ),
                 exit_code: 1,
             });
@@ -240,7 +252,7 @@ impl CommandExecutor {
         // Direct execution (no shell operators)
         // Check if command exists
         if !Self::command_exists(cmd) {
-            anyhow::bail!("Command '{}' not found", cmd);
+            anyhow::bail!("Command '{cmd}' not found");
         }
 
         // Execute the command with timeout
@@ -262,13 +274,96 @@ impl CommandExecutor {
         })
     }
 
+    /// Execute interactive command with TUI suspension
+    ///
+    /// # Arguments
+    /// * `cmd` - Command to execute
+    /// * `args` - Command arguments
+    /// * `ui` - TUI instance (will be suspended/resumed)
+    ///
+    /// # Returns
+    /// `CommandOutput` with exit code (stdout/stderr not captured)
+    ///
+    /// # Unix-Only
+    /// This method is Unix-only (Linux/macOS). On Windows, it returns an error.
+    pub async fn execute_interactive(
+        cmd: &str,
+        args: &[String],
+        ui: &mut crate::terminal::TerminalUI,
+    ) -> Result<CommandOutput> {
+        #[cfg(target_os = "windows")]
+        {
+            return Ok(CommandOutput {
+                stdout: String::new(),
+                stderr: format!(
+                    "Interactive command '{}' is not supported on Windows.\n\
+                     Interactive commands are only available on Linux and macOS.",
+                    cmd
+                ),
+                exit_code: 1,
+            });
+        }
+
+        #[cfg(not(target_os = "windows"))]
+        {
+            // RAII guard that ensures resume() is called even on panic
+            struct TuiGuard<'a> {
+                ui: &'a mut crate::terminal::TerminalUI,
+                suspended: bool,
+            }
+
+            impl Drop for TuiGuard<'_> {
+                fn drop(&mut self) {
+                    if self.suspended {
+                        // Best-effort resume, ignore errors in panic path
+                        let _ = self.ui.resume();
+                    }
+                }
+            }
+
+            // Suspend TUI
+            ui.suspend().context("Failed to suspend TUI")?;
+            let mut guard = TuiGuard {
+                ui,
+                suspended: true,
+            };
+
+            // Clone for move into spawn_blocking
+            let cmd = cmd.to_string();
+            let args = args.to_vec();
+
+            // Run blocking command on dedicated thread pool
+            let result = tokio::task::spawn_blocking(move || {
+                std::process::Command::new(&cmd).args(&args).status()
+            })
+            .await
+            .context("Interactive command task panicked")?;
+
+            // Resume TUI (guard ensures this happens even on panic)
+            guard.ui.resume().context("Failed to resume TUI")?;
+            guard.suspended = false; // Mark as successfully resumed
+
+            // Return result
+            match result {
+                Ok(exit_status) => Ok(CommandOutput {
+                    stdout: String::new(), // Not captured
+                    stderr: String::new(),
+                    exit_code: exit_status.code().unwrap_or(-1),
+                }),
+                Err(e) => Err(anyhow::anyhow!("Command failed: {e}")),
+            }
+        }
+    }
+
     /// Check if a command exists in the PATH
+    #[must_use]
     pub fn command_exists(cmd: &str) -> bool {
         which::which(cmd).is_ok()
     }
 
     /// Get the full path of a command
     #[allow(dead_code)]
+    #[must_use]
     pub fn get_command_path(cmd: &str) -> Option<String> {
         which::which(cmd)
             .ok()
@@ -280,7 +375,7 @@ impl CommandExecutor {
     pub async fn execute_sudo(cmd: &str, args: &[String]) -> Result<CommandOutput> {
         // Check if command exists
         if !Self::command_exists(cmd) {
-            anyhow::bail!("Command '{}' not found", cmd);
+            anyhow::bail!("Command '{cmd}' not found");
         }
 
         // Use TokioCommand directly to ensure proper argument separation
@@ -404,9 +499,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_interactive_command_blocked() {
-        // Test that interactive commands are blocked
-        let output = CommandExecutor::execute("vim", &[], None).await.unwrap();
+    async fn test_unsupported_interactive_command_blocked() {
+        // Test that unsupported interactive commands (not in requires_interactive) are blocked
+        // ssh is in INTERACTIVE_COMMANDS but NOT in requires_interactive
+        let output = CommandExecutor::execute("ssh", &[], None).await.unwrap();
         assert!(!output.is_success());
         assert_eq!(output.exit_code, 1);
         assert!(output.stderr.contains("Interactive command"));
@@ -414,30 +510,75 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_top_command_blocked() {
-        let output = CommandExecutor::execute("top", &[], None).await.unwrap();
-        assert!(!output.is_success());
-        assert!(output.stderr.contains("Interactive command"));
-        assert!(output.stderr.contains("top -b -n 1"));
-    }
-
-    #[tokio::test]
-    async fn test_nano_command_blocked() {
-        let output = CommandExecutor::execute("nano", &[], None).await.unwrap();
+    async fn test_python_command_blocked() {
+        // python is in INTERACTIVE_BLOCKED, not in requires_interactive
+        let output = CommandExecutor::execute("python", &[], None).await.unwrap();
         assert!(!output.is_success());
         assert!(output.stderr.contains("Interactive command"));
     }
 
     #[test]
+    fn test_requires_interactive() {
+        // Text editors
+        assert!(CommandExecutor::requires_interactive("vim"));
+        assert!(CommandExecutor::requires_interactive("nano"));
+
+        // Pagers
+        assert!(CommandExecutor::requires_interactive("less"));
+        assert!(CommandExecutor::requires_interactive("man"));
+
+        // File managers
+        assert!(CommandExecutor::requires_interactive("mc"));
+
+        // System monitors
+        assert!(CommandExecutor::requires_interactive("top"));
+        assert!(CommandExecutor::requires_interactive("htop"));
+        assert!(CommandExecutor::requires_interactive("atop"));
+
+        // System monitors that require root (blocked)
+        assert!(!CommandExecutor::requires_interactive("iotop"));
+        assert!(!CommandExecutor::requires_interactive("iftop"));
+        assert!(!CommandExecutor::requires_interactive("nethogs"));
+
+        // Package managers are NOT interactive (output captured for scrolling)
+        assert!(!CommandExecutor::requires_interactive("apt"));
+        assert!(!CommandExecutor::requires_interactive("apt-get"));
+        assert!(!CommandExecutor::requires_interactive("yum"));
+        assert!(!CommandExecutor::requires_interactive("dnf"));
+        assert!(!CommandExecutor::requires_interactive("pacman"));
+
+        // Privilege escalation requires interactive (password prompt)
+        assert!(CommandExecutor::requires_interactive("sudo"));
+
+        // Test that blocked commands return false
+        assert!(!CommandExecutor::requires_interactive("ssh"));
+        assert!(!CommandExecutor::requires_interactive("python"));
+        assert!(!CommandExecutor::requires_interactive("ls"));
+    }
+
+    #[test]
     fn test_is_interactive_command() {
+        // Supported interactive
         assert!(CommandExecutor::is_interactive_command("vim"));
         assert!(CommandExecutor::is_interactive_command("top"));
         assert!(CommandExecutor::is_interactive_command("nano"));
         assert!(CommandExecutor::is_interactive_command("htop"));
         assert!(CommandExecutor::is_interactive_command("less"));
+        assert!(CommandExecutor::is_interactive_command("sudo"));
+
+        // Blocked interactive
+        assert!(CommandExecutor::is_interactive_command("ssh"));
+        assert!(CommandExecutor::is_interactive_command("python"));
+        assert!(CommandExecutor::is_interactive_command("iotop"));
+        assert!(CommandExecutor::is_interactive_command("iftop"));
+
+        // Non-interactive (including package managers)
         assert!(!CommandExecutor::is_interactive_command("ls"));
         assert!(!CommandExecutor::is_interactive_command("ps"));
         assert!(!CommandExecutor::is_interactive_command("cat"));
+        assert!(!CommandExecutor::is_interactive_command("apt"));
+        assert!(!CommandExecutor::is_interactive_command("yum"));
+        assert!(!CommandExecutor::is_interactive_command("dnf"));
     }
 
     #[test]
@@ -496,7 +637,7 @@ mod tests {
             stderr: "error".to_string(),
             exit_code: 0,
         };
-        let debug_str = format!("{:?}", output);
+        let debug_str = format!("{output:?}");
         assert!(debug_str.contains("stdout"));
         assert!(debug_str.contains("test"));
     }

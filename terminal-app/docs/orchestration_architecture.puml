@@ -1,0 +1,308 @@
+@startuml Orchestration Architecture
+title "Orchestrator Design - Workflow Coordination"
+
+package "main" {
+    class InfrawareTerminal {
+        -ui: TerminalUI
+        -state: TerminalState
+        -classifier: InputClassifier
+        -event_handler: EventHandler
+        -command_orchestrator: CommandOrchestrator
+        -nl_orchestrator: NaturalLanguageOrchestrator
+        -tab_completion_handler: TabCompletionHandler
+        --
+        +run() -> Result<()>
+        -handle_event(event) -> Result<bool>
+        -handle_submit() -> Result<()>
+        -handle_command(cmd, args, original_input) -> Result<()>
+        -handle_natural_language(query) -> Result<()>
+        -handle_command_typo(input, suggestion, distance) -> Result<()>
+        -handle_tab_completion()
+    }
+
+    note right of InfrawareTerminal
+        Single Responsibility: Event loop orchestration
+        - Manage event loop
+        - Route events to handlers
+        - Coordinate between UI and orchestrators
+        NOT responsible for:
+        - Command execution (CommandOrchestrator)
+        - LLM queries (NaturalLanguageOrchestrator)
+        - Completion (TabCompletionHandler)
+    end note
+
+    class InfrawareTerminalBuilder {
+        -ui: Option<TerminalUI>
+        -state: Option<TerminalState>
+        -classifier: Option<InputClassifier>
+        -event_handler: Option<EventHandler>
+        -llm_client: Option<Arc<dyn LLMClientTrait>>
+        -renderer: Option<ResponseRenderer>
+        --
+        +new() -> Self
+        +with_ui(ui) -> Self
+        +with_state(state) -> Self
+        +with_classifier(classifier) -> Self
+        +with_event_handler(handler) -> Self
+        +with_llm_client(client) -> Self
+        +with_renderer(renderer) -> Self
+        +build() -> Result<InfrawareTerminal>
+    }
+
+    InfrawareTerminal --> InfrawareTerminalBuilder : "built by"
+
+    note right of InfrawareTerminalBuilder
+        Builder Pattern:
+        - Flexible construction with defaults
+        - Testability via dependency injection
+        - Optional component overrides
+    end note
+}
+
+package "orchestrators" {
+    class CommandOrchestrator {
+        --(none)--
+        +handle_command(cmd, args, original_input, state, ui) -> Result<()>
+        -handle_clear_command(state, ui) -> Result<()>
+        -handle_reload_aliases_command(state) -> Result<()>
+        -execute_interactive_and_display(cmd, args, state, ui) -> Result<()>
+        -execute_and_display(cmd, args, original_input, state) -> Result<()>
+    }
+
+    note right of CommandOrchestrator
+        Responsibility: Command execution workflow
+        Handles:
+        - Built-in commands (clear, reload-aliases)
+        - Command existence verification
+        - Route to interactive or non-interactive execution
+        - Output capture and formatting
+        - Error handling and display
+
+        Does NOT handle:
+        - Natural language queries
+        - Tab completion
+        - Input classification
+    end note
+
+    class NaturalLanguageOrchestrator {
+        -llm_client: Arc<dyn LLMClientTrait>
+        -renderer: ResponseRenderer
+        --
+        +handle_query(query, state, ui) -> Result<()>
+    }
+
+    note right of NaturalLanguageOrchestrator
+        Responsibility: LLM query workflow
+        Handles:
+        - LLM API communication
+        - Response formatting via ResponseRenderer
+        - Markdown rendering (basic: code, inline)
+        - Output display in TUI
+
+        Deferred to M2/M3:
+        - Advanced markdown (tables, images)
+        - Custom LLM endpoint configuration
+        - Streaming responses
+    end note
+
+    class TabCompletionHandler {
+        --
+        +handle_tab_completion(state) -> Result<()>
+    }
+
+    note right of TabCompletionHandler
+        Responsibility: Tab completion workflow
+        Handles:
+        - Command name completion
+        - File path completion
+        - History matching
+
+        Current scope: Basic completion
+        Deferred to M2/M3:
+        - Bash/Zsh integration
+        - Context-aware completion
+        - Subcommand completion
+    end note
+}
+
+package "input" {
+    class InputClassifier {
+        -chain: ClassifierChain
+        -history: Option<Arc<RwLock<Vec<String>>>>
+        --
+        +new() -> Self
+        +with_history(history) -> Self
+        +classify(input) -> Result<InputType>
+    }
+
+    class ClassifierChain {
+        -handlers: Vec<Box<dyn InputHandler>>
+        --
+        +new() -> Self
+        +add_handler(handler) -> Self
+        +process(input) -> Result<InputType>
+    }
+
+    InputClassifier --> ClassifierChain : "uses"
+
+    note right of InputClassifier
+        Design Pattern: Chain of Responsibility
+        9-handler chain for input classification:
+        1. EmptyInputHandler
+        2. HistoryExpansionHandler
+        3. ShellBuiltinHandler
+        4. PathCommandHandler
+        5. KnownCommandHandler
+        6. CommandSyntaxHandler
+        7. TypoDetectionHandler
+        8. NaturalLanguageHandler
+        9. DefaultHandler
+
+        Responsibility:
+        - Alias expansion (pre-classification)
+        - Route input through handler chain
+        - Return InputType (Command/NaturalLanguage/Empty/CommandTypo)
+    end note
+}
+
+package "terminal" {
+    class TerminalUI {
+        --
+        +render(state) -> Result<()>
+        +suspend() -> Result<()>
+        +resume() -> Result<()>
+    }
+
+    class TerminalState {
+        +output: OutputBuffer
+        +input: InputBuffer
+        +history: CommandHistory
+        +mode: TerminalMode
+    }
+
+    class EventHandler {
+        --
+        +poll_event(timeout) -> Result<Option<TerminalEvent>>
+    }
+}
+
+package "executor" {
+    class CommandExecutor {
+        --
+        {static} +execute(cmd, args, original_input) -> Result<CommandOutput>
+        {static} +execute_interactive(cmd, args, ui) -> Result<CommandOutput>
+        {static} +requires_interactive(cmd) -> bool
+    }
+}
+
+' Workflow flows
+object command_workflow {
+    title: "Command Execution Workflow"
+    ---
+    1. User input submitted
+    2. InputClassifier.classify()
+    3. CommandOrchestrator.handle_command()
+    4. CommandExecutor.execute/execute_interactive()
+    5. Output display and formatting
+}
+
+object natural_language_workflow {
+    title: "Natural Language Workflow"
+    ---
+    1. User input submitted
+    2. InputClassifier.classify()
+    3. NaturalLanguageOrchestrator.handle_query()
+    4. LLMClient API call
+    5. ResponseRenderer.format_response()
+    6. Output display
+}
+
+object tab_completion_workflow {
+    title: "Tab Completion Workflow"
+    ---
+    1. User presses Tab
+    2. TabCompletionHandler.handle_tab_completion()
+    3. Suggest completions from cache/filesystem
+    4. Update InputBuffer with best match
+}
+
+' Main event loop
+object event_loop {
+    title: "Main Event Loop"
+    ---
+    1. Poll events (100ms timeout)
+    2. Handle event:
+       - Keyboard input → Update InputBuffer
+       - Submit → Route via InputClassifier
+       - Tab → Call TabCompletionHandler
+       - ScrollUp/Down → Update OutputBuffer
+    3. Render state to TUI
+    4. Repeat until Quit
+}
+
+' Relationships - Orchestrators with shared components
+CommandOrchestrator --> CommandExecutor : "delegates to"
+CommandOrchestrator --> TerminalState : "updates"
+CommandOrchestrator --> TerminalUI : "passes to executor"
+
+NaturalLanguageOrchestrator --> TerminalState : "updates"
+NaturalLanguageOrchestrator --> TerminalUI : "renders to"
+
+TabCompletionHandler --> TerminalState : "updates input"
+
+' Relationships - Main loop with orchestrators
+InfrawareTerminal --> CommandOrchestrator : "calls"
+InfrawareTerminal --> NaturalLanguageOrchestrator : "calls"
+InfrawareTerminal --> TabCompletionHandler : "calls"
+InfrawareTerminal --> InputClassifier : "uses"
+InfrawareTerminal --> TerminalState : "manages"
+InfrawareTerminal --> TerminalUI : "controls"
+InfrawareTerminal --> EventHandler : "polls"
+
+' Workflow routing
+InputClassifier -.-> command_workflow : "InputType::Command"
+InputClassifier -.-> natural_language_workflow : "InputType::NaturalLanguage"
+InputClassifier -.-> command_workflow : "InputType::CommandTypo"
+EventHandler -.-> tab_completion_workflow : "TerminalEvent::TabComplete"
+
+InfrawareTerminal -.-> event_loop : "implements"
+
+' Architecture notes
+note bottom of CommandOrchestrator
+    Execution paths handled:
+    - Non-interactive: execute() with stdout/stderr capture
+    - Interactive: execute_interactive() with TUI suspend/resume
+    - Built-in commands: Direct handling (clear, reload-aliases)
+    - Shell operators: Pass to shell via original_input
+end note
+
+note bottom of NaturalLanguageOrchestrator
+    Design: Pluggable LLM backend
+    - Abstract LLMClientTrait
+    - MockLLMClient for testing
+    - HttpLLMClient for production
+    - ResponseRenderer for formatting
+end note
+
+note bottom of TabCompletionHandler
+    Current capabilities:
+    - Command name completion (from PATH)
+    - File path completion (from filesystem)
+    - Case-sensitive matching
+    - Single best match completion
+end note
+
+note bottom of InfrawareTerminal
+    Architecture Principles:
+    1. Single Responsibility Principle (SRP)
+       - Each component has one reason to change
+       - Orchestrators handle specific workflows
+    2. Builder Pattern
+       - Flexible construction
+       - Dependency injection for testing
+    3. Composition over Inheritance
+       - Terminal composed from buffer components
+       - Workflows coordinated by orchestrators
+end note
+
+@enduml

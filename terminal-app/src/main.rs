@@ -129,7 +129,7 @@ impl InfrawareTerminalBuilder {
     }
 
     /// Set a custom EventHandler
-    pub fn with_event_handler(mut self, event_handler: EventHandler) -> Self {
+    pub const fn with_event_handler(mut self, event_handler: EventHandler) -> Self {
         self.event_handler = Some(event_handler);
         self
     }
@@ -231,7 +231,7 @@ impl InfrawareTerminal {
 
             // Load system aliases first
             if let Err(e) = CommandCache::load_system_aliases() {
-                eprintln!("Warning: Failed to load system aliases: {}", e);
+                eprintln!("Warning: Failed to load system aliases: {e}");
             }
 
             // Load user aliases (these override system aliases)
@@ -432,15 +432,12 @@ impl InfrawareTerminal {
 #[tokio::main]
 async fn main() -> Result<()> {
     // Configure LLM client based on environment variable
-    let llm_client: Arc<dyn LLMClientTrait> = match std::env::var("INFRAWARE_LLM_URL") {
-        Ok(url) => {
-            eprintln!("Using HTTP LLM client: {}", url);
-            Arc::new(HttpLLMClient::new(url))
-        }
-        Err(_) => {
-            eprintln!("Using Mock LLM client (set INFRAWARE_LLM_URL to use real LLM)");
-            Arc::new(MockLLMClient::new())
-        }
+    let llm_client: Arc<dyn LLMClientTrait> = if let Ok(url) = std::env::var("INFRAWARE_LLM_URL") {
+        eprintln!("Using HTTP LLM client: {url}");
+        Arc::new(HttpLLMClient::new(url))
+    } else {
+        eprintln!("Using Mock LLM client (set INFRAWARE_LLM_URL to use real LLM)");
+        Arc::new(MockLLMClient::new())
     };
 
     // Create terminal using builder pattern
@@ -450,7 +447,7 @@ async fn main() -> Result<()> {
 
     // Run the main loop
     if let Err(e) = terminal.run().await {
-        eprintln!("Error: {}", e);
+        eprintln!("Error: {e}");
         std::process::exit(1);
     }
 

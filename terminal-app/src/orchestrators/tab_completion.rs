@@ -16,7 +16,7 @@ pub struct TabCompletionHandler;
 impl TabCompletionHandler {
     /// Create a new tab completion handler
     #[allow(dead_code)]
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self
     }
 
@@ -58,7 +58,7 @@ impl TabCompletionHandler {
         // Show all completions
         state.add_output(MessageFormatter::info("Possible completions:"));
         for completion in completions {
-            state.add_output(format!("  {}", completion));
+            state.add_output(format!("  {completion}"));
         }
 
         // Auto-complete to common prefix

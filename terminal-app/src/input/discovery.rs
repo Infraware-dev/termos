@@ -1,20 +1,11 @@
-/// Command discovery and caching for SCAN algorithm
-///
-/// This module provides PATH-aware command discovery and user alias loading
-/// with thread-safe caching for optimal performance.
-///
-/// # Design Patterns
-/// - **Lazy Singleton**: Global command cache initialized on first access
-/// - **Cache-Aside**: Check cache before expensive PATH/alias lookups
-/// - **RwLock**: Thread-safe concurrent read access (99% read workload)
-use once_cell::sync::Lazy;
 use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::sync::RwLock;
 use which::which;
 
 /// Global cache for discovered commands and aliases
-static COMMAND_CACHE: Lazy<RwLock<CommandCache>> = Lazy::new(|| RwLock::new(CommandCache::new()));
+static COMMAND_CACHE: std::sync::LazyLock<RwLock<CommandCache>> =
+    std::sync::LazyLock::new(|| RwLock::new(CommandCache::new()));
 
 /// Cache for command availability and user aliases
 ///
@@ -362,8 +353,7 @@ fn is_safe_alias(name: &str, value: &str) -> bool {
     for pattern in DANGEROUS_PATTERNS {
         if value.contains(pattern) {
             eprintln!(
-                "Warning: Rejecting potentially dangerous alias '{}': contains '{}'",
-                name, pattern
+                "Warning: Rejecting potentially dangerous alias '{name}': contains '{pattern}'"
             );
             return false;
         }
@@ -503,8 +493,7 @@ mod tests {
         };
         assert!(
             cache.available.contains(test_cmd) || cache.unavailable.contains(test_cmd),
-            "Command '{}' should be in cache after is_available() call",
-            test_cmd
+            "Command '{test_cmd}' should be in cache after is_available() call"
         );
     }
 
@@ -558,10 +547,10 @@ mod tests {
 
     #[test]
     fn test_only_comments() {
-        let content = r#"
+        let content = r"
             # Comment 1
             # Comment 2
-        "#;
+        ";
         let aliases = parse_aliases(content);
         assert!(aliases.is_empty());
     }

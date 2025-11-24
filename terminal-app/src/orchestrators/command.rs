@@ -20,7 +20,7 @@ pub struct CommandOrchestrator;
 impl CommandOrchestrator {
     /// Create a new command orchestrator
     #[allow(dead_code)]
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self
     }
 
@@ -56,7 +56,8 @@ impl CommandOrchestrator {
             return self.handle_reload_aliases_command(state).await;
         }
 
-        // Check if command exists (skip check if using shell interpretation, shell builtin, or history expansion)
+        // Check if command exists BEFORE trying any execution
+        // (skip check if using shell interpretation, shell builtin, or history expansion)
         // Shell builtins don't exist in PATH but are valid commands that must be executed via shell
         // History expansions (!!, !$, etc.) should have been expanded by HistoryExpansionHandler
         let is_history_expansion = cmd.starts_with('!');
@@ -68,6 +69,13 @@ impl CommandOrchestrator {
         {
             self.handle_command_not_found(cmd, state);
             return Ok(());
+        }
+
+        // Check if command requires interactive execution (command exists at this point)
+        if CommandExecutor::requires_interactive(cmd) {
+            return self
+                .execute_interactive_and_display(cmd, args, state, ui)
+                .await;
         }
 
         // Execute the command
@@ -105,12 +113,11 @@ impl CommandOrchestrator {
             }
             Ok(Err(e)) => {
                 state.add_output(MessageFormatter::error(format!(
-                    "Failed to reload aliases: {}",
-                    e
+                    "Failed to reload aliases: {e}"
                 )));
             }
             Err(e) => {
-                state.add_output(MessageFormatter::error(format!("Task panicked: {}", e)));
+                state.add_output(MessageFormatter::error(format!("Task panicked: {e}")));
             }
         }
 
@@ -123,6 +130,34 @@ impl CommandOrchestrator {
         state.add_output(MessageFormatter::install_suggestion(
             PackageInstaller::is_available_static(),
         ));
+    }
+
+    /// Execute interactive command with TUI suspension and display result
+    async fn execute_interactive_and_display(
+        &self,
+        cmd: &str,
+        args: &[String],
+        state: &mut TerminalState,
+        ui: &mut TerminalUI,
+    ) -> Result<()> {
+        match CommandExecutor::execute_interactive(cmd, args, ui).await {
+            Ok(output) => {
+                // Interactive commands don't capture stdout/stderr
+                // Just show completion message with exit code
+                if output.is_success() {
+                    state.add_output(format!(
+                        "Interactive command '{cmd}' completed successfully"
+                    ));
+                } else {
+                    state.add_output(MessageFormatter::command_failed(output.exit_code));
+                }
+            }
+            Err(e) => {
+                state.add_output(MessageFormatter::execution_error(e.to_string()));
+            }
+        }
+
+        Ok(())
     }
 
     /// Execute command and display formatted output
@@ -179,7 +214,7 @@ impl CommandOrchestrator {
     ///
     /// Exit code 1 is commonly used for semantic results rather than errors.
     /// Exit code 2+ usually indicates actual errors (syntax error, file not found, etc.)
-    fn is_benign_failure(&self, output: &CommandOutput) -> bool {
+    const fn is_benign_failure(&self, output: &CommandOutput) -> bool {
         // Exit code 1 is often semantic (grep no match, diff differences, test false)
         // Exit code 2+ usually indicates real errors
         output.exit_code == 1
@@ -300,7 +335,7 @@ mod tests {
     #[test]
     fn test_orchestrator_debug() {
         let orchestrator = CommandOrchestrator::new();
-        let debug_str = format!("{:?}", orchestrator);
+        let debug_str = format!("{orchestrator:?}");
         assert!(debug_str.contains("CommandOrchestrator"));
     }
 

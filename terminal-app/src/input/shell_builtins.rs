@@ -63,7 +63,7 @@ impl ShellBuiltinHandler {
 
     /// Create a handler with a custom list of builtins
     #[allow(dead_code)]
-    pub fn with_builtins(builtins: Vec<&'static str>) -> Self {
+    pub const fn with_builtins(builtins: Vec<&'static str>) -> Self {
         Self { builtins }
     }
 
@@ -71,7 +71,7 @@ impl ShellBuiltinHandler {
     ///
     /// This is the authoritative list of shell builtins with platform and execution metadata.
     /// Other parts of the codebase should query this list rather than maintaining their own.
-    pub fn builtin_info() -> &'static [ShellBuiltinInfo] {
+    pub const fn builtin_info() -> &'static [ShellBuiltinInfo] {
         &[
             // Source commands (POSIX and bash) - MUST use shell, Unix-only
             ShellBuiltinInfo {
@@ -314,8 +314,7 @@ impl ShellBuiltinHandler {
         Self::builtin_info()
             .iter()
             .find(|info| info.name == cmd)
-            .map(|info| info.requires_shell)
-            .unwrap_or(false)
+            .is_some_and(|info| info.requires_shell)
     }
 
     /// Check if a command is Unix-only and not available on Windows
@@ -325,8 +324,7 @@ impl ShellBuiltinHandler {
         Self::builtin_info()
             .iter()
             .find(|info| info.name == cmd)
-            .map(|info| info.unix_only)
-            .unwrap_or(false)
+            .is_some_and(|info| info.unix_only)
     }
 
     /// Check if a word is a recognized shell builtin

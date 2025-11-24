@@ -18,7 +18,7 @@ const PRIORITY_LOW: u8 = 70;
 #[async_trait]
 pub trait PackageManager: Send + Sync + std::fmt::Debug {
     /// Get the name of the package manager
-    fn name(&self) -> &str;
+    fn name(&self) -> &'static str;
 
     /// Check if this package manager is available on the system
     fn is_available(&self) -> bool;
@@ -45,7 +45,7 @@ pub struct AptPackageManager;
 
 #[async_trait]
 impl PackageManager for AptPackageManager {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "apt-get"
     }
 
@@ -82,7 +82,7 @@ pub struct YumPackageManager;
 
 #[async_trait]
 impl PackageManager for YumPackageManager {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "yum"
     }
 
@@ -119,7 +119,7 @@ pub struct DnfPackageManager;
 
 #[async_trait]
 impl PackageManager for DnfPackageManager {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "dnf"
     }
 
@@ -156,7 +156,7 @@ pub struct PacmanPackageManager;
 
 #[async_trait]
 impl PackageManager for PacmanPackageManager {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "pacman"
     }
 
@@ -197,7 +197,7 @@ pub struct BrewPackageManager;
 
 #[async_trait]
 impl PackageManager for BrewPackageManager {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "brew"
     }
 
@@ -232,7 +232,7 @@ pub struct ChocoPackageManager;
 
 #[async_trait]
 impl PackageManager for ChocoPackageManager {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "choco"
     }
 
@@ -270,7 +270,7 @@ pub struct WingetPackageManager;
 
 #[async_trait]
 impl PackageManager for WingetPackageManager {
-    fn name(&self) -> &str {
+    fn name(&self) -> &'static str {
         "winget"
     }
 

@@ -10,7 +10,7 @@ pub struct EventHandler {
 }
 
 impl EventHandler {
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {}
     }
 

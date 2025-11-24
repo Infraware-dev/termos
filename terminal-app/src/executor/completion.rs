@@ -8,13 +8,14 @@ pub struct TabCompletion;
 
 impl TabCompletion {
     /// Get completions for the given partial input
+    #[must_use]
     pub fn get_completions(partial: &str) -> Vec<String> {
         // If no space, complete commands
-        if !partial.contains(' ') {
-            Self::complete_command(partial)
-        } else {
+        if partial.contains(' ') {
             // Complete file paths
             Self::complete_file_path(partial)
+        } else {
+            Self::complete_command(partial)
         }
     }
 
@@ -68,19 +69,16 @@ impl TabCompletion {
         let prefix_part = if parts.len() > 1 { parts[1] } else { "" };
 
         // Split into directory and file prefix
-        let (dir, file_prefix) = if let Some(idx) = path_part.rfind('/') {
+        let (dir, file_prefix) = path_part.rfind('/').map_or((".", path_part), |idx| {
             (&path_part[..=idx], &path_part[idx + 1..])
-        } else {
-            (".", path_part)
-        };
+        });
 
         // Expand ~ to home directory
         let dir_path = if dir.starts_with('~') {
-            if let Some(home) = dirs::home_dir() {
-                PathBuf::from(dir.replace('~', home.to_str().unwrap_or("~")))
-            } else {
-                PathBuf::from(dir)
-            }
+            dirs::home_dir().map_or_else(
+                || PathBuf::from(dir),
+                |home| PathBuf::from(dir.replace('~', home.to_str().unwrap_or("~"))),
+            )
         } else {
             PathBuf::from(dir)
         };
@@ -94,19 +92,19 @@ impl TabCompletion {
                         // Reconstruct the full completion
                         let completion = if !prefix_part.is_empty() {
                             if dir == "." {
-                                format!("{} {}", prefix_part, name)
+                                format!("{prefix_part} {name}")
                             } else {
-                                format!("{} {}{}", prefix_part, dir, name)
+                                format!("{prefix_part} {dir}{name}")
                             }
                         } else if dir == "." {
                             name.to_string()
                         } else {
-                            format!("{}{}", dir, name)
+                            format!("{dir}{name}")
                         };
 
                         // Add trailing slash for directories
                         if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
-                            results.push(format!("{}/", completion));
+                            results.push(format!("{completion}/"));
                         } else {
                             results.push(completion);
                         }
@@ -120,6 +118,7 @@ impl TabCompletion {
     }
 
     /// Get the common prefix of all completions
+    #[must_use]
     pub fn get_common_prefix(completions: &[String]) -> String {
         if completions.is_empty() {
             return String::new();
@@ -171,7 +170,7 @@ mod tests {
         // Commands should be deduplicated
         let completions = TabCompletion::complete_command("l");
         let unique_count = completions.len();
-        let mut sorted = completions.clone();
+        let mut sorted = completions;
         sorted.sort();
         sorted.dedup();
         assert_eq!(unique_count, sorted.len());

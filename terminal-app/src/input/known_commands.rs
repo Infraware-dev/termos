@@ -94,6 +94,8 @@ pub fn default_devops_commands() -> Vec<String> {
         "free",
         "df",
         "du",
+        // Privilege escalation
+        "sudo",
         // Docker
         "docker",
         "docker-compose",
@@ -130,6 +132,39 @@ pub fn default_devops_commands() -> Vec<String> {
         "prometheus",
         "grafana",
         "datadog",
+        // System monitors (interactive)
+        "top",
+        "htop",
+        "btop",
+        "atop",
+        "iotop",
+        "iftop",
+        "nethogs",
+        // Package managers (interactive)
+        "apt",
+        "apt-get",
+        "yum",
+        "dnf",
+        "pacman",
+        // Text editors (interactive)
+        "vim",
+        "nvim",
+        "nano",
+        "emacs",
+        "pico",
+        "ed",
+        "vi",
+        // Pagers (interactive)
+        "less",
+        "more",
+        "most",
+        "man",
+        // File managers (interactive)
+        "mc",
+        "ranger",
+        "nnn",
+        "lf",
+        "vifm",
         // Other DevOps tools
         "ansible",
         "ansible-playbook",

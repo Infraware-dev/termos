@@ -39,10 +39,10 @@ pub trait LLMClientTrait: Send + Sync + std::fmt::Debug {
     /// Query with command history context (M2/M3)
     #[allow(dead_code)]
     async fn query_with_history(&self, text: &str, command_history: &[String]) -> Result<String> {
-        let context = if !command_history.is_empty() {
-            Some(format!("Recent commands:\n{}", command_history.join("\n")))
-        } else {
+        let context = if command_history.is_empty() {
             None
+        } else {
+            Some(format!("Recent commands:\n{}", command_history.join("\n")))
         };
 
         self.query_with_context(text, context).await
@@ -123,7 +123,7 @@ impl LLMClientTrait for HttpLLMClient {
 pub struct MockLLMClient;
 
 impl MockLLMClient {
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self
     }
 }

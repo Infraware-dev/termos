@@ -33,12 +33,12 @@ pub struct HistoryExpansionHandler {
 
 impl HistoryExpansionHandler {
     /// Create a new history expansion handler without history
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self { history: None }
     }
 
     /// Create a handler with access to command history
-    pub fn with_history(history: Arc<RwLock<Vec<String>>>) -> Self {
+    pub const fn with_history(history: Arc<RwLock<Vec<String>>>) -> Self {
         Self {
             history: Some(history),
         }
@@ -71,17 +71,16 @@ impl HistoryExpansionHandler {
 
     /// Parse a command into command and args
     fn parse_command_parts(cmd: &str) -> (String, Vec<String>) {
-        match CommandParser::parse(cmd) {
-            Ok((command, args)) => (command, args),
-            Err(_) => {
-                // Fallback: split by whitespace
-                let mut parts: Vec<String> = cmd.split_whitespace().map(String::from).collect();
-                if parts.is_empty() {
-                    (String::new(), vec![])
-                } else {
-                    let command = parts.remove(0);
-                    (command, parts)
-                }
+        if let Ok((command, args)) = CommandParser::parse(cmd) {
+            (command, args)
+        } else {
+            // Fallback: split by whitespace
+            let mut parts: Vec<String> = cmd.split_whitespace().map(String::from).collect();
+            if parts.is_empty() {
+                (String::new(), vec![])
+            } else {
+                let command = parts.remove(0);
+                (command, parts)
             }
         }
     }
@@ -197,7 +196,7 @@ mod tests {
     use super::*;
 
     fn create_handler_with_history(history: Vec<&str>) -> HistoryExpansionHandler {
-        let history_vec: Vec<String> = history.iter().map(|s| s.to_string()).collect();
+        let history_vec: Vec<String> = history.iter().map(|s| (*s).to_string()).collect();
         let history_arc = Arc::new(RwLock::new(history_vec));
         HistoryExpansionHandler::with_history(history_arc)
     }

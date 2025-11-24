@@ -2,18 +2,19 @@
 name = "infraware-terminal"
 version = "0.1.0"
 edition = "2021"
+license = "MIT"
 
 [dependencies]
 # TUI
 ratatui = "0.29"
-crossterm = "0.28"
+crossterm = "0.29.0"
 
 # Async runtime
 tokio = { version = "1.40", features = ["full"] }
 async-trait = "0.1"
 
 # Command execution
-which = "6.0"
+which = "8.0.0"
 shell-words = "1.1"
 
 # LLM client
@@ -27,19 +28,22 @@ ansi-to-tui = "7.0"
 
 # Error handling
 anyhow = "1.0"
-thiserror = "1.0"
 
 # Utilities
 regex = "1.10"
-dirs = "5.0"  # For home directory, config paths
-once_cell = "1.19"  # Lazy static initialization for SCAN patterns
+dirs = "6.0.0"  # For home directory, config paths
 strsim = "0.11"  # Levenshtein distance for typo detection
 
 [dev-dependencies]
 tokio-test = "0.4"
-criterion = "0.5"  # Performance benchmarking
+criterion = "0.7.0"  # Performance benchmarking
 serial_test = "3.0"  # Fix flaky tests with shared global state
 
 [[bench]]
 name = "scan_benchmark"
 harness = false
+
+[profile.release]
+strip = true          # Strip symbols from binary
+lto = true            # Link-time optimization
+codegen-units = 1     # Better optimization (slower compile)

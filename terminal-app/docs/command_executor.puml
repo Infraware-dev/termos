@@ -1,0 +1,178 @@
+@startuml Command Executor Architecture
+title "CommandExecutor - Class Diagram"
+
+package "executor" {
+    class CommandOutput {
+        +stdout: String
+        +stderr: String
+        +exit_code: i32
+        --
+        +is_success() -> bool
+        +combined_output() -> String
+    }
+
+    class CommandExecutor {
+        -REQUIRES_INTERACTIVE: &[&str]
+        -INTERACTIVE_BLOCKED: &[&str]
+        -REQUIRES_INTERACTIVE_SET: HashSet<&'static str>
+        -ALL_INTERACTIVE: HashSet<&'static str>
+        --
+        {static} +execute(cmd, args, original_input) -> Result<CommandOutput>
+        {static} +execute_interactive(cmd, args, ui) -> Result<CommandOutput>
+        {static} +command_exists(cmd) -> bool
+        {static} +requires_interactive(cmd) -> bool
+        {static} -is_interactive_command(cmd) -> bool
+        {static} -is_shell_builtin(cmd) -> bool
+        {static} -get_platform_shell() -> (&'static str, &'static str)
+    }
+
+    note right of CommandExecutor::REQUIRES_INTERACTIVE
+        Editors: vim, nvim, nano, emacs
+        Pagers: less, more, man
+        File managers: mc, ranger, nnn
+        Monitors: top, htop, btop
+        Privilege: sudo
+    end note
+
+    note right of CommandExecutor::INTERACTIVE_BLOCKED
+        Remote: ssh, tmux, screen, ftp
+        REPLs: python, node, irb, psql
+        Debuggers: gdb, lldb, pdb
+        Admin: passwd, visudo
+        Other: iotop, iftop, nethogs
+    end note
+
+    note right of CommandExecutor::execute
+        Execution paths:
+        1. Check INTERACTIVE_BLOCKED → Error
+        2. Shell builtin? → Execute via sh -c
+        3. Shell operators? → Execute via sh -c
+        4. Regular command? → Direct execution
+
+        Returns CommandOutput with captured
+        stdout/stderr (or empty for interactive)
+    end note
+
+    note right of CommandExecutor::execute_interactive
+        Unix/Linux/macOS ONLY:
+        1. Suspend TUI (RAII guard)
+        2. Run command via spawn_blocking
+        3. Resume TUI (guaranteed by guard)
+
+        Windows: Returns error
+        Returns exit_code only (no output captured)
+    end note
+}
+
+package "terminal" {
+    class TerminalUI {
+        -terminal: Terminal<CrosstermBackend<io::Stdout>>
+        --
+        +new() -> Result<Self>
+        +render(state) -> Result<()>
+        +clear() -> Result<()>
+        +cleanup() -> Result<()>
+        +suspend() -> Result<()>
+        +resume() -> Result<()>
+    }
+
+    note right of TerminalUI::suspend
+        Prepare terminal for interactive command:
+        1. show_cursor()
+        2. flush() pending draws
+        3. execute(LeaveAlternateScreen)
+        4. disable_raw_mode()
+    end note
+
+    note right of TerminalUI::resume
+        Restore TUI after interactive command:
+        1. enable_raw_mode()
+        2. execute(EnterAlternateScreen)
+        3. clear() to prevent artifacts
+    end note
+
+    class TerminalState {
+        +output: OutputBuffer
+        +input: InputBuffer
+        +history: CommandHistory
+        +mode: TerminalMode
+    }
+
+    enum TerminalMode {
+        Normal
+        ExecutingCommand
+        WaitingLLM
+        PromptingInstall
+    }
+
+    TerminalState --> TerminalMode
+}
+
+package "input" {
+    class ShellBuiltinHandler {
+        {static} +requires_shell_execution(cmd) -> bool
+        {static} +is_unix_only(cmd) -> bool
+        {static} +builtin_info(cmd) -> Option<ShellBuiltinInfo>
+    }
+
+    note right of ShellBuiltinHandler
+        45+ builtins recognized:
+        Punctuation: . : [ [[
+        Evaluation: eval, exec
+        Variables: export, unset, set
+        I/O: echo, printf
+        Job control: jobs, fg, bg
+    end note
+}
+
+package "orchestrators" {
+    class CommandOrchestrator {
+        --
+        +handle_command(cmd, args, original_input, state, ui) -> Result<()>
+        -handle_clear_command(state, ui) -> Result<()>
+        -handle_reload_aliases_command(state) -> Result<()>
+        -execute_interactive_and_display(cmd, args, state, ui) -> Result<()>
+        -execute_and_display(cmd, args, original_input, state) -> Result<()>
+        -is_benign_failure(output) -> bool
+    }
+
+    note right of CommandOrchestrator::handle_command
+        Command execution workflow:
+        1. Check for built-in commands (clear, reload-aliases)
+        2. Verify command exists (skip for shell builtins)
+        3. If requires_interactive → execute_interactive()
+        4. Else → execute() with output capture
+    end note
+}
+
+' Relationships
+CommandExecutor --> CommandOutput : "returns"
+CommandExecutor --> TerminalUI : "suspends/resumes"
+TerminalUI --> TerminalState : "renders"
+CommandOrchestrator --> CommandExecutor : "uses"
+CommandOrchestrator --> ShellBuiltinHandler : "checks"
+CommandOrchestrator --> TerminalState : "updates"
+CommandOrchestrator --> TerminalUI : "passes to executor"
+
+' Architecture notes
+note bottom of CommandExecutor
+    Design Pattern: Strategy for execution paths
+    Performance: <1μs for is_interactive() check (HashSet lookup)
+    Safety: RAII guard ensures resume() on panic
+    Platform Support: Unix/Linux/macOS only for interactive
+end note
+
+note bottom of TerminalUI
+    Framework: crossterm (terminal control)
+    Backend: ratatui (TUI rendering)
+    State: Manages raw mode + alternate screen
+    Suspend/Resume: Enables full terminal access for interactive commands
+end note
+
+note bottom of CommandOrchestrator
+    Workflow: Routes to appropriate execution method
+    Error Handling: Captures and displays all output types
+    Exit Codes: Semantic detection (exit 1 is benign for grep/diff/test)
+end note
+
+@enduml

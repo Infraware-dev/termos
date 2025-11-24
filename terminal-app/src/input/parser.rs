@@ -58,8 +58,7 @@ mod tests {
 
     #[test]
     fn test_parse_complex() {
-        let (cmd, args) =
-            CommandParser::parse(r#"docker run -it --name test ubuntu bash"#).unwrap();
+        let (cmd, args) = CommandParser::parse(r"docker run -it --name test ubuntu bash").unwrap();
         assert_eq!(cmd, "docker");
         assert_eq!(args, vec!["run", "-it", "--name", "test", "ubuntu", "bash"]);
     }

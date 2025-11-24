@@ -55,7 +55,7 @@ pub struct OutputBuffer {
 
 impl OutputBuffer {
     /// Create a new empty output buffer
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             buffer: Vec::new(),
             scroll_position: 0,
@@ -82,19 +82,19 @@ impl OutputBuffer {
     }
 
     /// Get the current scroll position
-    pub fn scroll_position(&self) -> usize {
+    pub const fn scroll_position(&self) -> usize {
         self.scroll_position
     }
 
     /// Scroll up by one line
-    pub fn scroll_up(&mut self) {
+    pub const fn scroll_up(&mut self) {
         if self.scroll_position > 0 {
             self.scroll_position -= 1;
         }
     }
 
     /// Scroll down by one line
-    pub fn scroll_down(&mut self) {
+    pub const fn scroll_down(&mut self) {
         if self.scroll_position < self.buffer.len().saturating_sub(1) {
             self.scroll_position += 1;
         }
@@ -110,7 +110,7 @@ impl OutputBuffer {
     }
 
     /// Auto-scroll to the bottom of the buffer
-    fn auto_scroll_to_bottom(&mut self) {
+    const fn auto_scroll_to_bottom(&mut self) {
         self.scroll_position = self.buffer.len().saturating_sub(1);
     }
 
@@ -147,7 +147,7 @@ pub struct InputBuffer {
 
 impl InputBuffer {
     /// Create a new empty input buffer
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             buffer: String::new(),
             cursor_position: 0,
@@ -160,7 +160,7 @@ impl InputBuffer {
     }
 
     /// Get the cursor position (in characters, not bytes)
-    pub fn cursor_position(&self) -> usize {
+    pub const fn cursor_position(&self) -> usize {
         self.cursor_position
     }
 
@@ -169,8 +169,7 @@ impl InputBuffer {
         self.buffer
             .char_indices()
             .nth(char_idx)
-            .map(|(byte_idx, _)| byte_idx)
-            .unwrap_or(self.buffer.len())
+            .map_or(self.buffer.len(), |(byte_idx, _)| byte_idx)
     }
 
     /// Insert a character at the cursor position
@@ -202,7 +201,7 @@ impl InputBuffer {
     }
 
     /// Move cursor left
-    pub fn move_cursor_left(&mut self) {
+    pub const fn move_cursor_left(&mut self) {
         if self.cursor_position > 0 {
             self.cursor_position -= 1;
         }
@@ -250,7 +249,7 @@ pub struct CommandHistory {
 
 impl CommandHistory {
     /// Create a new empty command history
-    pub fn new() -> Self {
+    pub const fn new() -> Self {
         Self {
             history: Vec::new(),
             position: None,
@@ -304,7 +303,7 @@ impl CommandHistory {
     }
 
     /// Reset the history navigation position
-    pub fn reset_position(&mut self) {
+    pub const fn reset_position(&mut self) {
         self.position = None;
     }
 
@@ -404,7 +403,7 @@ mod tests {
     #[test]
     fn test_command_history_ignores_empty() {
         let mut history = CommandHistory::new();
-        history.add("".to_string());
+        history.add(String::new());
         history.add("  ".to_string());
 
         assert_eq!(history.all().len(), 0);

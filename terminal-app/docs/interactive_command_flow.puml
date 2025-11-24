@@ -1,0 +1,85 @@
+@startuml Interactive Command Flow
+title "Interactive Command Architecture - Sequence Flow"
+
+actor User
+participant InputClassifier
+participant CommandOrchestrator
+participant CommandExecutor
+participant TerminalUI
+participant TokioRuntime
+
+== Non-Interactive Command Flow ==
+
+User -> InputClassifier: classify(input)
+InputClassifier --> InputClassifier: Expand aliases
+InputClassifier --> InputClassifier: Run 9-handler chain
+activate InputClassifier
+    note right of InputClassifier: 1. EmptyInputHandler\n2. HistoryExpansionHandler\n3. ShellBuiltinHandler\n4. PathCommandHandler\n5. KnownCommandHandler\n6. CommandSyntaxHandler\n7. TypoDetectionHandler\n8. NaturalLanguageHandler\n9. DefaultHandler
+
+InputClassifier -> InputClassifier: Match handler logic
+InputClassifier --> User: InputType::Command
+deactivate InputClassifier
+
+User -> CommandOrchestrator: handle_command(cmd, args, original_input)
+CommandOrchestrator -> CommandOrchestrator: Check if requires_interactive()
+CommandOrchestrator --> CommandOrchestrator: Case: Non-interactive\n(is_interactive() == false)
+
+CommandOrchestrator -> CommandExecutor: execute(cmd, args, original_input)
+activate CommandExecutor
+    CommandExecutor --> CommandExecutor: Check INTERACTIVE_BLOCKED list
+    note right of CommandExecutor: INTERACTIVE_BLOCKED:\nssh, python, node, gdb,\nmy sql, psql, mongo, etc.
+
+    CommandExecutor --> CommandExecutor: Determine execution path:\n- Shell builtin? → sh -c\n- Shell operators? → sh -c\n- Regular command? → Direct execution
+
+    CommandExecutor -> TokioRuntime: spawn async task\n(with 5min timeout)
+    TokioRuntime --> CommandExecutor: CommandOutput\n{stdout, stderr, exit_code}
+deactivate CommandExecutor
+
+CommandExecutor --> CommandOrchestrator: CommandOutput
+CommandOrchestrator -> CommandOrchestrator: Format and display output\nto TerminalState
+
+CommandOrchestrator --> User: Output rendered to TUI
+
+== Interactive Command Flow ==
+
+User -> InputClassifier: classify(input)
+InputClassifier --> User: InputType::Command{vim/top/nano/...}
+
+User -> CommandOrchestrator: handle_command(cmd, args, ...)
+CommandOrchestrator -> CommandOrchestrator: Check if requires_interactive()
+CommandOrchestrator --> CommandOrchestrator: Case: Interactive\n(is_interactive() == true)
+
+CommandOrchestrator -> CommandExecutor: execute_interactive(cmd, args, ui)
+activate CommandExecutor
+    CommandExecutor -> TerminalUI: suspend()
+    activate TerminalUI
+        TerminalUI -> TerminalUI: show_cursor()
+        TerminalUI -> TerminalUI: flush() pending draws
+        TerminalUI -> TerminalUI: execute(LeaveAlternateScreen)
+        TerminalUI -> TerminalUI: disable_raw_mode()
+        note right of TerminalUI: TUI is now suspended\nTerminal returns to normal state
+    deactivate TerminalUI
+
+    note right of CommandExecutor: Terminal is now in normal mode\nUser can interact with vim/less/top/etc.
+
+    CommandExecutor -> TokioRuntime: spawn_blocking()\nRun actual command\n(unguarded process execution)
+    TokioRuntime --> CommandExecutor: exit_status
+
+    note right of CommandExecutor: RAII Guard ensures resume()\neven if command panics
+
+    CommandExecutor -> TerminalUI: resume()
+    activate TerminalUI
+        TerminalUI -> TerminalUI: enable_raw_mode()
+        TerminalUI -> TerminalUI: execute(EnterAlternateScreen)
+        TerminalUI -> TerminalUI: clear()
+        note right of TerminalUI: TUI is now resumed\nTerminal back in TUI mode
+    deactivate TerminalUI
+deactivate CommandExecutor
+
+CommandExecutor --> CommandOrchestrator: CommandOutput\n{exit_code only,\nno stdout/stderr captured}
+
+CommandOrchestrator -> CommandOrchestrator: Display completion message\n(success or exit code)
+
+CommandOrchestrator --> User: Output rendered to TUI
+
+@enduml

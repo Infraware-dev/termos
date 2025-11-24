@@ -62,10 +62,10 @@ async fn test_llm_response_rendering() {
 
     // Print to verify colors (for manual inspection)
     println!("\n=== RAW RESPONSE ===");
-    println!("{}", response);
+    println!("{response}");
     println!("\n=== RENDERED WITH ANSI COLORS ===");
     for line in &rendered {
-        println!("{}", line);
+        println!("{line}");
     }
 }
 
@@ -89,7 +89,7 @@ fn test_command_classification_accuracy() {
             result,
             InputType::Command { .. } | InputType::CommandTypo { .. }
         );
-        assert_eq!(is_command, should_be_command, "Failed for input: {}", input);
+        assert_eq!(is_command, should_be_command, "Failed for input: {input}");
     }
 }
 

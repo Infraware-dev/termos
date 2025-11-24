@@ -1,0 +1,132 @@
+@startuml Command Execution Decision Tree
+title "CommandOrchestrator - Command Execution Decision Flow"
+
+start
+
+:User submits input;
+
+if (Is command classified?) then (yes)
+    :Extract cmd, args, original_input;
+else (no)
+    :Handle non-command input;
+    end
+endif
+
+if (Is built-in command?) then (yes)
+    if (cmd == "clear") then (yes)
+        :Clear output buffer;
+        :Clear terminal;
+        end
+    elseif (cmd == "reload-aliases") then (yes)
+        :Spawn blocking task;
+        :Load system aliases;
+        :Display result message;
+        end
+    endif
+else (no)
+    :Proceed to next check;
+endif
+
+note right
+    Built-in commands handled specially
+    because they affect TUI state
+    Cannot be executed as regular commands
+end note
+
+if (Command exists in PATH?\nor is shell builtin?\nor is history expansion?\nor has shell operators?) then (no)
+    :Display "command not found";
+    :Show install suggestion;
+    end
+else (yes)
+    :Proceed to execution;
+endif
+
+note right
+    Early validation to provide
+    user-friendly error messages
+    Skips shell builtins (no PATH check)
+    Skips history expansion (!!)
+    Skips shell operators (| > >>)
+end note
+
+if (Does command require interactive mode?) then (yes)
+    note right
+        Interactive commands:
+        vim, nvim, nano, emacs
+        less, more, man
+        mc, ranger
+        top, htop, btop
+        sudo
+
+        On Windows: Returns error
+        On Unix/Linux/macOS: Suspends TUI
+    end note
+
+    :Call execute_interactive();
+
+    if (execute_interactive succeeds?) then (yes)
+        :Display completion message;
+        :Show exit code if non-zero;
+    else (no)
+        :Display error message;
+    endif
+else (no)
+    note right
+        Non-interactive flow:
+        - Execute with stdout/stderr capture
+        - Timeout: 5 minutes
+        - May use shell via original_input
+        - May execute directly
+    end note
+
+    :Call execute();
+
+    if (execute succeeds?) then (yes)
+        :Capture CommandOutput;
+
+        if (stdout is empty?) then (no)
+            :Display stdout lines;
+        endif
+
+        if (stderr is empty?) then (no)
+            if (exit code == 0?) then (yes)
+                note right
+                    Command succeeded
+                    stderr is informational
+                    Display as-is
+                end note
+
+                :Display stderr lines;
+            else (no)
+                note right
+                    Command failed
+                    stderr contains error info
+                    Colorize in red
+                end note
+
+                :Display stderr (red);
+            endif
+        endif
+
+        if (is_benign_failure?) then (no)
+            note right
+                Exit code 1: benign
+                (grep no match, diff differs, test false)
+
+                Exit code 2+: real error
+                Show "Command exited with code X"
+            end note
+
+            :Display error message;
+        endif
+    else (no)
+        :Display execution error;
+    endif
+endif
+
+:Update TerminalMode to Normal;
+:Render updated state;
+
+end
+
+@enduml

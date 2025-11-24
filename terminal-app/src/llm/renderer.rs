@@ -84,13 +84,12 @@ impl ResponseRenderer {
                 .map(|(i, part)| {
                     if i % 2 == 1 {
                         // Odd indices are inside **...** pairs
-                        format!("\x1b[1m{}\x1b[0m", part)
+                        format!("\x1b[1m{part}\x1b[0m")
                     } else {
-                        part.to_string()
+                        (*part).to_string()
                     }
                 })
-                .collect::<Vec<_>>()
-                .join("");
+                .collect::<String>();
         }
 
         // Inline code formatting
@@ -103,13 +102,12 @@ impl ResponseRenderer {
                     .enumerate()
                     .map(|(i, part)| {
                         if i % 2 == 1 {
-                            format!("\x1b[36m{}\x1b[0m", part) // Cyan for inline code
+                            format!("\x1b[36m{part}\x1b[0m") // Cyan for inline code
                         } else {
-                            part.to_string()
+                            (*part).to_string()
                         }
                     })
-                    .collect::<Vec<_>>()
-                    .join("");
+                    .collect::<String>();
             }
         }
 
@@ -130,14 +128,14 @@ impl ResponseRenderer {
         let mut output = Vec::new();
 
         // Add code block header
-        output.push(format!("\x1b[90m┌─ {} ─\x1b[0m", lang));
+        output.push(format!("\x1b[90m┌─ {lang} ─\x1b[0m"));
 
         for line in lines {
             let ranges = highlighter
                 .highlight_line(line, &self.syntax_set)
                 .unwrap_or_default();
             let escaped = as_24_bit_terminal_escaped(&ranges[..], false);
-            output.push(format!("\x1b[90m│\x1b[0m {}", escaped));
+            output.push(format!("\x1b[90m│\x1b[0m {escaped}"));
         }
 
         // Add code block footer

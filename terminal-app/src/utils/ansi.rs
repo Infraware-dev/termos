@@ -26,31 +26,31 @@ pub enum AnsiColor {
 
 impl AnsiColor {
     /// Get the ANSI code for this color
-    pub fn code(&self) -> &'static str {
+    pub const fn code(&self) -> &'static str {
         match self {
-            AnsiColor::Black => "\x1b[30m",
-            AnsiColor::Red => "\x1b[31m",
-            AnsiColor::Green => "\x1b[32m",
-            AnsiColor::Yellow => "\x1b[33m",
-            AnsiColor::Blue => "\x1b[34m",
-            AnsiColor::Magenta => "\x1b[35m",
-            AnsiColor::Cyan => "\x1b[36m",
-            AnsiColor::White => "\x1b[37m",
-            AnsiColor::BrightBlack => "\x1b[90m",
-            AnsiColor::BrightRed => "\x1b[91m",
-            AnsiColor::BrightGreen => "\x1b[92m",
-            AnsiColor::BrightYellow => "\x1b[93m",
-            AnsiColor::BrightBlue => "\x1b[94m",
-            AnsiColor::BrightMagenta => "\x1b[95m",
-            AnsiColor::BrightCyan => "\x1b[96m",
-            AnsiColor::BrightWhite => "\x1b[97m",
-            AnsiColor::Reset => "\x1b[0m",
+            Self::Black => "\x1b[30m",
+            Self::Red => "\x1b[31m",
+            Self::Green => "\x1b[32m",
+            Self::Yellow => "\x1b[33m",
+            Self::Blue => "\x1b[34m",
+            Self::Magenta => "\x1b[35m",
+            Self::Cyan => "\x1b[36m",
+            Self::White => "\x1b[37m",
+            Self::BrightBlack => "\x1b[90m",
+            Self::BrightRed => "\x1b[91m",
+            Self::BrightGreen => "\x1b[92m",
+            Self::BrightYellow => "\x1b[93m",
+            Self::BrightBlue => "\x1b[94m",
+            Self::BrightMagenta => "\x1b[95m",
+            Self::BrightCyan => "\x1b[96m",
+            Self::BrightWhite => "\x1b[97m",
+            Self::Reset => "\x1b[0m",
         }
     }
 
     /// Colorize a string with this color
     pub fn colorize(&self, text: &str) -> String {
-        format!("{}{}{}", self.code(), text, AnsiColor::Reset.code())
+        format!("{}{}{}", self.code(), text, Self::Reset.code())
     }
 }
 

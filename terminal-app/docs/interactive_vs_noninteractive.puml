@@ -1,0 +1,287 @@
+@startuml Interactive vs Non-Interactive Execution
+title "CommandExecutor - Interactive vs Non-Interactive Paths"
+
+package "CommandExecutor::execute()" {
+    object non_interactive {
+        title: "Non-Interactive Execution Path"
+        ---
+        Input: (cmd, args, original_input)
+
+        Process:
+        1. Check INTERACTIVE_BLOCKED list
+           ✗ ssh, python, node, etc.
+           → Return error message
+        2. Check if shell builtin
+           ✓ vim, nano (requires_interactive == true)
+           → Skip to shell execution
+        3. Check shell operators (original_input)
+           ✓ Pipes, redirects, subshells
+           → Pass to sh -c
+        4. Direct execution
+           ✓ Regular command with args
+           → Execute directly
+
+        Output:
+        - CommandOutput {
+            stdout: captured,
+            stderr: captured,
+            exit_code: actual
+          }
+
+        Timeout: 5 minutes
+        Returns: Full output for display
+    }
+
+    object blocked_check {
+        title: "INTERACTIVE_BLOCKED Check"
+        ---
+        Commands NOT supported:
+        - Remote: ssh, tmux, screen
+        - REPLs: python, node, irb, psql
+        - Debuggers: gdb, lldb, pdb
+        - Admin: passwd, visudo
+        - Root-only: iotop, iftop, nethogs
+
+        Action: Return error with suggestions
+    }
+
+    object execution_paths {
+        title: "Execution Path Selection"
+        ---
+        1. Shell Builtin?
+           execute("sh", ["-c", "cmd args"])
+           Examples: export, eval, [[, source
+
+        2. Shell Operators?
+           execute(shell, [flag, "entire original_input"])
+           Examples: ls -la | grep txt, cat file > out
+
+        3. Regular Command?
+           execute(cmd, [args...])
+           Examples: echo hello, ls -la /tmp
+    }
+
+    object output_handling {
+        title: "Output Handling"
+        ---
+        Captured Output:
+        - stdout: All program output
+        - stderr: Error/warning messages
+        - exit_code: Command exit status
+
+        Display Logic:
+        - Show stdout as-is
+        - Show stderr (colorize red if failed)
+        - Skip "failed" message if exit 1 (benign)
+        - Show "Command failed: X" for exit 2+
+
+        Use Cases:
+        - Package installation (apt install foo)
+        - File operations (cp, mv, rm)
+        - Text processing (grep, sed, awk)
+        - System info (ps, df, ls)
+    }
+}
+
+package "CommandExecutor::execute_interactive()" {
+    object interactive {
+        title: "Interactive Execution Path"
+        ---
+        Input: (cmd, args, ui: &mut TerminalUI)
+        Platform: Unix/Linux/macOS only
+
+        Process:
+        1. TUI Suspend
+           - show_cursor()
+           - flush() pending draws
+           - LeaveAlternateScreen
+           - disable_raw_mode()
+           Terminal returns to normal state
+
+        2. Run Command
+           - spawn_blocking() for actual execution
+           - Unguarded process::Command::new(cmd)
+           - User can interact fully with command
+           - No output capture (goes to stdout/stderr)
+
+        3. TUI Resume (RAII Guard)
+           - Guaranteed to run even on panic
+           - enable_raw_mode()
+           - EnterAlternateScreen
+           - clear() to prevent artifacts
+           Terminal back in TUI mode
+
+        Output:
+        - CommandOutput {
+            stdout: "" (not captured),
+            stderr: "" (not captured),
+            exit_code: actual
+          }
+
+        Timeout: None (user controls exit)
+        Returns: Exit code only
+    }
+
+    object rai_guard {
+        title: "RAII Guard Pattern"
+        ---
+        Ensures resume() called even on panic:
+
+        struct TuiGuard<'a> {
+            ui: &'a mut TerminalUI,
+            suspended: bool,
+        }
+
+        impl Drop for TuiGuard {
+            fn drop(&mut self) {
+                if suspended {
+                    let _ = ui.resume();
+                }
+            }
+        }
+
+        Benefits:
+        - Terminal always restored
+        - Panic-safe guarantee
+        - No manual cleanup needed
+    }
+
+    object suspend_details {
+        title: "suspend() Details"
+        ---
+        Operations (in order):
+        1. terminal.show_cursor()
+           Make cursor visible for user interaction
+
+        2. terminal.backend_mut().flush()
+           Ensure pending draws complete
+
+        3. execute!(backend, LeaveAlternateScreen)
+           Exit alternate screen mode
+           Shows normal terminal buffer
+
+        4. disable_raw_mode()
+           Restore line buffering
+           Enable echo for password prompts
+           Allow terminal line editing
+
+        Result:
+        - User sees normal terminal
+        - Can use interactive commands
+        - Cursor and input work normally
+    }
+
+    object resume_details {
+        title: "resume() Details"
+        ---
+        Operations (in order):
+        1. enable_raw_mode()
+           Disable line buffering
+           Disable echo (for password prompts)
+           Enable non-blocking input
+
+        2. execute!(backend, EnterAlternateScreen)
+           Switch to alternate screen buffer
+           Hides normal terminal output
+
+        3. terminal.clear()
+           Clear alternate screen
+           Prevent visual artifacts
+
+        Result:
+        - TUI restored
+        - Ready for next event
+        - Terminal clean
+    }
+
+    object platform_check {
+        title: "Platform Support"
+        ---
+        On Windows:
+        #[cfg(target_os = "windows")]
+        return Ok(CommandOutput {
+            stdout: "",
+            stderr: "Interactive commands...",
+            exit_code: 1,
+        })
+
+        Reason:
+        - Windows Terminal and ConHost don't support
+          raw mode + alternate screen patterns
+        - Would need Windows-specific suspend implementation
+
+        Future (M2/M3):
+        - Investigate Windows Terminal API
+        - ConPTY support
+        - Full interactive mode on Windows
+    }
+
+    object use_cases {
+        title: "Use Cases"
+        ---
+        Text Editors:
+        - vim, nvim, nano, emacs
+        - User edits file, saves, returns
+
+        Pagers:
+        - less, more, man
+        - User navigates, searches, quits
+
+        File Managers:
+        - mc, ranger, nnn, lf
+        - User navigates filesystem, selects files
+
+        System Monitors:
+        - top, htop, btop, atop
+        - User views process info, quits
+
+        Privilege Escalation:
+        - sudo
+        - User enters password at prompt
+    }
+}
+
+' Connection flows
+non_interactive --> blocked_check : "step 1"
+non_interactive --> execution_paths : "step 2-4"
+non_interactive --> output_handling : "result"
+
+interactive --> rai_guard : "safety mechanism"
+interactive --> suspend_details : "before command"
+interactive --> resume_details : "after command"
+interactive --> platform_check : "guard condition"
+interactive --> use_cases : "examples"
+
+' Decision diagram
+object entry {
+    title: "CommandExecutor::execute()"
+}
+
+object requires_interactive_check {
+    title: "Requires Interactive?"
+}
+
+entry --> requires_interactive_check : "calls"
+
+requires_interactive_check --> non_interactive : "No"
+requires_interactive_check --> interactive : "Yes (Unix/Linux/macOS)"
+
+note top of entry
+    Called from CommandOrchestrator::handle_command()
+    After command existence verification
+end note
+
+note bottom of non_interactive
+    Default path for most commands
+    Output captured for scrolling/display
+    Can be combined with LLM if natural language
+end note
+
+note bottom of interactive
+    Special path for user-interactive commands
+    Requires TUI suspension/resumption
+    No output capture (user-facing)
+    Safety guaranteed by RAII guard
+end note
+
+@enduml
