@@ -49,19 +49,20 @@ User Input → Alias Expansion → InputClassifier → [Command Path | Natural L
 
 ### SCAN Algorithm (Shell-Command And Natural-language)
 
-9-handler Chain of Responsibility executing in strict order (<100μs average):
+10-handler Chain of Responsibility executing in strict order (<100μs average):
 
 | # | Handler | Purpose | Performance |
 |---|---------|---------|-------------|
 | 1 | EmptyInputHandler | Fast path for empty/whitespace | <1μs |
 | 2 | HistoryExpansionHandler | `!!`, `!$`, `!^`, `!*` expansion | ~1-5μs |
-| 3 | ShellBuiltinHandler | 45+ builtins (., :, [, [[, export) | <1μs |
-| 4 | PathCommandHandler | ./script.sh, /usr/bin/cmd | ~10μs |
-| 5 | KnownCommandHandler | 60+ DevOps commands + PATH cache | <1μs hit |
-| 6 | CommandSyntaxHandler | Language-agnostic: flags, pipes, redirects | ~10μs |
-| 7 | TypoDetectionHandler | Levenshtein ≤2 ("dokcer" → "docker") | ~100μs |
-| 8 | NaturalLanguageHandler | Language-agnostic heuristics (universal patterns) | ~0.5μs |
-| 9 | DefaultHandler | Fallback to LLM | <1μs |
+| 3 | ApplicationBuiltinHandler | App builtins (clear, reload-aliases, reload-commands) | <1μs |
+| 4 | ShellBuiltinHandler | 45+ builtins (., :, [, [[, export) | <1μs |
+| 5 | PathCommandHandler | ./script.sh, /usr/bin/cmd | ~10μs |
+| 6 | KnownCommandHandler | 60+ DevOps commands + PATH cache | <1μs hit |
+| 7 | CommandSyntaxHandler | Language-agnostic: flags, pipes, redirects | ~10μs |
+| 8 | TypoDetectionHandler | Levenshtein ≤2 ("dokcer" → "docker") | ~100μs |
+| 9 | NaturalLanguageHandler | Language-agnostic heuristics (universal patterns) | ~0.5μs |
+| 10 | DefaultHandler | Fallback to LLM | <1μs |
 
 **Key optimizations**: Precompiled RegexSet via `once_cell::Lazy`, thread-safe `RwLock<CommandCache>` with poisoning recovery, fast paths first.
 
@@ -76,8 +77,9 @@ User Input → Alias Expansion → InputClassifier → [Command Path | Natural L
 
 **`input/`** - SCAN Algorithm
 - `classifier.rs`: InputClassifier coordinating handler chain + alias expansion
-- `handler.rs`: 9-handler Chain of Responsibility implementation
+- `handler.rs`: 10-handler Chain of Responsibility implementation
 - `history_expansion.rs`: Bash-style `!!`, `!$`, `!^`, `!*` with Arc<RwLock>
+- `application_builtins.rs`: App builtin commands (clear, reload-aliases, reload-commands)
 - `shell_builtins.rs`: 45+ builtins with `ShellBuiltinInfo` metadata
 - `known_commands.rs`: Single source of truth for 60+ DevOps commands
 - `patterns.rs`: Precompiled RegexSet patterns
@@ -132,9 +134,13 @@ User Input → Alias Expansion → InputClassifier → [Command Path | Natural L
 - Runtime reload: `reload-aliases` built-in command
 
 ### Built-in Commands
+
+Application-specific commands recognized by `ApplicationBuiltinHandler` (position 3 in SCAN chain):
 - `clear` - Clear terminal output buffer
 - `reload-aliases` - Reload aliases from system/user config files
 - `reload-commands` - Clear command cache (use after installing new commands)
+
+These commands are recognized early in the classification chain to prevent misclassification as natural language.
 
 ### Interactive Commands
 - **28 supported** (TUI suspends): vim, nvim, nano, emacs, less, more, man, top, htop, sudo, watch, mc, ranger, etc.

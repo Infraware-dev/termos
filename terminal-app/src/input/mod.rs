@@ -1,3 +1,4 @@
+pub mod application_builtins;
 pub mod classifier;
 pub mod discovery;
 pub mod handler;
@@ -13,8 +14,9 @@ pub use classifier::{InputClassifier, InputType};
 // Re-export handler types for external use (M2/M3)
 #[allow(unused_imports)]
 pub use handler::{
-    ClassifierChain, CommandSyntaxHandler, DefaultHandler, EmptyInputHandler, InputHandler,
-    KnownCommandHandler, NaturalLanguageHandler, PathCommandHandler,
+    ApplicationBuiltinHandler, ClassifierChain, CommandSyntaxHandler, DefaultHandler,
+    EmptyInputHandler, InputHandler, KnownCommandHandler, NaturalLanguageHandler,
+    PathCommandHandler,
 };
 #[allow(unused_imports)]
 pub use history_expansion::HistoryExpansionHandler;

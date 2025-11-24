@@ -5,8 +5,8 @@
 use anyhow::Result;
 
 use super::handler::{
-    ClassifierChain, CommandSyntaxHandler, DefaultHandler, EmptyInputHandler, KnownCommandHandler,
-    NaturalLanguageHandler, PathCommandHandler,
+    ApplicationBuiltinHandler, ClassifierChain, CommandSyntaxHandler, DefaultHandler,
+    EmptyInputHandler, KnownCommandHandler, NaturalLanguageHandler, PathCommandHandler,
 };
 use super::history_expansion::HistoryExpansionHandler;
 use super::shell_builtins::ShellBuiltinHandler;
@@ -86,19 +86,21 @@ impl InputClassifier {
             .add_handler(Box::new(EmptyInputHandler::new()))
             // 2. History expansion (!!,  !$, !^, !* - must happen before command parsing)
             .add_handler(Box::new(HistoryExpansionHandler::new()))
-            // 3. Shell builtins (., :, [, [[, source, export, etc. - no PATH verification)
+            // 3. Application builtins (clear, reload-aliases, reload-commands)
+            .add_handler(Box::new(ApplicationBuiltinHandler::new()))
+            // 4. Shell builtins (., :, [, [[, source, export, etc. - no PATH verification)
             .add_handler(Box::new(ShellBuiltinHandler::new()))
-            // 4. Executable paths (unambiguous: ./script.sh, /usr/bin/cmd)
+            // 5. Executable paths (unambiguous: ./script.sh, /usr/bin/cmd)
             .add_handler(Box::new(PathCommandHandler::new()))
-            // 5. Known commands with PATH existence check (cached)
+            // 6. Known commands with PATH existence check (cached)
             .add_handler(Box::new(KnownCommandHandler::with_defaults()))
-            // 6. Command syntax detection (flags, pipes, redirects)
+            // 7. Command syntax detection (flags, pipes, redirects)
             .add_handler(Box::new(CommandSyntaxHandler::new()))
-            // 7. Typo detection (prevents "dokcer ps" → LLM)
+            // 8. Typo detection (prevents "dokcer ps" → LLM)
             .add_handler(Box::new(TypoDetectionHandler::with_defaults()))
-            // 8. Natural language patterns (precompiled regex, multilingual)
+            // 9. Natural language patterns (precompiled regex, multilingual)
             .add_handler(Box::new(NaturalLanguageHandler::new()))
-            // 9. Fallback to natural language
+            // 10. Fallback to natural language
             .add_handler(Box::new(DefaultHandler::new()));
 
         Self {
@@ -117,6 +119,7 @@ impl InputClassifier {
             .add_handler(Box::new(HistoryExpansionHandler::with_history(
                 history.clone(),
             )))
+            .add_handler(Box::new(ApplicationBuiltinHandler::new()))
             .add_handler(Box::new(ShellBuiltinHandler::new()))
             .add_handler(Box::new(PathCommandHandler::new()))
             .add_handler(Box::new(KnownCommandHandler::with_defaults()))

@@ -84,6 +84,53 @@ impl Default for EmptyInputHandler {
     }
 }
 
+/// Handler for application-specific builtin commands
+///
+/// Recognizes commands that are built into the terminal application:
+/// - `clear`: Clear terminal output buffer
+/// - `reload-aliases`: Reload alias definitions
+/// - `reload-commands`: Clear command cache
+///
+/// This handler has high priority (position 3 in chain) to prevent these
+/// commands from being misclassified as natural language by later handlers.
+pub struct ApplicationBuiltinHandler;
+
+impl ApplicationBuiltinHandler {
+    pub const fn new() -> Self {
+        Self
+    }
+}
+
+impl InputHandler for ApplicationBuiltinHandler {
+    fn handle(&self, input: &str) -> Option<InputType> {
+        let trimmed = input.trim();
+
+        // Extract the command (first word)
+        let command = trimmed.split_whitespace().next()?;
+
+        // Check if it's an application builtin
+        if crate::input::application_builtins::is_application_builtin(command) {
+            // Parse the command and args
+            let parts: Vec<&str> = trimmed.split_whitespace().collect();
+            let args: Vec<String> = parts.iter().skip(1).map(|s| s.to_string()).collect();
+
+            return Some(InputType::Command {
+                command: command.to_string(),
+                args,
+                original_input: Some(trimmed.to_string()),
+            });
+        }
+
+        None
+    }
+}
+
+impl Default for ApplicationBuiltinHandler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Handler for known commands (whitelist-based)
 pub struct KnownCommandHandler {
     known_commands: Vec<String>,
@@ -490,6 +537,56 @@ mod tests {
         assert_eq!(handler.handle(""), Some(InputType::Empty));
         assert_eq!(handler.handle("   "), Some(InputType::Empty));
         assert_eq!(handler.handle("test"), None);
+    }
+
+    #[test]
+    fn test_application_builtin_handler() {
+        let handler = ApplicationBuiltinHandler::new();
+
+        // Test clear command
+        assert!(matches!(
+            handler.handle("clear"),
+            Some(InputType::Command {
+                command,
+                args,
+                ..
+            }) if command == "clear" && args.is_empty()
+        ));
+
+        // Test reload-aliases command
+        assert!(matches!(
+            handler.handle("reload-aliases"),
+            Some(InputType::Command {
+                command,
+                args,
+                ..
+            }) if command == "reload-aliases" && args.is_empty()
+        ));
+
+        // Test reload-commands command
+        assert!(matches!(
+            handler.handle("reload-commands"),
+            Some(InputType::Command {
+                command,
+                args,
+                ..
+            }) if command == "reload-commands" && args.is_empty()
+        ));
+
+        // Test application builtin with arguments (should still work)
+        assert!(matches!(
+            handler.handle("clear --extra-arg"),
+            Some(InputType::Command {
+                command,
+                args,
+                ..
+            }) if command == "clear" && args == vec!["--extra-arg"]
+        ));
+
+        // Test non-builtin commands should pass through
+        assert_eq!(handler.handle("docker ps"), None);
+        assert_eq!(handler.handle("ls -la"), None);
+        assert_eq!(handler.handle("how do I clear the screen"), None);
     }
 
     #[test]
