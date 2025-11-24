@@ -364,12 +364,9 @@ impl NaturalLanguageHandler {
             && !input.starts_with("./")
         {
             // Additional check: no known command at start
+            // Use CommandCache for consistency with KnownCommandHandler (DRY principle)
             let first_word = words.first().map(|w| w.to_lowercase()).unwrap_or_default();
-            let known_commands = [
-                "ls", "cd", "pwd", "echo", "cat", "grep", "find", "docker", "kubectl", "git",
-                "npm", "cargo", "python", "node", "java", "go", "rustc",
-            ];
-            if !known_commands.contains(&first_word.as_str()) {
+            if !crate::input::discovery::CommandCache::is_available(&first_word) {
                 return true;
             }
         }
@@ -800,6 +797,53 @@ mod tests {
                 Some(InputType::NaturalLanguage(_))
             ),
             "Should detect multiple contractions"
+        );
+    }
+
+    #[test]
+    fn test_natural_language_medium_phrases() {
+        let handler = NaturalLanguageHandler::new();
+
+        // Test 3-5 word phrase with no known command at start → should be NL
+        // "show" is not a known system command
+        assert!(
+            matches!(
+                handler.handle("show container status now"),
+                Some(InputType::NaturalLanguage(_))
+            ),
+            "Should detect 4-word phrase with unknown command as NL"
+        );
+
+        // Test 3-word phrase with unknown verb
+        assert!(
+            matches!(
+                handler.handle("explain this thing"),
+                Some(InputType::NaturalLanguage(_))
+            ),
+            "Should detect 3-word phrase with unknown command as NL"
+        );
+
+        // Note: NaturalLanguageHandler runs late in chain (after KnownCommandHandler)
+        // So commands like "docker ps" are already classified before reaching this handler
+        // This handler focuses on phrases that look like NL, not command filtering
+
+        // Test edge case: less than 3 words should not trigger medium-phrase heuristic
+        // (though it might be caught by other NL indicators)
+        // Use a phrase that's clearly 2 words and not in regex patterns
+        let result = handler.handle("check now");
+        // "check now" is 2 words, no clear NL indicators, should pass through
+        assert_eq!(
+            result, None,
+            "2-word phrase without NL indicators should not trigger medium-phrase heuristic"
+        );
+
+        // Test edge case: more than 5 words falls back to word count > 5 heuristic
+        assert!(
+            matches!(
+                handler.handle("please show me all the logs now"),
+                Some(InputType::NaturalLanguage(_))
+            ),
+            "6+ word phrase should be caught by word count heuristic"
         );
     }
 
