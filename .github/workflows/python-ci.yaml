@@ -34,5 +34,36 @@ jobs:
       - name: Run ruff lint
         run: ruff check .
 
-# add testing (coverage > 75%)
-# add docker build 
+  api-test-coverage:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install uv
+        run: pip install uv
+
+      - name: Install dependencies
+        run: uv sync
+
+      - name: API test coverage
+        run: |
+          uv run pytest --cov=src/api --cov-report=term | tee coverage_output.txt
+          COVERAGE=$(awk '/TOTAL/ {print $NF}' coverage_output.txt | sed 's/%//')
+          echo "API Coverage: ${COVERAGE}%"
+          if (( $(echo "$COVERAGE >= 75" | bc -l) )); then
+            echo "✓ Coverage meets requirement (>= 75%)"
+          else
+            echo "✗ Coverage ${COVERAGE}% is below 75% threshold"
+            exit 1
+          fi
+
+# add docker build
