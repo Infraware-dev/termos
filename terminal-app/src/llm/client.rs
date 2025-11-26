@@ -2,6 +2,7 @@
 use anyhow::Result;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use tokio::sync::RwLock;
 
 /// Request to the LLM backend
 #[derive(Debug, Serialize)]
@@ -18,6 +19,20 @@ pub struct LLMResponse {
     pub text: String,
     #[serde(default)]
     pub metadata: Option<serde_json::Value>,
+}
+
+/// Request to create a new LLM thread
+#[derive(Debug, Serialize)]
+#[allow(dead_code, reason = "Used by create_thread() - awaiting message endpoint")]
+struct CreateThreadRequest {
+    metadata: serde_json::Value,
+}
+
+/// Response from creating a thread
+#[derive(Debug, Deserialize)]
+#[allow(dead_code, reason = "Used by create_thread() - awaiting message endpoint")]
+struct CreateThreadResponse {
+    thread_id: String,
 }
 
 /// Trait for LLM client implementations
@@ -52,6 +67,9 @@ pub trait LLMClientTrait: Send + Sync + std::fmt::Debug {
 pub struct HttpLLMClient {
     base_url: String,
     client: reqwest::Client,
+    /// Cached thread ID for conversation continuity
+    #[allow(dead_code, reason = "Awaiting message endpoint to use thread_id in queries")]
+    thread_id: RwLock<Option<String>>,
 }
 
 impl std::fmt::Debug for HttpLLMClient {
@@ -59,6 +77,7 @@ impl std::fmt::Debug for HttpLLMClient {
         f.debug_struct("HttpLLMClient")
             .field("base_url", &self.base_url)
             .field("client", &"<reqwest::Client>")
+            .field("thread_id", &"<RwLock<Option<String>>>")
             .finish()
     }
 }
@@ -72,6 +91,7 @@ impl HttpLLMClient {
                 .timeout(std::time::Duration::from_secs(30))
                 .build()
                 .unwrap_or_default(),
+            thread_id: RwLock::new(None),
         }
     }
 
@@ -83,7 +103,52 @@ impl HttpLLMClient {
             client: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(timeout_secs))
                 .build()?,
+            thread_id: RwLock::new(None),
         })
+    }
+
+    /// Create a new LLM thread via POST /threads
+    #[allow(dead_code, reason = "Awaiting message endpoint to integrate with query()")]
+    async fn create_thread(&self) -> Result<String> {
+        log::debug!("Creating new LLM thread at {}/threads", self.base_url);
+
+        let request = CreateThreadRequest {
+            metadata: serde_json::json!({}),
+        };
+
+        let response = self
+            .client
+            .post(format!("{}/threads", self.base_url))
+            .json(&request)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_text = response.text().await.unwrap_or_default();
+            log::error!("Failed to create thread ({}): {}", status, error_text);
+            anyhow::bail!("Failed to create thread ({}): {}", status, error_text);
+        }
+
+        let thread_response: CreateThreadResponse = response.json().await?;
+        log::info!("Created LLM thread: {}", thread_response.thread_id);
+
+        // Cache the thread ID
+        *self.thread_id.write().await = Some(thread_response.thread_id.clone());
+
+        Ok(thread_response.thread_id)
+    }
+
+    /// Get existing thread ID or create a new one
+    #[allow(dead_code, reason = "Awaiting message endpoint to integrate with query()")]
+    async fn ensure_thread(&self) -> Result<String> {
+        // Check if we already have a thread
+        if let Some(id) = self.thread_id.read().await.clone() {
+            return Ok(id);
+        }
+
+        // Create a new thread
+        self.create_thread().await
     }
 }
 
