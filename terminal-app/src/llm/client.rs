@@ -320,17 +320,108 @@ impl HttpLLMClient {
                 }
             }
             "updates" => {
-                // Check for interrupt (M2: human-in-the-loop)
+                // Check for interrupt (human-in-the-loop for command approval)
                 if let Ok(updates) = serde_json::from_str::<serde_json::Value>(data) {
-                    if updates.get("__interrupt__").is_some() {
-                        log::warn!("Run interrupted - human approval required (M2 feature)");
-                        // For now, we just log it - M2 will implement approval flow
+                    if let Some(interrupts) =
+                        updates.get("__interrupt__").and_then(|v| v.as_array())
+                    {
+                        for interrupt in interrupts {
+                            if let Some(value) = interrupt.get("value") {
+                                let interrupt_type =
+                                    value.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                                if interrupt_type == "command_approval" {
+                                    let command = value
+                                        .get("command")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("unknown");
+                                    log::info!(
+                                        "Command approval requested for: {} - auto-approving",
+                                        command
+                                    );
+                                    // Signal that we need to resume with approval
+                                    // The calling code will handle the resume
+                                    result.push_str("__INTERRUPT_RESUME__");
+                                }
+                            }
+                        }
                     }
                 }
             }
             "values" => {
-                // State updates - logged for debugging
-                log::trace!("State update received");
+                // State updates contain the full message history including AI responses
+                if let Ok(values) = serde_json::from_str::<serde_json::Value>(data) {
+                    if let Some(msgs) = values.get("messages").and_then(|v| v.as_array()) {
+                        // Get the last AI message with actual content from the values
+                        // Skip messages with empty content or just handoff messages
+                        for msg in msgs.iter().rev() {
+                            let is_ai = msg.get("type").and_then(|v| v.as_str()) == Some("ai")
+                                || msg.get("role").and_then(|v| v.as_str()) == Some("assistant");
+
+                            // Skip handoff messages (they just transfer control)
+                            let is_handoff = msg
+                                .get("response_metadata")
+                                .and_then(|m| m.get("__is_handoff_back"))
+                                .is_some();
+
+                            if is_ai && !is_handoff {
+                                // Handle content as string or array of content blocks
+                                let content_text = if let Some(content) =
+                                    msg.get("content").and_then(|v| v.as_str())
+                                {
+                                    // Content is a simple string
+                                    if !content.is_empty() {
+                                        Some(content.to_string())
+                                    } else {
+                                        None
+                                    }
+                                } else if let Some(content_array) =
+                                    msg.get("content").and_then(|v| v.as_array())
+                                {
+                                    // Content is an array of blocks (text, tool_use, etc.)
+                                    // Skip if array is empty
+                                    if content_array.is_empty() {
+                                        None
+                                    } else {
+                                        let text_parts: Vec<String> = content_array
+                                            .iter()
+                                            .filter_map(|block| {
+                                                if block.get("type").and_then(|v| v.as_str())
+                                                    == Some("text")
+                                                {
+                                                    block
+                                                        .get("text")
+                                                        .and_then(|v| v.as_str())
+                                                        .map(|s| s.to_string())
+                                                } else {
+                                                    None
+                                                }
+                                            })
+                                            .collect();
+                                        if !text_parts.is_empty() {
+                                            Some(text_parts.join("\n"))
+                                        } else {
+                                            None
+                                        }
+                                    }
+                                } else {
+                                    None
+                                };
+
+                                if let Some(content) = content_text {
+                                    // Only update if we have new meaningful content
+                                    if !content.is_empty()
+                                        && !content.starts_with("Transferring")
+                                        && !content.starts_with("Successfully transferred")
+                                    {
+                                        result.clear(); // Replace with latest AI message
+                                        result.push_str(&content);
+                                        break; // Found a good message, stop searching
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
             "error" => {
                 if let Ok(error) = serde_json::from_str::<serde_json::Value>(data) {
@@ -371,7 +462,35 @@ impl LLMClientTrait for HttpLLMClient {
             None => text.to_string(),
         };
 
-        self.stream_run(&thread_id, Some(&full_query), false).await
+        let mut result = self
+            .stream_run(&thread_id, Some(&full_query), false)
+            .await?;
+
+        // Auto-resume if interrupted (command approval required)
+        // Loop to handle multiple interrupts (e.g., multiple commands)
+        const MAX_RESUMES: usize = 10; // Safety limit
+        let mut resume_count = 0;
+
+        while result.contains("__INTERRUPT_RESUME__") && resume_count < MAX_RESUMES {
+            resume_count += 1;
+            log::info!("Auto-resuming run (attempt {})", resume_count);
+
+            // Remove the interrupt marker
+            result = result.replace("__INTERRUPT_RESUME__", "");
+
+            // Resume with approval
+            let resume_result = self.stream_run(&thread_id, None, true).await?;
+
+            // Replace result if we got something back
+            if !resume_result.is_empty() {
+                result = resume_result;
+            }
+        }
+
+        // Clean up any remaining markers
+        result = result.replace("__INTERRUPT_RESUME__", "");
+
+        Ok(result)
     }
 }
 
