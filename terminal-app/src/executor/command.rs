@@ -48,7 +48,8 @@ const REQUIRES_INTERACTIVE: &[&str] = &[
     "mc", "ranger", "nnn", "lf", "vifm",  // Watchers
     "watch", // System monitors (non-root)
     "top", "htop", "btop", "atop", // Privilege escalation (needs password input)
-    "sudo",
+    "sudo", // CLI tools with interactive features
+    "gh",
 ];
 
 /// Commands that are interactive but NOT supported (blocked entirely)

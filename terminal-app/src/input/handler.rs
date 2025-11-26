@@ -419,6 +419,78 @@ impl Default for NaturalLanguageHandler {
     }
 }
 
+/// Handler for commands that exist in PATH but aren't in the known commands list
+///
+/// This handler catches newly installed commands that aren't in the hardcoded
+/// whitelist by verifying their existence via `which`. It runs AFTER KnownCommandHandler
+/// but BEFORE TypoDetectionHandler to prevent false typo suggestions for valid commands.
+///
+/// # Performance
+/// - Uses `CommandCache::is_available()` which caches PATH lookups
+/// - Cache miss: O(PATH_length) via `which` crate (~1-5ms)
+/// - Cache hit: O(1) hash lookup
+#[derive(Debug)]
+pub struct PathDiscoveryHandler;
+
+impl PathDiscoveryHandler {
+    pub const fn new() -> Self {
+        Self
+    }
+
+    /// Parse input as a command
+    fn parse_as_command(&self, input: &str) -> Option<InputType> {
+        let parts = shell_words::split(input).ok()?;
+
+        if parts.is_empty() {
+            return Some(InputType::Empty);
+        }
+
+        // Preserve original input if it contains shell operators
+        let patterns = crate::input::patterns::CompiledPatterns::get();
+        let original_input = if patterns.has_shell_operators(input) {
+            Some(input.to_string())
+        } else {
+            None
+        };
+
+        Some(InputType::Command {
+            command: parts.first().cloned().unwrap_or_default(),
+            args: parts.get(1..).unwrap_or(&[]).to_vec(),
+            original_input,
+        })
+    }
+}
+
+impl InputHandler for PathDiscoveryHandler {
+    fn handle(&self, input: &str) -> Option<InputType> {
+        let trimmed = input.trim();
+
+        // Get first word (the command)
+        let first_word = trimmed.split_whitespace().next()?;
+
+        // Skip if it contains path separators (handled by PathCommandHandler)
+        if first_word.contains('/') || first_word.contains('\\') {
+            return None;
+        }
+
+        // Check if command exists in PATH using CommandCache
+        // This uses `which` internally and caches the result
+        // We check PATH first because commands like "gh auth login" are valid
+        // even without flags - the subcommands (auth, login) are arguments
+        if crate::input::discovery::CommandCache::is_available(first_word) {
+            return self.parse_as_command(trimmed);
+        }
+
+        None
+    }
+}
+
+impl Default for PathDiscoveryHandler {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Handler for executable paths (./script.sh, /usr/bin/cmd, etc.)
 ///
 /// Detects inputs that start with path-like prefixes and verifies

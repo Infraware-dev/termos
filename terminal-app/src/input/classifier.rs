@@ -7,6 +7,7 @@ use anyhow::Result;
 use super::handler::{
     ApplicationBuiltinHandler, ClassifierChain, CommandSyntaxHandler, DefaultHandler,
     EmptyInputHandler, KnownCommandHandler, NaturalLanguageHandler, PathCommandHandler,
+    PathDiscoveryHandler,
 };
 use super::history_expansion::HistoryExpansionHandler;
 use super::shell_builtins::ShellBuiltinHandler;
@@ -47,13 +48,15 @@ pub enum InputType {
 /// Uses Chain of Responsibility pattern with the following chain:
 /// 1. EmptyInputHandler - handles empty/whitespace input
 /// 2. HistoryExpansionHandler - expands history patterns (!!,  !$, !^, !*)
-/// 3. ShellBuiltinHandler - recognizes shell builtins (., :, [, [[, source, export, etc.)
-/// 4. PathCommandHandler - detects executable paths (./script.sh, /usr/bin/cmd)
-/// 5. KnownCommandHandler - checks whitelist + verifies command exists in PATH
-/// 6. CommandSyntaxHandler - detects command syntax (flags, pipes, redirects)
-/// 7. TypoDetectionHandler - detects command typos via Levenshtein distance
-/// 8. NaturalLanguageHandler - detects natural language patterns (multilingual)
-/// 9. DefaultHandler - fallback to natural language
+/// 3. ApplicationBuiltinHandler - app builtins (clear, reload-aliases, reload-commands)
+/// 4. ShellBuiltinHandler - recognizes shell builtins (., :, [, [[, source, export, etc.)
+/// 5. PathCommandHandler - detects executable paths (./script.sh, /usr/bin/cmd)
+/// 6. KnownCommandHandler - checks whitelist + verifies command exists in PATH
+/// 7. PathDiscoveryHandler - auto-discovers commands in PATH (for newly installed commands)
+/// 8. CommandSyntaxHandler - detects command syntax (flags, pipes, redirects)
+/// 9. TypoDetectionHandler - detects command typos via Levenshtein distance
+/// 10. NaturalLanguageHandler - detects natural language patterns (multilingual)
+/// 11. DefaultHandler - fallback to natural language
 pub struct InputClassifier {
     chain: ClassifierChain,
     history: Option<Arc<RwLock<Vec<String>>>>,
@@ -68,14 +71,16 @@ impl std::fmt::Debug for InputClassifier {
 }
 
 impl InputClassifier {
-    /// Create a new input classifier with default 9-handler chain
+    /// Create a new input classifier with default 11-handler chain
     ///
     /// Chain order optimized for performance and accuracy:
     /// - Fast paths first (empty, history expansion)
     /// - History expansion (must happen before command parsing)
+    /// - App builtins (clear, reload-aliases, reload-commands)
     /// - Shell builtins (no PATH verification needed)
     /// - Executable paths (unambiguous)
     /// - Existence-verified commands (with caching)
+    /// - PATH discovery (auto-detect newly installed commands)
     /// - Syntax detection (precompiled regex)
     /// - Typo detection (prevents false LLM calls)
     /// - Natural language (precompiled patterns)
@@ -94,13 +99,15 @@ impl InputClassifier {
             .add_handler(Box::new(PathCommandHandler::new()))
             // 6. Known commands with PATH existence check (cached)
             .add_handler(Box::new(KnownCommandHandler::with_defaults()))
-            // 7. Command syntax detection (flags, pipes, redirects)
+            // 7. PATH discovery - auto-detect newly installed commands via `which`
+            .add_handler(Box::new(PathDiscoveryHandler::new()))
+            // 8. Command syntax detection (flags, pipes, redirects)
             .add_handler(Box::new(CommandSyntaxHandler::new()))
-            // 8. Typo detection (prevents "dokcer ps" → LLM)
+            // 9. Typo detection (prevents "dokcer ps" → LLM)
             .add_handler(Box::new(TypoDetectionHandler::with_defaults()))
-            // 9. Natural language patterns (precompiled regex, multilingual)
+            // 10. Natural language patterns (precompiled regex, multilingual)
             .add_handler(Box::new(NaturalLanguageHandler::new()))
-            // 10. Fallback to natural language
+            // 11. Fallback to natural language
             .add_handler(Box::new(DefaultHandler::new()));
 
         Self {
@@ -123,6 +130,7 @@ impl InputClassifier {
             .add_handler(Box::new(ShellBuiltinHandler::new()))
             .add_handler(Box::new(PathCommandHandler::new()))
             .add_handler(Box::new(KnownCommandHandler::with_defaults()))
+            .add_handler(Box::new(PathDiscoveryHandler::new()))
             .add_handler(Box::new(CommandSyntaxHandler::new()))
             .add_handler(Box::new(TypoDetectionHandler::with_defaults()))
             .add_handler(Box::new(NaturalLanguageHandler::new()))
