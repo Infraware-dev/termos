@@ -273,6 +273,21 @@ impl InfrawareTerminal {
         Self::builder().build()
     }
 
+    /// Update the LLM client (used for deferred initialization after splash)
+    fn set_llm_client(&mut self, client: Arc<dyn LLMClientTrait>) {
+        self.nl_orchestrator.set_llm_client(client);
+    }
+
+    /// Set the authenticator (used for deferred initialization after splash)
+    fn set_authenticator(&mut self, auth: Option<Arc<dyn Authenticator>>) {
+        self.authenticator = auth;
+    }
+
+    /// Set whether using mock LLM (used for deferred initialization after splash)
+    fn set_using_mock_llm(&mut self, using_mock: bool) {
+        self.using_mock_llm = using_mock;
+    }
+
     /// Run the main event loop
     async fn run(&mut self) -> Result<()> {
         // Load aliases at startup (blocking to ensure they're available before first command)
@@ -575,6 +590,43 @@ impl InfrawareTerminal {
     }
 }
 
+/// Authenticate with backend and determine LLM client (with silent fallback)
+///
+/// This function is designed to run in parallel with the splash screen.
+/// Returns: (llm_client, authenticator, using_mock_llm)
+async fn authenticate_backend(
+    backend_url: String,
+    api_key: String,
+) -> (
+    Arc<dyn LLMClientTrait>,
+    Option<Arc<dyn Authenticator>>,
+    bool,
+) {
+    log::info!("Backend URL configured: {}", backend_url);
+
+    let auth = Arc::new(HttpAuthenticator::new(backend_url.clone()));
+    match auth.authenticate(&api_key).await {
+        Ok(_) => {
+            log::info!("Backend authentication successful - using HttpLLMClient");
+            let llm_url = std::env::var("INFRAWARE_LLM_URL")
+                .unwrap_or_else(|_| format!("{}/api/llm", backend_url));
+            (
+                Arc::new(HttpLLMClient::new(llm_url)) as Arc<dyn LLMClientTrait>,
+                Some(auth as Arc<dyn Authenticator>),
+                false,
+            )
+        }
+        Err(e) => {
+            // Silent fallback to MockLLMClient
+            log::warn!(
+                "Authentication failed: {} - falling back to MockLLMClient",
+                e
+            );
+            (Arc::new(MockLLMClient::new()), None, true)
+        }
+    }
+}
+
 /// Main entry point
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -589,62 +641,49 @@ async fn main() -> Result<()> {
 
     log::info!("Infraware Terminal starting...");
 
-    // Authenticate with backend and determine LLM client (with silent fallback)
+    // Load auth config
     let auth_config = AuthConfig::from_env();
-    let (llm_client, authenticator, using_mock_llm): (
-        Arc<dyn LLMClientTrait>,
-        Option<Arc<dyn Authenticator>>,
-        bool,
-    ) = if let (Some(backend_url), Some(api_key)) =
-        (&auth_config.backend_url, &auth_config.api_key)
-    {
-        log::info!("Backend URL configured: {}", backend_url);
 
-        let auth = Arc::new(HttpAuthenticator::new(backend_url.clone()));
-        match auth.authenticate(api_key).await {
-            Ok(_) => {
-                log::info!("Backend authentication successful - using HttpLLMClient");
-                let llm_url = std::env::var("INFRAWARE_LLM_URL")
-                    .unwrap_or_else(|_| format!("{}/api/llm", backend_url));
-                (
-                    Arc::new(HttpLLMClient::new(llm_url)) as Arc<dyn LLMClientTrait>,
-                    Some(auth as Arc<dyn Authenticator>),
-                    false,
-                )
-            }
-            Err(e) => {
-                // Silent fallback to MockLLMClient
-                log::warn!(
-                    "Authentication failed: {} - falling back to MockLLMClient",
-                    e
-                );
-                (Arc::new(MockLLMClient::new()), None, true)
-            }
-        }
-    } else {
-        if auth_config.backend_url.is_some() {
+    // Create terminal with defaults (MockLLMClient) - will be updated after auth
+    log::debug!("Building terminal UI...");
+    let mut terminal = InfrawareTerminal::builder()
+        .with_llm_client(Arc::new(MockLLMClient::new()))
+        .with_using_mock_llm(true)
+        .build()?;
+
+    // Launch auth in background (runs in parallel with splash)
+    let auth_handle = match (auth_config.backend_url, auth_config.api_key) {
+        (Some(backend_url), Some(api_key)) => Some(tokio::spawn(async move {
+            authenticate_backend(backend_url, api_key).await
+        })),
+        (Some(_), None) => {
             log::warn!("ANTHROPIC_API_KEY not found in .env.secrets");
+            log::warn!("Backend not configured - using MockLLMClient");
+            None
         }
-        log::warn!("Backend not configured - using MockLLMClient");
-        (Arc::new(MockLLMClient::new()), None, true)
+        _ => {
+            log::warn!("Backend not configured - using MockLLMClient");
+            None
+        }
     };
 
-    // Create terminal using builder pattern
-    log::debug!("Building terminal UI...");
-    let mut builder = InfrawareTerminal::builder()
-        .with_llm_client(llm_client)
-        .with_using_mock_llm(using_mock_llm);
-
-    // Add authenticator if available (for auth-status command)
-    if let Some(auth) = authenticator {
-        builder = builder.with_authenticator(auth);
-    }
-
-    let mut terminal = builder.build()?;
-
-    // Show animated splash screen
+    // Show animated splash screen (5s) - auth runs in parallel
     log::debug!("Showing splash screen");
     SplashScreen::run(terminal.ui.inner_terminal())?;
+
+    // Wait for auth result and update terminal
+    if let Some(handle) = auth_handle {
+        match handle.await {
+            Ok((llm_client, authenticator, using_mock_llm)) => {
+                terminal.set_llm_client(llm_client);
+                terminal.set_authenticator(authenticator);
+                terminal.set_using_mock_llm(using_mock_llm);
+            }
+            Err(e) => {
+                log::error!("Auth task panicked: {} - using MockLLMClient", e);
+            }
+        }
+    }
 
     // Run the main loop
     log::debug!("Starting main event loop");
