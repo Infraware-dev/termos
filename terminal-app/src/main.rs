@@ -608,10 +608,10 @@ async fn authenticate_backend(
     match auth.authenticate(&api_key).await {
         Ok(_) => {
             log::info!("Backend authentication successful - using HttpLLMClient");
-            let llm_url = std::env::var("INFRAWARE_LLM_URL")
-                .unwrap_or_else(|_| format!("{}/api/llm", backend_url));
+            // Use backend_url directly for LLM (threads API is at root, not /api/llm)
+            let llm_url = std::env::var("INFRAWARE_LLM_URL").unwrap_or(backend_url);
             (
-                Arc::new(HttpLLMClient::new(llm_url)) as Arc<dyn LLMClientTrait>,
+                Arc::new(HttpLLMClient::new(llm_url, api_key)) as Arc<dyn LLMClientTrait>,
                 Some(auth as Arc<dyn Authenticator>),
                 false,
             )
