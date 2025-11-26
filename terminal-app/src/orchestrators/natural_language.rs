@@ -35,6 +35,11 @@ impl NaturalLanguageOrchestrator {
         }
     }
 
+    /// Update the LLM client (used for deferred initialization)
+    pub fn set_llm_client(&mut self, client: Arc<dyn LLMClientTrait>) {
+        self.llm_client = client;
+    }
+
     /// Handle natural language query with all the necessary logic
     ///
     /// This method encapsulates:
