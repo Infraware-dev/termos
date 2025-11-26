@@ -1,11 +1,13 @@
 /// LLM client for natural language queries
 use anyhow::Result;
 use async_trait::async_trait;
+use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 
-/// Request to the LLM backend
+/// Request to the LLM backend (legacy - kept for backward compatibility)
 #[derive(Debug, Serialize)]
+#[allow(dead_code)] // Legacy struct - may be used for non-streaming endpoints
 pub struct LLMRequest {
     pub query: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -23,16 +25,44 @@ pub struct LLMResponse {
 
 /// Request to create a new LLM thread
 #[derive(Debug, Serialize)]
-#[allow(dead_code, reason = "Used by create_thread() - awaiting message endpoint")]
 struct CreateThreadRequest {
     metadata: serde_json::Value,
 }
 
 /// Response from creating a thread
 #[derive(Debug, Deserialize)]
-#[allow(dead_code, reason = "Used by create_thread() - awaiting message endpoint")]
 struct CreateThreadResponse {
     thread_id: String,
+}
+
+/// Request for streaming run via POST /threads/{id}/runs/stream
+#[derive(Debug, Serialize)]
+struct StreamRunRequest {
+    assistant_id: String,
+    stream_mode: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    input: Option<StreamInput>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    command: Option<StreamCommand>,
+}
+
+/// Input container for streaming request
+#[derive(Debug, Serialize)]
+struct StreamInput {
+    messages: Vec<ChatMessage>,
+}
+
+/// Chat message for LLM conversation
+#[derive(Debug, Serialize)]
+struct ChatMessage {
+    role: String,
+    content: String,
+}
+
+/// Command for resuming interrupted runs
+#[derive(Debug, Serialize)]
+struct StreamCommand {
+    resume: String,
 }
 
 /// Trait for LLM client implementations
@@ -67,8 +97,9 @@ pub trait LLMClientTrait: Send + Sync + std::fmt::Debug {
 pub struct HttpLLMClient {
     base_url: String,
     client: reqwest::Client,
+    /// API key for authentication
+    api_key: String,
     /// Cached thread ID for conversation continuity
-    #[allow(dead_code, reason = "Awaiting message endpoint to use thread_id in queries")]
     thread_id: RwLock<Option<String>>,
 }
 
@@ -77,38 +108,40 @@ impl std::fmt::Debug for HttpLLMClient {
         f.debug_struct("HttpLLMClient")
             .field("base_url", &self.base_url)
             .field("client", &"<reqwest::Client>")
+            .field("api_key", &"<redacted>")
             .field("thread_id", &"<RwLock<Option<String>>>")
             .finish()
     }
 }
 
 impl HttpLLMClient {
-    /// Create a new HTTP LLM client
-    pub fn new(base_url: String) -> Self {
+    /// Create a new HTTP LLM client with API key
+    pub fn new(base_url: String, api_key: String) -> Self {
         Self {
             base_url,
             client: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(30))
+                .timeout(std::time::Duration::from_secs(120)) // SSE streams need longer timeout
                 .build()
                 .unwrap_or_default(),
+            api_key,
             thread_id: RwLock::new(None),
         }
     }
 
-    /// Create a new HTTP LLM client with custom timeout (M2/M3)
-    #[allow(dead_code)] // Constructor for custom timeout configuration, used in M2/M3
-    pub fn with_timeout(base_url: String, timeout_secs: u64) -> Result<Self> {
+    /// Create a new HTTP LLM client with custom timeout
+    #[allow(dead_code)] // Constructor for custom timeout configuration
+    pub fn with_timeout(base_url: String, api_key: String, timeout_secs: u64) -> Result<Self> {
         Ok(Self {
             base_url,
             client: reqwest::Client::builder()
                 .timeout(std::time::Duration::from_secs(timeout_secs))
                 .build()?,
+            api_key,
             thread_id: RwLock::new(None),
         })
     }
 
     /// Create a new LLM thread via POST /threads
-    #[allow(dead_code, reason = "Awaiting message endpoint to integrate with query()")]
     async fn create_thread(&self) -> Result<String> {
         log::debug!("Creating new LLM thread at {}/threads", self.base_url);
 
@@ -119,6 +152,7 @@ impl HttpLLMClient {
         let response = self
             .client
             .post(format!("{}/threads", self.base_url))
+            .header("X-Api-Key", &self.api_key)
             .json(&request)
             .send()
             .await?;
@@ -140,7 +174,6 @@ impl HttpLLMClient {
     }
 
     /// Get existing thread ID or create a new one
-    #[allow(dead_code, reason = "Awaiting message endpoint to integrate with query()")]
     async fn ensure_thread(&self) -> Result<String> {
         // Check if we already have a thread
         if let Some(id) = self.thread_id.read().await.clone() {
@@ -149,6 +182,174 @@ impl HttpLLMClient {
 
         // Create a new thread
         self.create_thread().await
+    }
+
+    /// Stream a run via POST /threads/{thread_id}/runs/stream
+    ///
+    /// # Arguments
+    /// * `thread_id` - The thread ID to run on
+    /// * `input` - Optional user input text (None for resume)
+    /// * `resume` - Whether this is resuming an interrupted run
+    async fn stream_run(
+        &self,
+        thread_id: &str,
+        input: Option<&str>,
+        resume: bool,
+    ) -> Result<String> {
+        let url = format!("{}/threads/{}/runs/stream", self.base_url, thread_id);
+        log::debug!("Starting stream run at {}", url);
+
+        let mut request = StreamRunRequest {
+            assistant_id: "supervisor".to_string(),
+            stream_mode: vec!["values".into(), "updates".into(), "messages".into()],
+            input: None,
+            command: None,
+        };
+
+        if let Some(text) = input {
+            request.input = Some(StreamInput {
+                messages: vec![ChatMessage {
+                    role: "user".into(),
+                    content: text.into(),
+                }],
+            });
+        }
+
+        if resume {
+            request.command = Some(StreamCommand {
+                resume: "approved".into(),
+            });
+        }
+
+        let response = self
+            .client
+            .post(&url)
+            .header("X-Api-Key", &self.api_key)
+            .json(&request)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_text = response.text().await.unwrap_or_default();
+            log::error!("Stream run failed ({}): {}", status, error_text);
+            anyhow::bail!("Stream run failed ({}): {}", status, error_text);
+        }
+
+        self.parse_sse_stream(response).await
+    }
+
+    /// Parse SSE stream and accumulate AI messages
+    async fn parse_sse_stream(&self, response: reqwest::Response) -> Result<String> {
+        let mut result = String::new();
+        let mut stream = response.bytes_stream();
+        let mut current_event: Option<String> = None;
+        let mut buffer = String::new();
+
+        while let Some(chunk_result) = stream.next().await {
+            let chunk = chunk_result?;
+            let text = String::from_utf8_lossy(&chunk);
+            buffer.push_str(&text);
+
+            // Process complete lines from buffer
+            while let Some(newline_pos) = buffer.find('\n') {
+                let line = buffer[..newline_pos].trim_end().to_string();
+                buffer = buffer[newline_pos + 1..].to_string();
+
+                if line.is_empty() {
+                    continue;
+                }
+
+                // Parse SSE line
+                if let Some(event_type) = line.strip_prefix("event: ") {
+                    current_event = Some(event_type.trim().to_string());
+                    log::trace!("SSE event type: {}", event_type);
+                } else if let Some(data) = line.strip_prefix("data: ") {
+                    if let Some(ref event) = current_event {
+                        self.handle_sse_event(event, data, &mut result)?;
+                    }
+                }
+            }
+        }
+
+        // Process any remaining data in buffer
+        for line in buffer.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            if let Some(data) = line.strip_prefix("data: ") {
+                if let Some(ref event) = current_event {
+                    self.handle_sse_event(event, data, &mut result)?;
+                }
+            }
+        }
+
+        log::debug!("Stream completed, result length: {} chars", result.len());
+        Ok(result)
+    }
+
+    /// Handle a single SSE event
+    fn handle_sse_event(&self, event: &str, data: &str, result: &mut String) -> Result<()> {
+        match event {
+            "metadata" => {
+                // Log run_id for debugging
+                if let Ok(meta) = serde_json::from_str::<serde_json::Value>(data) {
+                    if let Some(run_id) = meta.get("run_id").and_then(|v| v.as_str()) {
+                        log::info!("Run started: {}", run_id);
+                    }
+                }
+            }
+            "messages" => {
+                // Extract AI message content
+                if let Ok(messages) = serde_json::from_str::<serde_json::Value>(data) {
+                    if let Some(msgs) = messages.as_array() {
+                        for msg in msgs {
+                            let is_ai = msg.get("type").and_then(|v| v.as_str()) == Some("ai")
+                                || msg.get("role").and_then(|v| v.as_str()) == Some("assistant");
+                            if is_ai {
+                                if let Some(content) = msg.get("content").and_then(|v| v.as_str()) {
+                                    if !result.is_empty() {
+                                        result.push('\n');
+                                    }
+                                    result.push_str(content);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            "updates" => {
+                // Check for interrupt (M2: human-in-the-loop)
+                if let Ok(updates) = serde_json::from_str::<serde_json::Value>(data) {
+                    if updates.get("__interrupt__").is_some() {
+                        log::warn!("Run interrupted - human approval required (M2 feature)");
+                        // For now, we just log it - M2 will implement approval flow
+                    }
+                }
+            }
+            "values" => {
+                // State updates - logged for debugging
+                log::trace!("State update received");
+            }
+            "error" => {
+                if let Ok(error) = serde_json::from_str::<serde_json::Value>(data) {
+                    let msg = error
+                        .get("message")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("Unknown error");
+                    log::error!("Stream error: {}", msg);
+                    anyhow::bail!("Stream error: {}", msg);
+                }
+            }
+            "end" => {
+                log::debug!("Stream ended");
+            }
+            _ => {
+                log::trace!("Unknown SSE event type: {}", event);
+            }
+        }
+        Ok(())
     }
 }
 
@@ -159,30 +360,18 @@ impl LLMClientTrait for HttpLLMClient {
     }
 
     async fn query_with_context(&self, text: &str, context: Option<String>) -> Result<String> {
-        log::debug!("LLM query: {} (context: {})", text, context.is_some());
+        log::debug!("LLM query: {} (context: {:?})", text, context.is_some());
 
-        let request = LLMRequest {
-            query: text.to_string(),
-            context,
+        // Use streaming endpoint via threads
+        let thread_id = self.ensure_thread().await?;
+
+        // Combine context with text if provided
+        let full_query = match context {
+            Some(ctx) => format!("{}\n\nContext:\n{}", text, ctx),
+            None => text.to_string(),
         };
 
-        let response = self
-            .client
-            .post(format!("{}/query", self.base_url))
-            .json(&request)
-            .send()
-            .await?;
-
-        // Check for errors
-        if !response.status().is_success() {
-            log::error!("LLM request failed with status: {}", response.status());
-            anyhow::bail!("LLM request failed with status: {}", response.status());
-        }
-
-        let llm_response: LLMResponse = response.json().await?;
-        log::debug!("LLM response received ({} chars)", llm_response.text.len());
-
-        Ok(llm_response.text)
+        self.stream_run(&thread_id, Some(&full_query), false).await
     }
 }
 
@@ -239,16 +428,23 @@ mod tests {
 
     #[test]
     fn test_llm_client_new() {
-        let client = HttpLLMClient::new("http://localhost:8080".to_string());
+        let client =
+            HttpLLMClient::new("http://localhost:8080".to_string(), "test-key".to_string());
         assert_eq!(client.base_url, "http://localhost:8080");
+        assert_eq!(client.api_key, "test-key");
     }
 
     #[test]
     fn test_llm_client_with_timeout() {
-        let client = HttpLLMClient::with_timeout("http://localhost:8080".to_string(), 30);
+        let client = HttpLLMClient::with_timeout(
+            "http://localhost:8080".to_string(),
+            "test-key".to_string(),
+            30,
+        );
         assert!(client.is_ok());
         let client = client.unwrap();
         assert_eq!(client.base_url, "http://localhost:8080");
+        assert_eq!(client.api_key, "test-key");
     }
 
     #[test]

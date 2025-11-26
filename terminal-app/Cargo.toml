@@ -30,9 +30,10 @@ which = "8.0.0"
 shell-words = "1.1"
 
 # LLM client
-reqwest = { version = "0.12", features = ["json"] }
+reqwest = { version = "0.12", features = ["json", "stream"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+futures = "0.3"  # StreamExt for SSE parsing
 
 # Syntax highlighting
 syntect = "5.2"
