@@ -154,8 +154,10 @@ impl LogConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     #[test]
+    #[serial]
     fn test_log_config_defaults() {
         // Clear env vars for test
         std::env::remove_var("LOG_LEVEL");
@@ -171,6 +173,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_log_config_from_env() {
         std::env::set_var("LOG_LEVEL", "debug");
         std::env::set_var("LOG_MAX_SIZE_MB", "20");
@@ -188,6 +191,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_max_size_bytes() {
         std::env::set_var("LOG_MAX_SIZE_MB", "5");
         let config = LogConfig::from_env();
@@ -196,6 +200,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn test_log_path_cross_platform() {
         std::env::remove_var("LOG_PATH");
         let config = LogConfig::from_env();
