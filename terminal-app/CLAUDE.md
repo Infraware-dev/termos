@@ -22,13 +22,13 @@ cargo run                            # Run application
 
 # Testing
 cargo test                           # All tests
-cargo test --test classifier_tests   # SCAN algorithm tests
-cargo test --test executor_tests     # Executor tests
+cargo test --test classifier_tests   # SCAN algorithm tests (tests/classifier_tests.rs)
+cargo test --test executor_tests     # Executor tests (tests/executor_tests.rs)
 cargo test test_name                 # Run single test by name
 cargo test -- --nocapture            # Tests with output
 cargo test -- --show-output          # Show println! even for passing tests
 
-# Benchmarking
+# Benchmarking (benches/scan_benchmark.rs)
 cargo bench                          # All benchmarks
 cargo bench scan_                    # SCAN benchmarks only
 
@@ -68,45 +68,19 @@ User Input → Alias Expansion → InputClassifier → [Command Path | Natural L
 
 **Key optimizations**: Precompiled RegexSet via `once_cell::Lazy`, thread-safe `RwLock<CommandCache>` with poisoning recovery, fast paths first.
 
-### Module Structure
+### Key Modules
 
-**`terminal/`** - TUI rendering and state
-- `tui.rs`: ratatui rendering, suspend/resume for interactive commands
-- `state.rs`: Terminal state composition
-- `buffers.rs`: SRP-compliant buffers (OutputBuffer, InputBuffer, CommandHistory)
-- `events.rs`: Keyboard event handling (Windows: filter KeyEventKind::Press only)
-- `splash.rs`: Animated splash screen with particle assembly effect (5s duration, skippable)
-
-**`input/`** - SCAN Algorithm
-- `classifier.rs`: InputClassifier coordinating handler chain + alias expansion
-- `handler.rs`: 10-handler Chain of Responsibility implementation
-- `history_expansion.rs`: Bash-style `!!`, `!$`, `!^`, `!*` with Arc<RwLock>
-- `application_builtins.rs`: App builtin commands (clear, reload-aliases, reload-commands)
-- `shell_builtins.rs`: 45+ builtins with `ShellBuiltinInfo` metadata
-- `known_commands.rs`: Single source of truth for 60+ DevOps commands
-- `patterns.rs`: Precompiled RegexSet patterns
-- `discovery.rs`: PATH-aware CommandCache + alias loading/expansion
-- `typo_detection.rs`: Levenshtein distance with `strsim`
-- `parser.rs`: Shell parsing with `shell-words`
-
-**`executor/`** - Command execution
-- `command.rs`: Async execution + interactive command support (28 supported, 31 blocked)
-- `package_manager.rs`: Strategy pattern for 7 package managers
-- `install.rs`: Auto-install workflow
-- `completion.rs`: Tab completion
-
-**`orchestrators/`** - Workflow coordination (SRP)
-- `command.rs`: Command execution + auto-install prompts
-- `natural_language.rs`: LLM queries + response rendering
-- `tab_completion.rs`: Tab completion workflow
-
-**`llm/`** - LLM integration
-- `client.rs`: MockLLMClient (testing), HttpLLMClient (production)
-- `renderer.rs`: Markdown with syntax highlighting
+| Directory | Purpose | Key Files |
+|-----------|---------|-----------|
+| `terminal/` | TUI rendering and state | `tui.rs` (suspend/resume), `buffers.rs` (SRP buffers), `events.rs` (keyboard) |
+| `input/` | SCAN Algorithm | `classifier.rs` (coordinator), `handler.rs` (10-handler chain), `known_commands.rs` (command registry) |
+| `executor/` | Command execution | `command.rs` (async exec), `package_manager.rs` (Strategy pattern) |
+| `orchestrators/` | Workflow coordination | `command.rs`, `natural_language.rs`, `tab_completion.rs` |
+| `llm/` | LLM integration | `client.rs` (Mock/HTTP clients), `renderer.rs` (syntax highlighting) |
 
 ### Design Patterns
-- **Chain of Responsibility**: Input classification (`handler.rs`)
-- **Strategy Pattern**: Package managers (`package_manager.rs`)
+- **Chain of Responsibility**: Input classification (`input/handler.rs`)
+- **Strategy Pattern**: Package managers (`executor/package_manager.rs`)
 - **Builder Pattern**: Terminal construction (`main.rs`)
 - **SRP**: Orchestrators, buffer components
 
@@ -121,6 +95,7 @@ User Input → Alias Expansion → InputClassifier → [Command Path | Natural L
 2. Add to chain in `InputClassifier::new()` - ORDER MATTERS (fast paths first)
 3. Use precompiled patterns from `patterns.rs` - NEVER compile regex in handlers
 4. Run `cargo bench` to verify no performance regression
+5. Use `#[serial_test::serial]` for tests that modify shared global state (CommandCache, aliases)
 
 ### History Expansion
 - Patterns: `!!` (previous cmd), `!$` (last arg), `!^` (first arg), `!*` (all args)
