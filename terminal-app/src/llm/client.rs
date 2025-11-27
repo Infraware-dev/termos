@@ -647,4 +647,276 @@ mod tests {
         let response = mock.query("DOCKER containers").await.unwrap();
         assert!(response.contains("Docker"));
     }
+
+    #[test]
+    fn test_handle_sse_metadata_event() {
+        let client =
+            HttpLLMClient::new("http://localhost:8080".to_string(), "test-key".to_string());
+        let mut result = String::new();
+        let data = r#"{"run_id":"test-run-123","attempt":1}"#;
+
+        // Should not fail, just logs
+        let outcome = client.handle_sse_event("metadata", data, &mut result);
+        assert!(outcome.is_ok());
+        assert!(result.is_empty()); // metadata doesn't add to result
+    }
+
+    #[test]
+    fn test_handle_sse_values_event_string_content() {
+        let client =
+            HttpLLMClient::new("http://localhost:8080".to_string(), "test-key".to_string());
+        let mut result = String::new();
+        let data = r#"{"messages":[{"type":"ai","content":"Hello, this is a response"}]}"#;
+
+        let outcome = client.handle_sse_event("values", data, &mut result);
+        assert!(outcome.is_ok());
+        assert_eq!(result, "Hello, this is a response");
+    }
+
+    #[test]
+    fn test_handle_sse_values_event_array_content() {
+        let client =
+            HttpLLMClient::new("http://localhost:8080".to_string(), "test-key".to_string());
+        let mut result = String::new();
+        let data = r#"{"messages":[{"type":"ai","content":[{"type":"text","text":"First part"},{"type":"text","text":"Second part"}]}]}"#;
+
+        let outcome = client.handle_sse_event("values", data, &mut result);
+        assert!(outcome.is_ok());
+        assert!(result.contains("First part"));
+        assert!(result.contains("Second part"));
+    }
+
+    #[test]
+    fn test_handle_sse_values_skips_empty_content_array() {
+        let client =
+            HttpLLMClient::new("http://localhost:8080".to_string(), "test-key".to_string());
+        let mut result = String::new();
+        let data = r#"{"messages":[{"type":"ai","content":[]}]}"#;
+
+        let outcome = client.handle_sse_event("values", data, &mut result);
+        assert!(outcome.is_ok());
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_handle_sse_values_skips_handoff_messages() {
+        let client =
+            HttpLLMClient::new("http://localhost:8080".to_string(), "test-key".to_string());
+        let mut result = String::new();
+        let data = r#"{"messages":[{"type":"ai","content":"Transferring back to supervisor","response_metadata":{"__is_handoff_back":true}}]}"#;
+
+        let outcome = client.handle_sse_event("values", data, &mut result);
+        assert!(outcome.is_ok());
+        assert!(result.is_empty()); // Handoff messages are skipped
+    }
+
+    #[test]
+    fn test_handle_sse_values_skips_transfer_messages() {
+        let client =
+            HttpLLMClient::new("http://localhost:8080".to_string(), "test-key".to_string());
+        let mut result = String::new();
+        let data = r#"{"messages":[{"type":"ai","content":"Successfully transferred to agent"}]}"#;
+
+        let outcome = client.handle_sse_event("values", data, &mut result);
+        assert!(outcome.is_ok());
+        assert!(result.is_empty()); // Transfer messages are skipped
+    }
+
+    #[test]
+    fn test_handle_sse_values_gets_last_meaningful_ai_message() {
+        let client =
+            HttpLLMClient::new("http://localhost:8080".to_string(), "test-key".to_string());
+        let mut result = String::new();
+        // Multiple messages - should get the last meaningful AI message
+        let data = r#"{"messages":[
+            {"type":"human","content":"What OS am I using?"},
+            {"type":"ai","content":"Let me check that for you."},
+            {"type":"ai","content":"You are using Linux on WSL2."}
+        ]}"#;
+
+        let outcome = client.handle_sse_event("values", data, &mut result);
+        assert!(outcome.is_ok());
+        assert_eq!(result, "You are using Linux on WSL2.");
+    }
+
+    #[test]
+    fn test_handle_sse_interrupt_event() {
+        let client =
+            HttpLLMClient::new("http://localhost:8080".to_string(), "test-key".to_string());
+        let mut result = String::new();
+        let data = r#"{"__interrupt__":[{"value":{"type":"command_approval","command":"uname -a","message":"Approve?"}}]}"#;
+
+        let outcome = client.handle_sse_event("updates", data, &mut result);
+        assert!(outcome.is_ok());
+        assert!(result.contains("__INTERRUPT_RESUME__"));
+    }
+
+    #[test]
+    fn test_handle_sse_updates_no_interrupt() {
+        let client =
+            HttpLLMClient::new("http://localhost:8080".to_string(), "test-key".to_string());
+        let mut result = String::new();
+        let data = r#"{"supervisor":{"messages":[]}}"#;
+
+        let outcome = client.handle_sse_event("updates", data, &mut result);
+        assert!(outcome.is_ok());
+        assert!(result.is_empty()); // No interrupt marker
+    }
+
+    #[test]
+    fn test_handle_sse_error_event() {
+        let client =
+            HttpLLMClient::new("http://localhost:8080".to_string(), "test-key".to_string());
+        let mut result = String::new();
+        let data = r#"{"message":"Something went wrong"}"#;
+
+        let outcome = client.handle_sse_event("error", data, &mut result);
+        assert!(outcome.is_err());
+        assert!(outcome.unwrap_err().to_string().contains("Something went wrong"));
+    }
+
+    #[test]
+    fn test_handle_sse_end_event() {
+        let client =
+            HttpLLMClient::new("http://localhost:8080".to_string(), "test-key".to_string());
+        let mut result = String::new();
+
+        let outcome = client.handle_sse_event("end", "", &mut result);
+        assert!(outcome.is_ok());
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_handle_sse_unknown_event() {
+        let client =
+            HttpLLMClient::new("http://localhost:8080".to_string(), "test-key".to_string());
+        let mut result = String::new();
+
+        let outcome = client.handle_sse_event("unknown_event", "{}", &mut result);
+        assert!(outcome.is_ok());
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_handle_sse_messages_event() {
+        let client =
+            HttpLLMClient::new("http://localhost:8080".to_string(), "test-key".to_string());
+        let mut result = String::new();
+        let data = r#"[{"type":"ai","content":"Response from AI"}]"#;
+
+        let outcome = client.handle_sse_event("messages", data, &mut result);
+        assert!(outcome.is_ok());
+        assert_eq!(result, "Response from AI");
+    }
+
+    #[test]
+    fn test_handle_sse_messages_multiple_ai() {
+        let client =
+            HttpLLMClient::new("http://localhost:8080".to_string(), "test-key".to_string());
+        let mut result = String::new();
+        let data = r#"[{"type":"ai","content":"First"},{"type":"ai","content":"Second"}]"#;
+
+        let outcome = client.handle_sse_event("messages", data, &mut result);
+        assert!(outcome.is_ok());
+        assert!(result.contains("First"));
+        assert!(result.contains("Second"));
+    }
+
+    #[test]
+    fn test_handle_sse_messages_skips_human() {
+        let client =
+            HttpLLMClient::new("http://localhost:8080".to_string(), "test-key".to_string());
+        let mut result = String::new();
+        let data = r#"[{"type":"human","content":"User message"},{"type":"ai","content":"AI response"}]"#;
+
+        let outcome = client.handle_sse_event("messages", data, &mut result);
+        assert!(outcome.is_ok());
+        assert!(!result.contains("User message"));
+        assert!(result.contains("AI response"));
+    }
+
+    #[test]
+    fn test_stream_command_serialization() {
+        let cmd = StreamCommand {
+            resume: "approved".to_string(),
+        };
+        let json = serde_json::to_string(&cmd).unwrap();
+        assert!(json.contains("approved"));
+    }
+
+    #[test]
+    fn test_stream_run_request_serialization() {
+        let request = StreamRunRequest {
+            assistant_id: "supervisor".to_string(),
+            stream_mode: vec!["values".to_string()],
+            input: Some(StreamInput {
+                messages: vec![ChatMessage {
+                    role: "user".to_string(),
+                    content: "Hello".to_string(),
+                }],
+            }),
+            command: None,
+        };
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(json.contains("supervisor"));
+        assert!(json.contains("values"));
+        assert!(json.contains("Hello"));
+        assert!(!json.contains("command")); // command is None, should be skipped
+    }
+
+    #[test]
+    fn test_stream_run_request_with_command() {
+        let request = StreamRunRequest {
+            assistant_id: "supervisor".to_string(),
+            stream_mode: vec!["values".to_string()],
+            input: None,
+            command: Some(StreamCommand {
+                resume: "approved".to_string(),
+            }),
+        };
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(json.contains("approved"));
+        assert!(!json.contains("input")); // input is None, should be skipped
+    }
+
+    #[test]
+    fn test_create_thread_request_serialization() {
+        let request = CreateThreadRequest {
+            metadata: serde_json::json!({"key": "value"}),
+        };
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(json.contains("metadata"));
+        assert!(json.contains("key"));
+    }
+
+    #[test]
+    fn test_create_thread_response_deserialization() {
+        let json = r#"{"thread_id":"abc-123"}"#;
+        let response: CreateThreadResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(response.thread_id, "abc-123");
+    }
+
+    #[test]
+    fn test_http_client_debug_redacts_api_key() {
+        let client =
+            HttpLLMClient::new("http://localhost:8080".to_string(), "secret-key".to_string());
+        let debug_str = format!("{:?}", client);
+        assert!(debug_str.contains("<redacted>"));
+        assert!(!debug_str.contains("secret-key"));
+    }
+
+    #[tokio::test]
+    async fn test_query_with_history_empty() {
+        let mock = MockLLMClient;
+        let response = mock.query_with_history("list files", &[]).await.unwrap();
+        assert!(response.contains("ls"));
+    }
+
+    #[tokio::test]
+    async fn test_query_with_history_has_commands() {
+        let mock = MockLLMClient;
+        let history = vec!["cd /home".to_string(), "ls -la".to_string()];
+        let response = mock.query_with_history("list files", &history).await.unwrap();
+        assert!(response.contains("ls"));
+    }
 }
