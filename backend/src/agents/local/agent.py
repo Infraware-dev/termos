@@ -1,9 +1,8 @@
 """Local agent configuration and initialization."""
 
 from langchain.agents import create_agent
+
 from agents.local.tools import shell_with_approval
-
-
 from agents.shared.models import model
 
 local_agent = create_agent(

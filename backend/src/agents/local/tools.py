@@ -1,11 +1,14 @@
+"""Tools for local agent shell command execution with human approval."""
+
 from langchain_community.tools import ShellTool
 from langchain_core.tools import tool
 from langgraph.types import interrupt
-from agents.shared.models import model
 
+from agents.shared.models import model
 
 # Create shell tool without asking for input (we'll handle approval via interrupt)
 base_shell_tool = ShellTool()
+
 
 @tool
 def shell_with_approval(commands: str) -> str:
@@ -13,7 +16,6 @@ def shell_with_approval(commands: str) -> str:
 
     Asks for approval before running the command.
     """
-
     # Get detailed explanation of the command before asking for approval
     explanation_response = model.invoke(
         f"Explain in detail what this command does, including all options and arguments:\n\n{commands}"
@@ -35,4 +37,3 @@ def shell_with_approval(commands: str) -> str:
         return result
     else:
         return "Command execution cancelled by user."
-
