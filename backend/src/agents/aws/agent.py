@@ -2,11 +2,12 @@
 
 # Utils
 from langchain.agents import create_agent
+
+from agents.aws.tools import get_ip_aws
 from agents.shared.models import model
 
 # Tools
 from agents.shared.tools.shell_tool import shell_with_approval as shell_tool
-from agents.aws.tools import get_ip_aws
 
 aws_agent = create_agent(
     model=model,
