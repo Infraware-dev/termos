@@ -1,13 +1,15 @@
 """Local agent configuration and initialization."""
 
+# Utils
 from langchain.agents import create_agent
-
-from agents.local.tools import shell_with_approval
 from agents.shared.models import model
+
+# Tools
+from agents.shared.tools.shell_tool import shell_with_approval as shell_tool
 
 local_agent = create_agent(
     model=model,
-    tools=[shell_with_approval],
+    tools=[shell_tool],
     system_prompt=(
         "You are a bash shell assistan agent.\n\n"
         "INSTRUCTIONS:\n"
