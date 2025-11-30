@@ -213,4 +213,108 @@ mod tests {
         let path_str = path.to_string_lossy().to_lowercase();
         assert!(path_str.contains("logs"));
     }
+
+    #[test]
+    #[serial]
+    fn test_log_config_custom_path() {
+        let custom_path = "/tmp/custom-log-path";
+        std::env::set_var("LOG_PATH", custom_path);
+
+        let config = LogConfig::from_env();
+        assert!(config.custom_path.is_some());
+        assert_eq!(config.custom_path.unwrap(), PathBuf::from(custom_path));
+
+        std::env::remove_var("LOG_PATH");
+    }
+
+    #[test]
+    #[serial]
+    fn test_log_config_empty_custom_path() {
+        std::env::set_var("LOG_PATH", "   ");
+
+        let config = LogConfig::from_env();
+        // Empty/whitespace path should be treated as None
+        assert!(config.custom_path.is_none());
+
+        std::env::remove_var("LOG_PATH");
+    }
+
+    #[test]
+    #[serial]
+    fn test_log_path_with_custom_path() {
+        let custom_path = "/tmp/my-logs";
+        std::env::set_var("LOG_PATH", custom_path);
+
+        let config = LogConfig::from_env();
+        let path = config.log_path().expect("Failed to get log path");
+
+        assert_eq!(path, PathBuf::from(custom_path));
+
+        std::env::remove_var("LOG_PATH");
+    }
+
+    #[test]
+    #[serial]
+    fn test_log_level_variants() {
+        // Test trace level
+        std::env::set_var("LOG_LEVEL", "trace");
+        let config = LogConfig::from_env();
+        assert_eq!(config.log_level, LevelFilter::Trace);
+
+        // Test warn level
+        std::env::set_var("LOG_LEVEL", "warn");
+        let config = LogConfig::from_env();
+        assert_eq!(config.log_level, LevelFilter::Warn);
+
+        // Test error level
+        std::env::set_var("LOG_LEVEL", "error");
+        let config = LogConfig::from_env();
+        assert_eq!(config.log_level, LevelFilter::Error);
+
+        // Test invalid level falls back to default
+        std::env::set_var("LOG_LEVEL", "invalid");
+        let config = LogConfig::from_env();
+        assert_eq!(config.log_level, LevelFilter::Info);
+
+        std::env::remove_var("LOG_LEVEL");
+    }
+
+    #[test]
+    #[serial]
+    fn test_log_config_invalid_numbers() {
+        // Invalid max_size_mb should fall back to default
+        std::env::set_var("LOG_MAX_SIZE_MB", "not_a_number");
+        let config = LogConfig::from_env();
+        assert_eq!(config.max_size_mb, 10);
+
+        // Invalid max_files should fall back to default
+        std::env::set_var("LOG_MAX_FILES", "invalid");
+        let config = LogConfig::from_env();
+        assert_eq!(config.max_files, 5);
+
+        std::env::remove_var("LOG_MAX_SIZE_MB");
+        std::env::remove_var("LOG_MAX_FILES");
+    }
+
+    #[test]
+    #[serial]
+    fn test_max_size_bytes_calculation() {
+        std::env::remove_var("LOG_MAX_SIZE_MB");
+
+        // Test with default (10MB)
+        let config = LogConfig::from_env();
+        assert_eq!(config.max_size_bytes(), 10 * 1024 * 1024);
+
+        // Test with 1MB
+        std::env::set_var("LOG_MAX_SIZE_MB", "1");
+        let config = LogConfig::from_env();
+        assert_eq!(config.max_size_bytes(), 1024 * 1024);
+
+        // Test with 100MB
+        std::env::set_var("LOG_MAX_SIZE_MB", "100");
+        let config = LogConfig::from_env();
+        assert_eq!(config.max_size_bytes(), 100 * 1024 * 1024);
+
+        std::env::remove_var("LOG_MAX_SIZE_MB");
+    }
 }

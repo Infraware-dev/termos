@@ -396,4 +396,162 @@ mod tests {
         // Should have multiple lines of output
         assert!(state.output.lines().len() >= 3);
     }
+
+    #[test]
+    fn test_handle_query_result_complete() {
+        let llm_client = Arc::new(MockLLMClient::new());
+        let renderer = ResponseRenderer::new();
+        let orchestrator = NaturalLanguageOrchestrator::new(llm_client, renderer);
+
+        let mut state = TerminalState::new();
+        state.add_output("Querying AI assistant...".to_string()); // Simulate waiting msg
+
+        let result = LLMQueryResult::Complete("Test response from LLM".to_string());
+        orchestrator.handle_query_result(result, &mut state);
+
+        // Waiting message should be removed
+        assert!(!state
+            .output
+            .lines()
+            .iter()
+            .any(|line| line.contains("Querying AI assistant")));
+
+        // Response should be in output
+        assert!(state
+            .output
+            .lines()
+            .iter()
+            .any(|line| line.contains("Test response from LLM")));
+    }
+
+    #[test]
+    fn test_handle_query_result_command_approval() {
+        let llm_client = Arc::new(MockLLMClient::new());
+        let renderer = ResponseRenderer::new();
+        let orchestrator = NaturalLanguageOrchestrator::new(llm_client, renderer);
+
+        let mut state = TerminalState::new();
+        state.add_output("Querying AI assistant...".to_string());
+
+        let result = LLMQueryResult::CommandApproval {
+            command: "rm -rf /tmp/test".to_string(),
+            message: "Delete test files".to_string(),
+        };
+        orchestrator.handle_query_result(result, &mut state);
+
+        // Should show command approval request
+        assert!(state
+            .output
+            .lines()
+            .iter()
+            .any(|line| line.contains("Command approval required")));
+        assert!(state
+            .output
+            .lines()
+            .iter()
+            .any(|line| line.contains("rm -rf /tmp/test")));
+        assert!(state
+            .output
+            .lines()
+            .iter()
+            .any(|line| line.contains("Delete test files")));
+
+        // Mode should change
+        assert_eq!(state.mode, TerminalMode::AwaitingCommandApproval);
+
+        // Pending interaction should be set
+        assert!(matches!(
+            state.pending_interaction,
+            Some(PendingInteraction::CommandApproval { .. })
+        ));
+    }
+
+    #[test]
+    fn test_handle_query_result_question() {
+        let llm_client = Arc::new(MockLLMClient::new());
+        let renderer = ResponseRenderer::new();
+        let orchestrator = NaturalLanguageOrchestrator::new(llm_client, renderer);
+
+        let mut state = TerminalState::new();
+        state.add_output("Querying AI assistant...".to_string());
+
+        let result = LLMQueryResult::Question {
+            question: "Which database would you prefer?".to_string(),
+            options: Some(vec![
+                "PostgreSQL".to_string(),
+                "MySQL".to_string(),
+                "SQLite".to_string(),
+            ]),
+        };
+        orchestrator.handle_query_result(result, &mut state);
+
+        // Should show question
+        assert!(state
+            .output
+            .lines()
+            .iter()
+            .any(|line| line.contains("Agent question")));
+        assert!(state
+            .output
+            .lines()
+            .iter()
+            .any(|line| line.contains("Which database would you prefer")));
+
+        // Should show options
+        assert!(state
+            .output
+            .lines()
+            .iter()
+            .any(|line| line.contains("PostgreSQL")));
+
+        // Mode should change
+        assert_eq!(state.mode, TerminalMode::AwaitingAnswer);
+
+        // Pending interaction should be set
+        assert!(matches!(
+            state.pending_interaction,
+            Some(PendingInteraction::Question { .. })
+        ));
+    }
+
+    #[test]
+    fn test_handle_query_result_question_no_options() {
+        let llm_client = Arc::new(MockLLMClient::new());
+        let renderer = ResponseRenderer::new();
+        let orchestrator = NaturalLanguageOrchestrator::new(llm_client, renderer);
+
+        let mut state = TerminalState::new();
+        state.add_output("Querying AI assistant...".to_string());
+
+        let result = LLMQueryResult::Question {
+            question: "What is your project name?".to_string(),
+            options: None,
+        };
+        orchestrator.handle_query_result(result, &mut state);
+
+        // Should show question
+        assert!(state
+            .output
+            .lines()
+            .iter()
+            .any(|line| line.contains("What is your project name")));
+
+        // Mode should change
+        assert_eq!(state.mode, TerminalMode::AwaitingAnswer);
+    }
+
+    #[test]
+    fn test_set_llm_client() {
+        let llm_client1 = Arc::new(MockLLMClient::new());
+        let llm_client2 = Arc::new(MockLLMClient::new());
+        let renderer = ResponseRenderer::new();
+        let mut orchestrator = NaturalLanguageOrchestrator::new(llm_client1, renderer);
+
+        // Should be able to update the LLM client
+        orchestrator.set_llm_client(llm_client2);
+
+        // Just verify it doesn't panic
+        let debug_str = format!("{orchestrator:?}");
+        assert!(debug_str.contains("NaturalLanguageOrchestrator"));
+    }
 }

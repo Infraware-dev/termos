@@ -1,9 +1,3 @@
-mod auth;
-mod executor;
-mod input;
-mod llm;
-mod logging;
-mod orchestrators;
 /// Infraware Terminal - Hybrid Command Interpreter with AI Assistance
 ///
 /// This is a TUI-based terminal that accepts user input and intelligently
@@ -12,8 +6,7 @@ mod orchestrators;
 /// 2. LLM backend for natural language queries
 ///
 /// Target use case: DevOps operations in cloud environments (AWS/Azure) with AI assistance
-mod terminal;
-mod utils;
+use infraware_terminal::{auth, input, llm, logging, orchestrators, terminal, utils};
 
 use anyhow::Result;
 use std::time::Duration;
