@@ -339,46 +339,38 @@ fn test_language_agnostic_classification() {
 fn test_classify_single_word_typo() {
     let classifier = InputClassifier::new();
 
-    // Test "doker" → should be detected as CommandTypo and suggest "docker"
+    // With typo detection disabled (max_distance=0), typos fall through to NaturalLanguage
+    // Test "doker" → should be classified as NaturalLanguage
     match classifier.classify("doker").unwrap() {
-        InputType::CommandTypo {
-            input,
-            suggestion,
-            distance,
-        } => {
-            assert_eq!(input, "doker", "Input should be 'doker'");
-            assert_eq!(suggestion, "docker", "Should suggest 'docker'");
-            assert_eq!(distance, 1, "Levenshtein distance should be 1");
+        InputType::NaturalLanguage(text) => {
+            assert_eq!(text, "doker", "Input should be 'doker'");
         }
-        other => panic!("Expected CommandTypo for 'doker', got: {:?}", other),
+        other => panic!(
+            "Expected NaturalLanguage for 'doker' (typo detection disabled), got: {:?}",
+            other
+        ),
     }
 
-    // Test "dokcer" → should also be detected as CommandTypo
+    // Test "dokcer" → should also be NaturalLanguage
     match classifier.classify("dokcer").unwrap() {
-        InputType::CommandTypo {
-            input,
-            suggestion,
-            distance,
-        } => {
-            assert_eq!(input, "dokcer");
-            assert_eq!(suggestion, "docker");
-            assert_eq!(distance, 2);
+        InputType::NaturalLanguage(text) => {
+            assert_eq!(text, "dokcer");
         }
-        other => panic!("Expected CommandTypo for 'dokcer', got: {:?}", other),
+        other => panic!(
+            "Expected NaturalLanguage for 'dokcer' (typo detection disabled), got: {:?}",
+            other
+        ),
     }
 
-    // Test "grpe" → should suggest "grep"
+    // Test "grpe" → should be NaturalLanguage
     match classifier.classify("grpe").unwrap() {
-        InputType::CommandTypo {
-            input,
-            suggestion,
-            distance,
-        } => {
-            assert_eq!(input, "grpe");
-            assert_eq!(suggestion, "grep");
-            assert!(distance <= 2);
+        InputType::NaturalLanguage(text) => {
+            assert_eq!(text, "grpe");
         }
-        other => panic!("Expected CommandTypo for 'grpe', got: {:?}", other),
+        other => panic!(
+            "Expected NaturalLanguage for 'grpe' (typo detection disabled), got: {:?}",
+            other
+        ),
     }
 }
 
@@ -386,48 +378,36 @@ fn test_classify_single_word_typo() {
 fn test_classify_multi_word_typo() {
     let classifier = InputClassifier::new();
 
-    // Test "doker ps" → 2 words, should be detected as typo
+    // With typo detection disabled (max_distance=0), typos fall through to NaturalLanguage
+    // Test "doker ps" → 2 words, should be NaturalLanguage
     match classifier.classify("doker ps").unwrap() {
-        InputType::CommandTypo {
-            input,
-            suggestion,
-            distance,
-        } => {
-            assert_eq!(input, "doker ps");
-            assert_eq!(suggestion, "docker");
-            assert_eq!(distance, 1);
-        }
-        other => panic!("Expected CommandTypo for 'doker ps', got: {:?}", other),
-    }
-
-    // Test "doker ps get" → 3 words, should ALSO be detected as typo
-    // This is the critical fix - previously this was classified as NaturalLanguage
-    match classifier.classify("doker ps get").unwrap() {
-        InputType::CommandTypo {
-            input,
-            suggestion,
-            distance,
-        } => {
-            assert_eq!(input, "doker ps get");
-            assert_eq!(suggestion, "docker");
-            assert_eq!(distance, 1);
-        }
-        other => panic!("Expected CommandTypo for 'doker ps get', got: {:?}", other),
-    }
-
-    // Test "kubeclt create deployment" → 3 words, should be detected
-    match classifier.classify("kubeclt create deployment").unwrap() {
-        InputType::CommandTypo {
-            input,
-            suggestion,
-            distance,
-        } => {
-            assert_eq!(input, "kubeclt create deployment");
-            assert_eq!(suggestion, "kubectl");
-            assert!(distance <= 2);
+        InputType::NaturalLanguage(text) => {
+            assert_eq!(text, "doker ps");
         }
         other => panic!(
-            "Expected CommandTypo for 'kubeclt create deployment', got: {:?}",
+            "Expected NaturalLanguage for 'doker ps' (typo detection disabled), got: {:?}",
+            other
+        ),
+    }
+
+    // Test "doker ps get" → 3 words, should be NaturalLanguage
+    match classifier.classify("doker ps get").unwrap() {
+        InputType::NaturalLanguage(text) => {
+            assert_eq!(text, "doker ps get");
+        }
+        other => panic!(
+            "Expected NaturalLanguage for 'doker ps get' (typo detection disabled), got: {:?}",
+            other
+        ),
+    }
+
+    // Test "kubeclt create deployment" → 3 words, should be NaturalLanguage
+    match classifier.classify("kubeclt create deployment").unwrap() {
+        InputType::NaturalLanguage(text) => {
+            assert_eq!(text, "kubeclt create deployment");
+        }
+        other => panic!(
+            "Expected NaturalLanguage for 'kubeclt create deployment' (typo detection disabled), got: {:?}",
             other
         ),
     }
@@ -580,10 +560,13 @@ fn test_11_handler_chain_order() {
         // May also be caught by typo handler depending on PATH
     }
 
-    // 9. TypoDetectionHandler
+    // 9. TypoDetectionHandler (disabled with max_distance=0, so typos become NaturalLanguage)
     match classifier.classify("doker").unwrap() {
-        InputType::CommandTypo { suggestion, .. } => assert_eq!(suggestion, "docker"),
-        other => panic!("Expected CommandTypo for 'doker', got: {:?}", other),
+        InputType::NaturalLanguage(text) => assert_eq!(text, "doker"),
+        other => panic!(
+            "Expected NaturalLanguage for 'doker' (typo detection disabled), got: {:?}",
+            other
+        ),
     }
 
     // 10. NaturalLanguageHandler - multi-word without flags

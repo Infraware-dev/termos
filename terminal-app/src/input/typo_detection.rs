@@ -43,9 +43,9 @@ impl TypoDetectionHandler {
         }
     }
 
-    /// Create handler with default DevOps commands and max_distance=2
+    /// Create handler with default DevOps commands and max_distance=0 (disabled)
     pub fn with_defaults() -> Self {
-        Self::new(crate::input::known_commands::default_devops_commands(), 2)
+        Self::new(crate::input::known_commands::default_devops_commands(), 0)
     }
 
     /// Find the closest matching command within max_distance
@@ -190,9 +190,14 @@ mod tests {
     use super::*;
     use crate::input::handler::InputHandler;
 
+    /// Create a handler with typo detection enabled (max_distance=2) for testing
+    fn handler_with_typo_detection() -> TypoDetectionHandler {
+        TypoDetectionHandler::new(crate::input::known_commands::default_devops_commands(), 2)
+    }
+
     #[test]
     fn test_find_closest_match() {
-        let handler = TypoDetectionHandler::with_defaults();
+        let handler = handler_with_typo_detection();
 
         // Typos with clear expected matches
         let result = handler.find_closest_match("dokcer");
@@ -222,7 +227,7 @@ mod tests {
 
     #[test]
     fn test_common_typos() {
-        let handler = TypoDetectionHandler::with_defaults();
+        let handler = handler_with_typo_detection();
 
         // Test actual typos (not exact matches)
         let typos = vec![
@@ -247,7 +252,7 @@ mod tests {
 
     #[test]
     fn test_handle_typo() {
-        let handler = TypoDetectionHandler::with_defaults();
+        let handler = handler_with_typo_detection();
 
         // Single word typo should be detected
         let result = handler.handle("dokcer");
@@ -270,7 +275,7 @@ mod tests {
 
     #[test]
     fn test_handle_correct_command() {
-        let handler = TypoDetectionHandler::with_defaults();
+        let handler = handler_with_typo_detection();
 
         // Correct command should pass through (return None)
         let result = handler.handle("docker ps");
@@ -279,7 +284,7 @@ mod tests {
 
     #[test]
     fn test_handle_natural_language() {
-        let handler = TypoDetectionHandler::with_defaults();
+        let handler = handler_with_typo_detection();
 
         // Natural language should pass through
         let result = handler.handle("how do I use docker?");
@@ -291,7 +296,7 @@ mod tests {
 
     #[test]
     fn test_looks_like_command() {
-        let handler = TypoDetectionHandler::with_defaults();
+        let handler = handler_with_typo_detection();
 
         // Single word → might be command typo
         assert!(handler.looks_like_command("ls"));
@@ -346,7 +351,7 @@ mod tests {
 
     #[test]
     fn test_case_sensitivity() {
-        let handler = TypoDetectionHandler::with_defaults();
+        let handler = handler_with_typo_detection();
 
         // Commands are case-sensitive
         let result = handler.find_closest_match("Docker");
@@ -356,7 +361,7 @@ mod tests {
 
     #[test]
     fn test_empty_input() {
-        let handler = TypoDetectionHandler::with_defaults();
+        let handler = handler_with_typo_detection();
 
         let result = handler.handle("");
         assert_eq!(result, None);
@@ -364,7 +369,7 @@ mod tests {
 
     #[test]
     fn test_single_word_typo() {
-        let handler = TypoDetectionHandler::with_defaults();
+        let handler = handler_with_typo_detection();
 
         let result = handler.handle("gti");
         assert!(matches!(result, Some(InputType::CommandTypo { .. })));
@@ -385,7 +390,7 @@ mod tests {
 
     #[test]
     fn test_with_flags() {
-        let handler = TypoDetectionHandler::with_defaults();
+        let handler = handler_with_typo_detection();
 
         // Typo with flags should be detected
         let result = handler.handle("kubeclt --help");
@@ -407,5 +412,18 @@ mod tests {
         if let Some(InputType::CommandTypo { suggestion, .. }) = result {
             assert_eq!(suggestion, "kubectl");
         }
+    }
+
+    #[test]
+    fn test_defaults_disabled() {
+        // with_defaults() should have max_distance=0, effectively disabling typo detection
+        let handler = TypoDetectionHandler::with_defaults();
+
+        // Typos should NOT be detected when disabled
+        let result = handler.handle("dokcer");
+        assert_eq!(result, None, "Typo detection should be disabled by default");
+
+        let result = handler.handle("kubeclt get pods");
+        assert_eq!(result, None, "Typo detection should be disabled by default");
     }
 }
