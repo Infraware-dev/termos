@@ -1,12 +1,13 @@
 """AWS agent configuration and initialization."""
 
+# Utils
 from langchain.agents import create_agent
-from langchain_community.tools import ShellTool
 
 from agents.aws.tools import get_ip_aws
 from agents.shared.models import model
 
-shell_tool = ShellTool(ask_human_input=True)
+# Tools
+from agents.shared.tools.shell_tool import shell_with_approval as shell_tool
 
 aws_agent = create_agent(
     model=model,
