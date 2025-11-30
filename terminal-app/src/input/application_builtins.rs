@@ -10,6 +10,8 @@
 ///
 /// These are commands implemented directly in the terminal application:
 /// - `clear`: Clear the terminal output buffer
+/// - `exit`: Exit the terminal application
+/// - `quit`: Exit the terminal application (alias for exit)
 /// - `reload-aliases`: Reload alias definitions from system and user config files
 /// - `reload-commands`: Clear the command cache (useful after installing new commands)
 /// - `auth-status`: Check backend authentication status
@@ -19,12 +21,20 @@
 /// use infraware_terminal::input::application_builtins::APPLICATION_BUILTINS;
 ///
 /// assert!(APPLICATION_BUILTINS.contains(&"clear"));
+/// assert!(APPLICATION_BUILTINS.contains(&"exit"));
+/// assert!(APPLICATION_BUILTINS.contains(&"quit"));
 /// assert!(APPLICATION_BUILTINS.contains(&"reload-aliases"));
 /// assert!(APPLICATION_BUILTINS.contains(&"reload-commands"));
 /// assert!(APPLICATION_BUILTINS.contains(&"auth-status"));
 /// ```
-pub const APPLICATION_BUILTINS: &[&str] =
-    &["clear", "reload-aliases", "reload-commands", "auth-status"];
+pub const APPLICATION_BUILTINS: &[&str] = &[
+    "clear",
+    "exit",
+    "quit",
+    "reload-aliases",
+    "reload-commands",
+    "auth-status",
+];
 
 /// Check if a command is an application builtin
 ///
@@ -85,11 +95,23 @@ mod tests {
     }
 
     #[test]
+    fn test_exit_is_builtin() {
+        assert!(is_application_builtin("exit"));
+    }
+
+    #[test]
+    fn test_quit_is_builtin() {
+        assert!(is_application_builtin("quit"));
+    }
+
+    #[test]
     fn test_builtin_list_count() {
-        // Verify we have exactly 4 application builtins
-        assert_eq!(APPLICATION_BUILTINS.len(), 4);
+        // Verify we have exactly 6 application builtins
+        assert_eq!(APPLICATION_BUILTINS.len(), 6);
         // Verify they are the expected ones
         assert!(APPLICATION_BUILTINS.contains(&"clear"));
+        assert!(APPLICATION_BUILTINS.contains(&"exit"));
+        assert!(APPLICATION_BUILTINS.contains(&"quit"));
         assert!(APPLICATION_BUILTINS.contains(&"reload-aliases"));
         assert!(APPLICATION_BUILTINS.contains(&"reload-commands"));
         assert!(APPLICATION_BUILTINS.contains(&"auth-status"));

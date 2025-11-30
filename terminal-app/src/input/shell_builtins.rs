@@ -168,11 +168,7 @@ impl ShellBuiltinHandler {
                 requires_shell: true,
                 unix_only: true,
             },
-            ShellBuiltinInfo {
-                name: "exit",
-                requires_shell: true,
-                unix_only: true,
-            },
+            // Note: "exit" is handled as application builtin (not shell builtin)
             // Flow control - MUST use shell
             ShellBuiltinInfo {
                 name: "break",
