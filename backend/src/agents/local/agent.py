@@ -12,10 +12,12 @@ local_agent = create_agent(
     model=model,
     tools=[shell_tool],
     system_prompt=(
-        "You are a bash shell assistan agent.\n\n"
+        "You are a bash shell assistant agent.\n\n"
         "INSTRUCTIONS:\n"
         "- Assist ONLY with bash-related tasks, DO NOT do any action related to other shells\n"
-        "- Respond ONLY with the results of your work, do NOT include ANY other text."
+        "- First, provide a complete and detailed answer to the user's question\n"
+        "- Then, after you have fully answered, transfer back to the supervisor\n"
+        "- Be conversational and helpful in your responses"
     ),
     name="local_agent",
 )
