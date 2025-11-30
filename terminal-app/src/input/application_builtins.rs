@@ -27,8 +27,14 @@
 /// assert!(APPLICATION_BUILTINS.contains(&"reload-commands"));
 /// assert!(APPLICATION_BUILTINS.contains(&"auth-status"));
 /// ```
-pub const APPLICATION_BUILTINS: &[&str] =
-    &["clear", "exit", "quit", "reload-aliases", "reload-commands", "auth-status"];
+pub const APPLICATION_BUILTINS: &[&str] = &[
+    "clear",
+    "exit",
+    "quit",
+    "reload-aliases",
+    "reload-commands",
+    "auth-status",
+];
 
 /// Check if a command is an application builtin
 ///
