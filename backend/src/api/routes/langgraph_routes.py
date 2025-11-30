@@ -2,6 +2,7 @@
 
 import httpx
 from fastapi import APIRouter, HTTPException, Request, Response
+from fastapi.responses import StreamingResponse
 
 from ..config import config
 
@@ -83,7 +84,100 @@ async def proxy_request(request: Request, path: str, method: str = "GET") -> Res
         raise HTTPException(status_code=500, detail=f"Proxy error: {str(e)}")
 
 
-# Thread management endpoints
+async def proxy_streaming_request(request: Request, path: str) -> StreamingResponse:
+    """Proxy a streaming request to the LanGraph server.
+
+    Args:
+        request: The incoming FastAPI request
+        path: The path to proxy to
+
+    Returns:
+        StreamingResponse: The proxied streaming response
+
+    Raises:
+        HTTPException: If the proxy request fails
+    """
+    target_url = f"{LANGGRAPH_SERVER_URL}{path}"
+    query_params = dict(request.query_params)
+    body = await request.body()
+    headers = dict(request.headers)
+    headers.pop("host", None)
+
+    try:
+        client = httpx.AsyncClient(timeout=300.0)
+
+        async def generate():
+            try:
+                async with client.stream(
+                    "POST",
+                    target_url,
+                    params=query_params,
+                    content=body,
+                    headers=headers,
+                ) as response:
+                    async for chunk in response.aiter_bytes():
+                        yield chunk
+            finally:
+                await client.aclose()
+
+        return StreamingResponse(
+            generate(),
+            media_type="text/event-stream",
+        )
+
+    except httpx.ConnectError:
+        raise HTTPException(
+            status_code=503,
+            detail="LanGraph server is not running. Please start it with 'langgraph dev'",
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Streaming proxy error: {str(e)}")
+
+
+# Proxy endpoints for LanGraph API
+@router.post("/runs/stream")
+async def stream_run(request: Request):
+    """Stream a run from the LanGraph supervisor.
+
+    Args:
+        request: The incoming request
+
+    Returns:
+        StreamingResponse: Streamed response from LanGraph
+    """
+    await check_auth()
+    return await proxy_streaming_request(request, "/runs/stream")
+
+
+@router.post("/runs/invoke")
+async def invoke_run(request: Request):
+    """Invoke a synchronous run from the LanGraph supervisor.
+
+    Args:
+        request: The incoming request
+
+    Returns:
+        Response: Response from LanGraph
+    """
+    await check_auth()
+    return await proxy_request(request, "/runs/invoke", method="POST")
+
+
+@router.get("/runs/{run_id}")
+async def get_run(request: Request, run_id: str):
+    """Get the status of a specific run.
+
+    Args:
+        request: The incoming request
+        run_id: The run ID
+
+    Returns:
+        Response: Run status from LanGraph
+    """
+    await check_auth()
+    return await proxy_request(request, f"/runs/{run_id}", method="GET")
+
+
 @router.post("/threads")
 async def create_thread(request: Request):
     """Create a new conversation thread.
@@ -126,3 +220,19 @@ async def get_thread_history(request: Request, thread_id: str):
     """
     await check_auth()
     return await proxy_request(request, f"/threads/{thread_id}/history", method="GET")
+
+
+# Catch-all proxy for other LanGraph endpoints
+@router.api_route("/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
+async def proxy_other(request: Request, path: str):
+    """Proxy all other requests to LanGraph server.
+
+    Args:
+        request: The incoming request
+        path: The path to proxy
+
+    Returns:
+        Response: Response from LanGraph
+    """
+    await check_auth()
+    return await proxy_request(request, f"/{path}", method=request.method)
