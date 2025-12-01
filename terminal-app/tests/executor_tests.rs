@@ -210,3 +210,35 @@ async fn test_execute_exit_codes() {
     assert_eq!(result.exit_code, 42);
     assert!(!result.is_success());
 }
+
+// =============================================================================
+// Infinite Output Command Blocking Tests
+// =============================================================================
+
+#[tokio::test]
+async fn test_yes_command_blocked() {
+    let output = CommandExecutor::execute("yes", &[], None).await.unwrap();
+    assert!(!output.is_success());
+    assert_eq!(output.exit_code, 1);
+    assert!(
+        output.stderr.contains("blocked")
+            || output.stderr.contains("not supported")
+            || output.stderr.contains("Interactive")
+    );
+}
+
+#[tokio::test]
+async fn test_yes_command_error_message_helpful() {
+    let output = CommandExecutor::execute("yes", &[], None).await.unwrap();
+    // Verify the error message provides some guidance
+    assert!(
+        !output.stderr.is_empty(),
+        "Error message should not be empty"
+    );
+    assert!(
+        output.stderr.contains("Suggestions")
+            || output.stderr.contains("Alternative")
+            || output.stderr.contains("not supported"),
+        "Error message should provide helpful suggestions"
+    );
+}

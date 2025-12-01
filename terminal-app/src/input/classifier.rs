@@ -5,9 +5,9 @@
 use anyhow::Result;
 
 use super::handler::{
-    ApplicationBuiltinHandler, ClassifierChain, CommandSyntaxHandler, DefaultHandler,
-    EmptyInputHandler, KnownCommandHandler, NaturalLanguageHandler, PathCommandHandler,
-    PathDiscoveryHandler,
+    ApplicationBuiltinHandler, ClassifierChain, ClassifierContext, CommandSyntaxHandler,
+    DefaultHandler, EmptyInputHandler, HandlerPosition, KnownCommandHandler,
+    NaturalLanguageHandler, PathCommandHandler, PathDiscoveryHandler,
 };
 use super::history_expansion::HistoryExpansionHandler;
 use super::shell_builtins::ShellBuiltinHandler;
@@ -59,6 +59,7 @@ pub enum InputType {
 /// 11. DefaultHandler - fallback to natural language
 pub struct InputClassifier {
     chain: ClassifierChain,
+    context: ClassifierContext,
     history: Option<Arc<RwLock<Vec<String>>>>,
 }
 
@@ -66,6 +67,7 @@ impl std::fmt::Debug for InputClassifier {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("InputClassifier")
             .field("chain", &"<ClassifierChain>")
+            .field("context", &self.context)
             .finish()
     }
 }
@@ -86,32 +88,67 @@ impl InputClassifier {
     /// - Natural language (precompiled patterns)
     /// - Fallback (catch-all)
     pub fn new() -> Self {
+        // Create context first to access language patterns
+        let context = ClassifierContext::new();
+
         let chain = ClassifierChain::new()
             // 1. Empty input (fastest check)
-            .add_handler(Box::new(EmptyInputHandler::new()))
+            .add_handler(HandlerPosition::Empty, Box::new(EmptyInputHandler::new()))
             // 2. History expansion (!!,  !$, !^, !* - must happen before command parsing)
-            .add_handler(Box::new(HistoryExpansionHandler::new()))
+            .add_handler(
+                HandlerPosition::HistoryExpansion,
+                Box::new(HistoryExpansionHandler::new()),
+            )
             // 3. Application builtins (clear, reload-aliases, reload-commands)
-            .add_handler(Box::new(ApplicationBuiltinHandler::new()))
+            .add_handler(
+                HandlerPosition::ApplicationBuiltin,
+                Box::new(ApplicationBuiltinHandler::new()),
+            )
             // 4. Shell builtins (., :, [, [[, source, export, etc. - no PATH verification)
-            .add_handler(Box::new(ShellBuiltinHandler::new()))
+            .add_handler(
+                HandlerPosition::ShellBuiltin,
+                Box::new(ShellBuiltinHandler::new()),
+            )
             // 5. Executable paths (unambiguous: ./script.sh, /usr/bin/cmd)
-            .add_handler(Box::new(PathCommandHandler::new()))
+            .add_handler(
+                HandlerPosition::PathCommand,
+                Box::new(PathCommandHandler::new()),
+            )
             // 6. Known commands with PATH existence check (cached)
-            .add_handler(Box::new(KnownCommandHandler::with_defaults()))
+            .add_handler(
+                HandlerPosition::KnownCommand,
+                Box::new(KnownCommandHandler::with_defaults()),
+            )
             // 7. PATH discovery - auto-detect newly installed commands via `which`
-            .add_handler(Box::new(PathDiscoveryHandler::new()))
+            .add_handler(
+                HandlerPosition::PathDiscovery,
+                Box::new(PathDiscoveryHandler::new()),
+            )
             // 8. Command syntax detection (flags, pipes, redirects)
-            .add_handler(Box::new(CommandSyntaxHandler::new()))
+            .add_handler(
+                HandlerPosition::CommandSyntax,
+                Box::new(CommandSyntaxHandler::new()),
+            )
             // 9. Typo detection (prevents "dokcer ps" → LLM)
-            .add_handler(Box::new(TypoDetectionHandler::with_defaults()))
+            .add_handler(
+                HandlerPosition::TypoDetection,
+                Box::new(TypoDetectionHandler::from_config(
+                    crate::input::known_commands::default_devops_commands(),
+                    0, // max_distance=0 (disabled by default for M1)
+                    &context.language_patterns,
+                )),
+            )
             // 10. Natural language patterns (precompiled regex, multilingual)
-            .add_handler(Box::new(NaturalLanguageHandler::new()))
+            .add_handler(
+                HandlerPosition::NaturalLanguage,
+                Box::new(NaturalLanguageHandler::new()),
+            )
             // 11. Fallback to natural language
-            .add_handler(Box::new(DefaultHandler::new()));
+            .add_handler(HandlerPosition::Default, Box::new(DefaultHandler::new()));
 
         Self {
             chain,
+            context,
             history: None,
         }
     }
@@ -122,19 +159,48 @@ impl InputClassifier {
     pub fn with_history(mut self, history: Arc<RwLock<Vec<String>>>) -> Self {
         // Rebuild the chain with history-aware HistoryExpansionHandler
         self.chain = ClassifierChain::new()
-            .add_handler(Box::new(EmptyInputHandler::new()))
-            .add_handler(Box::new(HistoryExpansionHandler::with_history(
-                history.clone(),
-            )))
-            .add_handler(Box::new(ApplicationBuiltinHandler::new()))
-            .add_handler(Box::new(ShellBuiltinHandler::new()))
-            .add_handler(Box::new(PathCommandHandler::new()))
-            .add_handler(Box::new(KnownCommandHandler::with_defaults()))
-            .add_handler(Box::new(PathDiscoveryHandler::new()))
-            .add_handler(Box::new(CommandSyntaxHandler::new()))
-            .add_handler(Box::new(TypoDetectionHandler::with_defaults()))
-            .add_handler(Box::new(NaturalLanguageHandler::new()))
-            .add_handler(Box::new(DefaultHandler::new()));
+            .add_handler(HandlerPosition::Empty, Box::new(EmptyInputHandler::new()))
+            .add_handler(
+                HandlerPosition::HistoryExpansion,
+                Box::new(HistoryExpansionHandler::with_history(history.clone())),
+            )
+            .add_handler(
+                HandlerPosition::ApplicationBuiltin,
+                Box::new(ApplicationBuiltinHandler::new()),
+            )
+            .add_handler(
+                HandlerPosition::ShellBuiltin,
+                Box::new(ShellBuiltinHandler::new()),
+            )
+            .add_handler(
+                HandlerPosition::PathCommand,
+                Box::new(PathCommandHandler::new()),
+            )
+            .add_handler(
+                HandlerPosition::KnownCommand,
+                Box::new(KnownCommandHandler::with_defaults()),
+            )
+            .add_handler(
+                HandlerPosition::PathDiscovery,
+                Box::new(PathDiscoveryHandler::new()),
+            )
+            .add_handler(
+                HandlerPosition::CommandSyntax,
+                Box::new(CommandSyntaxHandler::new()),
+            )
+            .add_handler(
+                HandlerPosition::TypoDetection,
+                Box::new(TypoDetectionHandler::from_config(
+                    crate::input::known_commands::default_devops_commands(),
+                    0, // max_distance=0 (disabled by default for M1)
+                    &self.context.language_patterns,
+                )),
+            )
+            .add_handler(
+                HandlerPosition::NaturalLanguage,
+                Box::new(NaturalLanguageHandler::new()),
+            )
+            .add_handler(HandlerPosition::Default, Box::new(DefaultHandler::new()));
 
         self.history = Some(history);
         self
@@ -184,7 +250,7 @@ impl InputClassifier {
     /// Internal classification method (without alias expansion)
     fn classify_internal(&self, input: &str) -> Result<InputType> {
         // Process through the chain of handlers
-        match self.chain.process(input) {
+        match self.chain.process(input, &self.context) {
             Some(result) => Ok(result),
             None => {
                 // This should never happen with DefaultHandler at the end,

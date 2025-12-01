@@ -18,16 +18,19 @@ use strsim::levenshtein;
 /// # Example
 /// ```
 /// use infraware_terminal::input::typo_detection::TypoDetectionHandler;
-/// use infraware_terminal::input::handler::InputHandler;
+/// use infraware_terminal::input::handler::{InputHandler, ClassifierContext};
 ///
 /// let handler = TypoDetectionHandler::with_defaults();
-/// let result = handler.handle("dokcer ps");
+/// let ctx = ClassifierContext::new();
+/// let result = handler.handle("dokcer ps", &ctx);
 /// // Returns CommandTypo with suggestion "docker"
 /// ```
 #[derive(Debug)]
 pub struct TypoDetectionHandler {
     known_commands: Vec<String>,
     max_distance: usize,
+    /// Single-word natural language indicators (from language config)
+    nl_single_words: Vec<String>,
 }
 
 impl TypoDetectionHandler {
@@ -36,16 +39,53 @@ impl TypoDetectionHandler {
     /// # Arguments
     /// * `known_commands` - List of valid commands to check against
     /// * `max_distance` - Maximum Levenshtein distance to consider (default: 2)
-    pub const fn new(known_commands: Vec<String>, max_distance: usize) -> Self {
+    /// * `nl_single_words` - Natural language single words to filter out
+    pub fn new(
+        known_commands: Vec<String>,
+        max_distance: usize,
+        nl_single_words: Vec<String>,
+    ) -> Self {
         Self {
             known_commands,
             max_distance,
+            nl_single_words,
         }
     }
 
     /// Create handler with default DevOps commands and max_distance=0 (disabled)
     pub fn with_defaults() -> Self {
-        Self::new(crate::input::known_commands::default_devops_commands(), 0)
+        // Default English NL words (fallback when no config is loaded)
+        let nl_words = vec![
+            "what", "how", "why", "when", "where", "who", "which", "hello", "hi", "hey", "yes",
+            "no", "ok", "thanks", "help",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+
+        Self::new(
+            crate::input::known_commands::default_devops_commands(),
+            0,
+            nl_words,
+        )
+    }
+
+    /// Create handler from language configuration
+    ///
+    /// # Arguments
+    /// * `known_commands` - List of valid commands to check against
+    /// * `max_distance` - Maximum Levenshtein distance to consider
+    /// * `lang_patterns` - Language patterns from configuration
+    pub fn from_config(
+        known_commands: Vec<String>,
+        max_distance: usize,
+        lang_patterns: &crate::config::LanguagePatterns,
+    ) -> Self {
+        Self::new(
+            known_commands,
+            max_distance,
+            lang_patterns.single_words.clone(),
+        )
     }
 
     /// Find the closest matching command within max_distance
@@ -93,22 +133,20 @@ impl TypoDetectionHandler {
     /// - Multi-word (≤3 words) without NL indicators → check if first word is a typo
     ///   (catches "dokcer ps", "doker ps get", "kubeclt create deployment")
     /// - 4+ words without command structure → likely natural language
-    fn looks_like_command(&self, input: &str) -> bool {
+    fn looks_like_command(
+        &self,
+        input: &str,
+        patterns: &crate::input::patterns::CompiledPatterns,
+    ) -> bool {
         let word_count = input.split_whitespace().count();
 
         // Single word → might be a command typo, but filter common NL words
         if word_count == 1 {
-            const NL_SINGLE_WORDS: &[&str] = &[
-                "what", "how", "why", "when", "where", "who", "which", "hello", "hi", "hey", "yes",
-                "no", "ok", "thanks", "help",
-            ];
-
             let lower = input.to_lowercase();
-            return !NL_SINGLE_WORDS.contains(&lower.as_str());
+            return !self.nl_single_words.iter().any(|w| w == &lower);
         }
 
         // Has flags/operators → might be a command typo (e.g., "dokcer -v")
-        let patterns = crate::input::patterns::CompiledPatterns::get();
         if patterns.has_command_syntax(input) || patterns.has_shell_operators(input) {
             return true;
         }
@@ -147,11 +185,15 @@ impl TypoDetectionHandler {
 
 /// Implement InputHandler trait for typo detection
 impl crate::input::handler::InputHandler for TypoDetectionHandler {
-    fn handle(&self, input: &str) -> Option<InputType> {
+    fn handle(
+        &self,
+        input: &str,
+        ctx: &crate::input::handler::ClassifierContext,
+    ) -> Option<InputType> {
         let trimmed = input.trim();
 
         // Skip if doesn't look like a command
-        if !self.looks_like_command(trimmed) {
+        if !self.looks_like_command(trimmed, &ctx.patterns) {
             return None;
         }
 
@@ -188,11 +230,36 @@ impl Default for TypoDetectionHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::input::handler::InputHandler;
+    use crate::input::handler::{ClassifierContext, InputHandler};
 
     /// Create a handler with typo detection enabled (max_distance=2) for testing
     fn handler_with_typo_detection() -> TypoDetectionHandler {
-        TypoDetectionHandler::new(crate::input::known_commands::default_devops_commands(), 2)
+        let nl_words = vec![
+            "what".to_string(),
+            "how".to_string(),
+            "why".to_string(),
+            "when".to_string(),
+            "where".to_string(),
+            "who".to_string(),
+            "which".to_string(),
+            "hello".to_string(),
+            "hi".to_string(),
+            "hey".to_string(),
+            "yes".to_string(),
+            "no".to_string(),
+            "ok".to_string(),
+            "thanks".to_string(),
+            "help".to_string(),
+        ];
+        TypoDetectionHandler::new(
+            crate::input::known_commands::default_devops_commands(),
+            2,
+            nl_words,
+        )
+    }
+
+    fn create_context() -> ClassifierContext {
+        ClassifierContext::new()
     }
 
     #[test]
@@ -221,7 +288,7 @@ mod tests {
 
         // Exact match returns None (distance must be > 0)
         // But "docker" might match "packer" at distance 2, so we test with unique word
-        let handler_single = TypoDetectionHandler::new(vec!["uniquecmd".to_string()], 2);
+        let handler_single = TypoDetectionHandler::new(vec!["uniquecmd".to_string()], 2, vec![]);
         assert_eq!(handler_single.find_closest_match("uniquecmd"), None);
     }
 
@@ -253,9 +320,10 @@ mod tests {
     #[test]
     fn test_handle_typo() {
         let handler = handler_with_typo_detection();
+        let ctx = create_context();
 
         // Single word typo should be detected
-        let result = handler.handle("dokcer");
+        let result = handler.handle("dokcer", &ctx);
         assert!(matches!(result, Some(InputType::CommandTypo { .. })));
 
         if let Some(InputType::CommandTypo {
@@ -269,65 +337,68 @@ mod tests {
         }
 
         // Typo with flags should be detected
-        let result = handler.handle("dokcer --version");
+        let result = handler.handle("dokcer --version", &ctx);
         assert!(matches!(result, Some(InputType::CommandTypo { .. })));
     }
 
     #[test]
     fn test_handle_correct_command() {
         let handler = handler_with_typo_detection();
+        let ctx = create_context();
 
         // Correct command should pass through (return None)
-        let result = handler.handle("docker ps");
+        let result = handler.handle("docker ps", &ctx);
         assert_eq!(result, None);
     }
 
     #[test]
     fn test_handle_natural_language() {
         let handler = handler_with_typo_detection();
+        let ctx = create_context();
 
         // Natural language should pass through
-        let result = handler.handle("how do I use docker?");
+        let result = handler.handle("how do I use docker?", &ctx);
         assert_eq!(result, None);
 
-        let result = handler.handle("show me the logs");
+        let result = handler.handle("show me the logs", &ctx);
         assert_eq!(result, None);
     }
 
     #[test]
     fn test_looks_like_command() {
         let handler = handler_with_typo_detection();
+        let ctx = create_context();
 
         // Single word → might be command typo
-        assert!(handler.looks_like_command("ls"));
-        assert!(handler.looks_like_command("dokcer"));
+        assert!(handler.looks_like_command("ls", &ctx.patterns));
+        assert!(handler.looks_like_command("dokcer", &ctx.patterns));
 
         // Multi-word with flags → might be command typo
-        assert!(handler.looks_like_command("dokcer -v"));
-        assert!(handler.looks_like_command("kubeclt --help"));
+        assert!(handler.looks_like_command("dokcer -v", &ctx.patterns));
+        assert!(handler.looks_like_command("kubeclt --help", &ctx.patterns));
 
         // 2 words: typo + subcommand → detected as typo
-        assert!(handler.looks_like_command("dokcer ps")); // dokcer → docker
-        assert!(handler.looks_like_command("kubeclt get")); // kubeclt → kubectl
+        assert!(handler.looks_like_command("dokcer ps", &ctx.patterns)); // dokcer → docker
+        assert!(handler.looks_like_command("kubeclt get", &ctx.patterns)); // kubeclt → kubectl
 
         // 2 words: no typo match → NOT command-like
-        assert!(!handler.looks_like_command("bonjour monde")); // no close command match
+        assert!(!handler.looks_like_command("bonjour monde", &ctx.patterns)); // no close command match
 
         // 3+ words without flags → NOT command-like (language-agnostic)
-        assert!(!handler.looks_like_command("pippo ciao come stai"));
-        assert!(!handler.looks_like_command("how do I list files"));
+        assert!(!handler.looks_like_command("pippo ciao come stai", &ctx.patterns));
+        assert!(!handler.looks_like_command("how do I list files", &ctx.patterns));
     }
 
     #[test]
     fn test_distance_threshold() {
-        let handler = TypoDetectionHandler::new(vec!["docker".to_string()], 1);
+        let handler = TypoDetectionHandler::new(vec!["docker".to_string()], 1, vec![]);
 
         // Within threshold (distance=1)
         let result = handler.find_closest_match("docer");
         assert!(result.is_some());
 
         // Beyond threshold (distance=2)
-        let handler_strict = TypoDetectionHandler::new(vec!["docker".to_string()], 1);
+        let handler_strict = TypoDetectionHandler::new(vec!["docker".to_string()], 1, vec![]);
         let result = handler_strict.find_closest_match("dokcer");
         // dokcer has distance 2 from docker, should be None with max_distance=1
         assert_eq!(result, None);
@@ -339,6 +410,7 @@ mod tests {
         let handler = TypoDetectionHandler::new(
             vec!["grep".to_string(), "gzip".to_string(), "gunzip".to_string()],
             2,
+            vec![],
         );
 
         // "grpe" is closer to "grep" than others
@@ -362,16 +434,18 @@ mod tests {
     #[test]
     fn test_empty_input() {
         let handler = handler_with_typo_detection();
+        let ctx = create_context();
 
-        let result = handler.handle("");
+        let result = handler.handle("", &ctx);
         assert_eq!(result, None);
     }
 
     #[test]
     fn test_single_word_typo() {
         let handler = handler_with_typo_detection();
+        let ctx = create_context();
 
-        let result = handler.handle("gti");
+        let result = handler.handle("gti", &ctx);
         assert!(matches!(result, Some(InputType::CommandTypo { .. })));
 
         if let Some(InputType::CommandTypo {
@@ -391,9 +465,10 @@ mod tests {
     #[test]
     fn test_with_flags() {
         let handler = handler_with_typo_detection();
+        let ctx = create_context();
 
         // Typo with flags should be detected
-        let result = handler.handle("kubeclt --help");
+        let result = handler.handle("kubeclt --help", &ctx);
         assert!(matches!(result, Some(InputType::CommandTypo { .. })));
 
         if let Some(InputType::CommandTypo { suggestion, .. }) = result {
@@ -402,7 +477,7 @@ mod tests {
 
         // Multi-word without flags SHOULD be detected as typo (changed behavior)
         // This is the fix - previously this was incorrectly returning None
-        let result = handler.handle("kubeclt get pods");
+        let result = handler.handle("kubeclt get pods", &ctx);
         assert!(
             matches!(result, Some(InputType::CommandTypo { .. })),
             "Expected CommandTypo for 'kubeclt get pods', got: {:?}",
@@ -418,12 +493,13 @@ mod tests {
     fn test_defaults_disabled() {
         // with_defaults() should have max_distance=0, effectively disabling typo detection
         let handler = TypoDetectionHandler::with_defaults();
+        let ctx = create_context();
 
         // Typos should NOT be detected when disabled
-        let result = handler.handle("dokcer");
+        let result = handler.handle("dokcer", &ctx);
         assert_eq!(result, None, "Typo detection should be disabled by default");
 
-        let result = handler.handle("kubeclt get pods");
+        let result = handler.handle("kubeclt get pods", &ctx);
         assert_eq!(result, None, "Typo detection should be disabled by default");
     }
 }

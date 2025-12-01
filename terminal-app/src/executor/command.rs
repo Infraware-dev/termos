@@ -87,6 +87,8 @@ const INTERACTIVE_BLOCKED: &[&str] = &[
     "iotop",
     "iftop",
     "nethogs",
+    // Infinite output commands
+    "yes", // Produces infinite "y" output - would freeze terminal
 ];
 
 /// All interactive commands (for `is_interactive_command` check)

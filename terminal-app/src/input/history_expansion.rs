@@ -157,7 +157,7 @@ impl Default for HistoryExpansionHandler {
 }
 
 impl InputHandler for HistoryExpansionHandler {
-    fn handle(&self, input: &str) -> Option<InputType> {
+    fn handle(&self, input: &str, ctx: &super::handler::ClassifierContext) -> Option<InputType> {
         // Skip if no history available
         self.history.as_ref()?;
 
@@ -202,8 +202,7 @@ impl InputHandler for HistoryExpansionHandler {
         match CommandParser::parse(&expanded) {
             Ok((command, args)) => {
                 // Check if expanded command has shell operators
-                let patterns = crate::input::patterns::CompiledPatterns::get();
-                let original_input = if patterns.has_shell_operators(&expanded) {
+                let original_input = if ctx.patterns.has_shell_operators(&expanded) {
                     Some(expanded.clone())
                 } else {
                     None
@@ -223,6 +222,7 @@ impl InputHandler for HistoryExpansionHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::input::handler::ClassifierContext;
 
     fn create_handler_with_history(history: Vec<&str>) -> HistoryExpansionHandler {
         let history_vec: Vec<String> = history.iter().map(|s| (*s).to_string()).collect();
@@ -230,11 +230,16 @@ mod tests {
         HistoryExpansionHandler::with_history(history_arc)
     }
 
+    fn create_context() -> ClassifierContext {
+        ClassifierContext::new()
+    }
+
     #[test]
     fn test_expand_bang_bang() {
         // Simulate real flow: history has previous command + current input
         let handler = create_handler_with_history(vec!["ls -la", "!!"]);
-        let result = handler.handle("!!").unwrap();
+        let ctx = create_context();
+        let result = handler.handle("!!", &ctx).unwrap();
 
         match result {
             InputType::Command { command, args, .. } => {
@@ -249,7 +254,8 @@ mod tests {
     fn test_expand_bang_bang_with_sudo() {
         // Simulate real flow: history has previous command + current input
         let handler = create_handler_with_history(vec!["apt update", "sudo !!"]);
-        let result = handler.handle("sudo !!").unwrap();
+        let ctx = create_context();
+        let result = handler.handle("sudo !!", &ctx).unwrap();
 
         match result {
             InputType::Command { command, args, .. } => {
@@ -264,7 +270,8 @@ mod tests {
     fn test_expand_bang_dollar() {
         // Simulate real flow: history has previous command + current input
         let handler = create_handler_with_history(vec!["cat file.txt", "vim !$"]);
-        let result = handler.handle("vim !$").unwrap();
+        let ctx = create_context();
+        let result = handler.handle("vim !$", &ctx).unwrap();
 
         match result {
             InputType::Command { command, args, .. } => {
@@ -279,7 +286,8 @@ mod tests {
     fn test_expand_bang_caret() {
         // Simulate real flow: history has previous command + current input
         let handler = create_handler_with_history(vec!["cat file1.txt file2.txt", "vim !^"]);
-        let result = handler.handle("vim !^").unwrap();
+        let ctx = create_context();
+        let result = handler.handle("vim !^", &ctx).unwrap();
 
         match result {
             InputType::Command { command, args, .. } => {
@@ -294,7 +302,8 @@ mod tests {
     fn test_expand_bang_star() {
         // Simulate real flow: history has previous command + current input
         let handler = create_handler_with_history(vec!["cat file1.txt file2.txt", "echo !*"]);
-        let result = handler.handle("echo !*").unwrap();
+        let ctx = create_context();
+        let result = handler.handle("echo !*", &ctx).unwrap();
 
         match result {
             InputType::Command { command, args, .. } => {
@@ -308,21 +317,24 @@ mod tests {
     #[test]
     fn test_no_history() {
         let handler = HistoryExpansionHandler::new();
-        let result = handler.handle("!!");
+        let ctx = create_context();
+        let result = handler.handle("!!", &ctx);
         assert!(result.is_none());
     }
 
     #[test]
     fn test_empty_history() {
         let handler = create_handler_with_history(vec![]);
-        let result = handler.handle("!!");
+        let ctx = create_context();
+        let result = handler.handle("!!", &ctx);
         assert!(result.is_none());
     }
 
     #[test]
     fn test_no_expansion_pattern() {
         let handler = create_handler_with_history(vec!["ls -la"]);
-        let result = handler.handle("echo hello");
+        let ctx = create_context();
+        let result = handler.handle("echo hello", &ctx);
         assert!(result.is_none());
     }
 
@@ -330,7 +342,8 @@ mod tests {
     fn test_command_without_args() {
         // Simulate real flow: history has previous command + current input
         let handler = create_handler_with_history(vec!["pwd", "!!"]);
-        let result = handler.handle("!!").unwrap();
+        let ctx = create_context();
+        let result = handler.handle("!!", &ctx).unwrap();
 
         match result {
             InputType::Command { command, args, .. } => {
@@ -345,7 +358,8 @@ mod tests {
     fn test_bang_dollar_no_args() {
         // Bash behavior: !$ expands to command itself when no args
         let handler = create_handler_with_history(vec!["pwd", "echo !$"]);
-        let result = handler.handle("echo !$").unwrap();
+        let ctx = create_context();
+        let result = handler.handle("echo !$", &ctx).unwrap();
 
         match result {
             InputType::Command { command, args, .. } => {
@@ -365,7 +379,8 @@ mod tests {
     fn test_preserve_shell_operators() {
         // Simulate real flow: history has previous command + current input
         let handler = create_handler_with_history(vec!["echo hello", "!! | grep hello"]);
-        let result = handler.handle("!! | grep hello").unwrap();
+        let ctx = create_context();
+        let result = handler.handle("!! | grep hello", &ctx).unwrap();
 
         match result {
             InputType::Command {
@@ -385,7 +400,8 @@ mod tests {
     fn test_bang_star_no_args() {
         // !* should fail when no args (Bash behavior)
         let handler = create_handler_with_history(vec!["pwd", "echo !*"]);
-        let result = handler.handle("echo !*");
+        let ctx = create_context();
+        let result = handler.handle("echo !*", &ctx);
         // Should fail because pwd has no args and !* requires args
         assert!(result.is_none());
     }
@@ -394,7 +410,8 @@ mod tests {
     fn test_bang_caret_no_args() {
         // !^ should fail when no args (Bash behavior)
         let handler = create_handler_with_history(vec!["pwd", "echo !^"]);
-        let result = handler.handle("echo !^");
+        let ctx = create_context();
+        let result = handler.handle("echo !^", &ctx);
         // Should fail because pwd has no args and !^ requires args
         assert!(result.is_none());
     }
@@ -403,7 +420,8 @@ mod tests {
     fn test_multiple_expansions() {
         // Multiple expansions in same input
         let handler = create_handler_with_history(vec!["echo hello world", "printf '%s %s' !^ !$"]);
-        let result = handler.handle("printf '%s %s' !^ !$").unwrap();
+        let ctx = create_context();
+        let result = handler.handle("printf '%s %s' !^ !$", &ctx).unwrap();
 
         match result {
             InputType::Command { command, args, .. } => {
@@ -420,7 +438,8 @@ mod tests {
     fn test_history_with_only_current_input() {
         // Edge case: history has only current input (no previous command)
         let handler = create_handler_with_history(vec!["!!"]);
-        let result = handler.handle("!!");
+        let ctx = create_context();
+        let result = handler.handle("!!", &ctx);
         // Should fail because there's no previous command (need at least 2 entries)
         assert!(result.is_none());
     }

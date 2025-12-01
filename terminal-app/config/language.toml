@@ -1,0 +1,81 @@
+# Language Configuration for Natural Language Detection
+#
+# This file configures language-specific patterns for detecting natural language
+# vs command input. Multiple languages can be configured and loaded dynamically.
+
+# Default language (used when no specific language is configured)
+default_language = "en"
+
+# English language patterns
+[languages.en]
+# Single-word natural language indicators (used in typo detection)
+# These words, when appearing alone, are likely natural language, not commands
+single_words = [
+    "what", "how", "why", "when", "where", "who", "which",
+    "hello", "hi", "hey", "yes", "no", "ok", "thanks", "help"
+]
+
+# Question word patterns (regex, case-insensitive)
+# Patterns that indicate the start of a question
+question_patterns = [
+    "(?i)^(how|what|why|when|where|who|which)\\s",
+    "(?i)^(can you|could you|would you|will you)\\s",
+    "(?i)^(please|help|show me|explain)\\s",
+]
+
+# Article patterns (regex)
+# Articles indicate natural language structure
+article_patterns = [
+    "\\s(a|an|the)\\s",
+    "^(a|an|the)\\s",
+]
+
+# Polite/request word patterns (regex, case-insensitive)
+# Used in natural language detection
+polite_patterns = [
+    "(?i)(^|\\s)(please|help|show me|explain)(\\s|$)",
+]
+
+# Italian language patterns (example)
+[languages.it]
+single_words = [
+    "cosa", "come", "perché", "quando", "dove", "chi", "quale",
+    "ciao", "salve", "sì", "no", "ok", "grazie", "aiuto"
+]
+
+question_patterns = [
+    "(?i)^(come|cosa|perché|quando|dove|chi|quale)\\s",
+    "(?i)^(puoi|potresti|vorresti|vuoi)\\s",
+    "(?i)^(per favore|aiuto|mostrami|spiega)\\s",
+]
+
+article_patterns = [
+    "\\s(il|lo|la|i|gli|le|un|una|uno)\\s",
+    "^(il|lo|la|i|gli|le|un|una|uno)\\s",
+]
+
+polite_patterns = [
+    "(?i)(^|\\s)(per favore|aiuto|mostrami|spiega)(\\s|$)",
+]
+
+# Spanish language patterns (example)
+[languages.es]
+single_words = [
+    "qué", "cómo", "por qué", "cuándo", "dónde", "quién", "cuál",
+    "hola", "sí", "no", "ok", "gracias", "ayuda"
+]
+
+question_patterns = [
+    "(?i)^(cómo|qué|por qué|cuándo|dónde|quién|cuál)\\s",
+    "(?i)^(puedes|podrías|querrías|quieres)\\s",
+    "(?i)^(por favor|ayuda|muéstrame|explica)\\s",
+]
+
+article_patterns = [
+    "\\s(el|la|los|las|un|una|unos|unas)\\s",
+    "^(el|la|los|las|un|una|unos|unas)\\s",
+]
+
+polite_patterns = [
+    "(?i)(^|\\s)(por favor|ayuda|muéstrame|explica)(\\s|$)",
+]

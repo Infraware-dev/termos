@@ -335,7 +335,7 @@ impl Default for ShellBuiltinHandler {
 }
 
 impl InputHandler for ShellBuiltinHandler {
-    fn handle(&self, input: &str) -> Option<InputType> {
+    fn handle(&self, input: &str, ctx: &super::handler::ClassifierContext) -> Option<InputType> {
         // Extract first word
         let first_word = input.split_whitespace().next()?;
 
@@ -345,8 +345,7 @@ impl InputHandler for ShellBuiltinHandler {
             match CommandParser::parse(input) {
                 Ok((command, args)) => {
                     // Preserve original input for shell operators
-                    let patterns = crate::input::patterns::CompiledPatterns::get();
-                    let original_input = if patterns.has_shell_operators(input) {
+                    let original_input = if ctx.patterns.has_shell_operators(input) {
                         Some(input.to_string())
                     } else {
                         None
@@ -369,13 +368,19 @@ impl InputHandler for ShellBuiltinHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::input::handler::ClassifierContext;
+
+    fn create_context() -> ClassifierContext {
+        ClassifierContext::new()
+    }
 
     #[test]
     fn test_recognize_dot_builtin() {
         let handler = ShellBuiltinHandler::new();
+        let ctx = create_context();
 
         // Test . (source) command
-        let result = handler.handle(".");
+        let result = handler.handle(".", &ctx);
         assert!(result.is_some());
         match result.unwrap() {
             InputType::Command { command, .. } => {
@@ -388,9 +393,10 @@ mod tests {
     #[test]
     fn test_recognize_dot_with_file() {
         let handler = ShellBuiltinHandler::new();
+        let ctx = create_context();
 
         // Test . ~/.bashrc
-        let result = handler.handle(". ~/.bashrc");
+        let result = handler.handle(". ~/.bashrc", &ctx);
         assert!(result.is_some());
         match result.unwrap() {
             InputType::Command { command, args, .. } => {
@@ -404,9 +410,10 @@ mod tests {
     #[test]
     fn test_recognize_colon_builtin() {
         let handler = ShellBuiltinHandler::new();
+        let ctx = create_context();
 
         // Test : (no-op) command
-        let result = handler.handle(":");
+        let result = handler.handle(":", &ctx);
         assert!(result.is_some());
         match result.unwrap() {
             InputType::Command { command, .. } => {
@@ -419,9 +426,10 @@ mod tests {
     #[test]
     fn test_recognize_single_bracket() {
         let handler = ShellBuiltinHandler::new();
+        let ctx = create_context();
 
         // Test [ command
-        let result = handler.handle("[ -f file.txt ]");
+        let result = handler.handle("[ -f file.txt ]", &ctx);
         assert!(result.is_some());
         match result.unwrap() {
             InputType::Command { command, args, .. } => {
@@ -435,9 +443,10 @@ mod tests {
     #[test]
     fn test_recognize_double_bracket() {
         let handler = ShellBuiltinHandler::new();
+        let ctx = create_context();
 
         // Test [[ command
-        let result = handler.handle("[[ -f file.txt ]]");
+        let result = handler.handle("[[ -f file.txt ]]", &ctx);
         assert!(result.is_some());
         match result.unwrap() {
             InputType::Command { command, args, .. } => {
@@ -451,8 +460,9 @@ mod tests {
     #[test]
     fn test_recognize_test_command() {
         let handler = ShellBuiltinHandler::new();
+        let ctx = create_context();
 
-        let result = handler.handle("test -f file.txt");
+        let result = handler.handle("test -f file.txt", &ctx);
         assert!(result.is_some());
         match result.unwrap() {
             InputType::Command { command, args, .. } => {
@@ -466,19 +476,21 @@ mod tests {
     #[test]
     fn test_recognize_true_false() {
         let handler = ShellBuiltinHandler::new();
+        let ctx = create_context();
 
-        let true_result = handler.handle("true");
+        let true_result = handler.handle("true", &ctx);
         assert!(true_result.is_some());
 
-        let false_result = handler.handle("false");
+        let false_result = handler.handle("false", &ctx);
         assert!(false_result.is_some());
     }
 
     #[test]
     fn test_recognize_source() {
         let handler = ShellBuiltinHandler::new();
+        let ctx = create_context();
 
-        let result = handler.handle("source ~/.bashrc");
+        let result = handler.handle("source ~/.bashrc", &ctx);
         assert!(result.is_some());
         match result.unwrap() {
             InputType::Command { command, args, .. } => {
@@ -492,8 +504,9 @@ mod tests {
     #[test]
     fn test_recognize_export() {
         let handler = ShellBuiltinHandler::new();
+        let ctx = create_context();
 
-        let result = handler.handle("export PATH=/usr/bin");
+        let result = handler.handle("export PATH=/usr/bin", &ctx);
         assert!(result.is_some());
         match result.unwrap() {
             InputType::Command { command, .. } => {
@@ -506,17 +519,19 @@ mod tests {
     #[test]
     fn test_not_builtin() {
         let handler = ShellBuiltinHandler::new();
+        let ctx = create_context();
 
         // Non-builtin command should return None
-        let result = handler.handle("ls -la");
+        let result = handler.handle("ls -la", &ctx);
         assert!(result.is_none());
     }
 
     #[test]
     fn test_empty_input() {
         let handler = ShellBuiltinHandler::new();
+        let ctx = create_context();
 
-        let result = handler.handle("");
+        let result = handler.handle("", &ctx);
         assert!(result.is_none());
     }
 
@@ -542,20 +557,22 @@ mod tests {
     #[test]
     fn test_custom_builtins() {
         let handler = ShellBuiltinHandler::with_builtins(vec!["custom", "builtin"]);
+        let ctx = create_context();
 
-        let result = handler.handle("custom arg");
+        let result = handler.handle("custom arg", &ctx);
         assert!(result.is_some());
 
-        let result2 = handler.handle("export PATH=/bin");
+        let result2 = handler.handle("export PATH=/bin", &ctx);
         assert!(result2.is_none()); // export not in custom list
     }
 
     #[test]
     fn test_preserve_shell_operators() {
         let handler = ShellBuiltinHandler::new();
+        let ctx = create_context();
 
         // Test with pipe
-        let result = handler.handle(": | grep test");
+        let result = handler.handle(": | grep test", &ctx);
         assert!(result.is_some());
         match result.unwrap() {
             InputType::Command { original_input, .. } => {

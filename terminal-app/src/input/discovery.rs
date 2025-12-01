@@ -31,12 +31,43 @@ impl std::fmt::Debug for CommandCache {
 
 impl CommandCache {
     /// Create a new empty command cache
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             available: HashSet::new(),
             unavailable: HashSet::new(),
             aliases: HashMap::new(),
         }
+    }
+
+    /// Check if command is in cache (instance method for dependency injection)
+    ///
+    /// Returns:
+    /// - `Some(true)` if cached as available
+    /// - `Some(false)` if cached as unavailable
+    /// - `None` if not in cache
+    pub fn is_cached(&self, command: &str) -> Option<bool> {
+        if self.available.contains(command) {
+            Some(true)
+        } else if self.unavailable.contains(command) {
+            Some(false)
+        } else {
+            None
+        }
+    }
+
+    /// Check command availability and update cache (instance method)
+    pub fn check_and_cache(&mut self, command: &str) -> bool {
+        // Check using `which` crate
+        let exists = which(command).is_ok();
+
+        // Update cache
+        if exists {
+            self.available.insert(command.to_string());
+        } else {
+            self.unavailable.insert(command.to_string());
+        }
+
+        exists
     }
 
     /// Check if a command is available in PATH (with caching)
@@ -348,6 +379,12 @@ impl CommandCache {
             unavailable_count: cache.unavailable.len(),
             alias_count: cache.aliases.len(),
         }
+    }
+}
+
+impl Default for CommandCache {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
