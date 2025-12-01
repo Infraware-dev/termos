@@ -43,8 +43,8 @@ impl EventHandler {
         }
 
         match (key.code, key.modifiers) {
-            // Ctrl+C - Clear input
-            (KeyCode::Char('c'), KeyModifiers::CONTROL) => TerminalEvent::ClearInput,
+            // Ctrl+C - Context-aware (cancel ops or clear input)
+            (KeyCode::Char('c'), KeyModifiers::CONTROL) => TerminalEvent::CtrlC,
             // Ctrl+L - Clear screen
             (KeyCode::Char('l'), KeyModifiers::CONTROL) => TerminalEvent::ClearScreen,
 
@@ -107,8 +107,8 @@ pub enum TerminalEvent {
     TabComplete,
     /// Clear screen
     ClearScreen,
-    /// Clear input line
-    ClearInput,
+    /// Ctrl+C pressed - context-aware handler
+    CtrlC,
     /// Quit application
     Quit,
     /// Terminal resized (width, height) - M2/M3 feature
@@ -230,11 +230,11 @@ mod tests {
     }
 
     #[test]
-    fn test_ctrl_c_clear_input() {
+    fn test_ctrl_c_event() {
         let handler = EventHandler::new();
         let event = create_key_event(KeyCode::Char('c'), KeyModifiers::CONTROL);
         let result = handler.map_key_event(event);
-        assert!(matches!(result, TerminalEvent::ClearInput));
+        assert!(matches!(result, TerminalEvent::CtrlC));
     }
 
     #[test]

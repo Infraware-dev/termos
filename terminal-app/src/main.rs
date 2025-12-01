@@ -10,6 +10,7 @@ use infraware_terminal::{auth, input, llm, logging, orchestrators, terminal, uti
 
 use anyhow::Result;
 use std::time::Duration;
+use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use auth::{AuthConfig, Authenticator, HttpAuthenticator};
@@ -48,8 +49,9 @@ pub struct InfrawareTerminal {
     authenticator: Option<Arc<dyn Authenticator>>,
     /// Whether using mock LLM client (for display purposes)
     using_mock_llm: bool,
-    /// Cancellation token for interrupting long-running operations
-    cancellation_token: CancellationToken,
+    /// Watch channel sender for cancellation token - allows sharing current token with poller
+    /// Main loop can send new token to reset, poller can read current token to cancel
+    cancellation_token_tx: watch::Sender<CancellationToken>,
 }
 
 impl std::fmt::Debug for InfrawareTerminal {
@@ -66,10 +68,10 @@ impl std::fmt::Debug for InfrawareTerminal {
             .field("authenticator", &self.authenticator.is_some())
             .field("using_mock_llm", &self.using_mock_llm)
             .field(
-                "cancellation_token",
+                "cancellation_token_tx",
                 &format!(
-                    "CancellationToken(cancelled={})",
-                    self.cancellation_token.is_cancelled()
+                    "watch::Sender<CancellationToken>(cancelled={})",
+                    self.cancellation_token_tx.borrow().is_cancelled()
                 ),
             )
             .finish()
@@ -241,7 +243,8 @@ impl InfrawareTerminalBuilder {
             history_arc: history_vec,
             authenticator: self.authenticator,
             using_mock_llm: self.using_mock_llm,
-            cancellation_token: CancellationToken::new(),
+            // Create watch channel for cancellation token sharing with poller
+            cancellation_token_tx: watch::channel(CancellationToken::new()).0,
         })
     }
 }
@@ -347,28 +350,33 @@ impl InfrawareTerminal {
 
         // Create channel for events from background polling task
         let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<TerminalEvent>(32);
-        let cancel_token_for_poller = self.cancellation_token.clone();
+
+        // Subscribe to cancellation token via watch channel
+        // This allows poller to always see the current token (even after resets)
+        let cancel_token_rx = self.cancellation_token_tx.subscribe();
 
         // Spawn background task for event polling
-        // This task runs independently and can detect Ctrl+C even during LLM queries
+        // This task runs independently and can cancel async operations on Ctrl+C
         let poll_handle = tokio::task::spawn_blocking(move || {
             let event_handler = EventHandler::new();
             loop {
-                // Check if we should stop
-                if cancel_token_for_poller.is_cancelled() {
-                    log::info!("Event poller: cancellation detected, stopping");
+                // Check if main loop has exited (receiver dropped)
+                if event_tx.is_closed() {
+                    log::info!("Event poller: channel closed, stopping");
                     break;
                 }
 
                 // Poll with short timeout
                 match event_handler.poll_event(Duration::from_millis(50)) {
                     Ok(Some(event)) => {
-                        // For Quit events, we need to signal cancellation immediately
-                        if matches!(event, TerminalEvent::Quit) {
-                            log::info!("Event poller: Quit detected, cancelling token");
-                            cancel_token_for_poller.cancel();
+                        // For CtrlC, cancel the current token immediately
+                        // This interrupts any ongoing async operation (e.g., LLM query)
+                        // The main loop will handle the event and clear input after
+                        if matches!(event, TerminalEvent::CtrlC) {
+                            log::info!("Event poller: CtrlC detected, cancelling current token");
+                            cancel_token_rx.borrow().cancel();
                         }
-                        // Send event to main loop (ignore error if channel closed)
+                        // Send event to main loop (exit if channel closed)
                         if event_tx.blocking_send(event).is_err() {
                             break;
                         }
@@ -386,13 +394,10 @@ impl InfrawareTerminal {
 
         // Main event loop - receives events from background poller
         loop {
-            // Check cancellation first
-            if self.cancellation_token.is_cancelled() {
-                log::info!("Main loop: cancellation detected, exiting");
-                break;
-            }
-
-            // Wait for event with timeout, also checking cancellation
+            // Wait for event with timeout
+            // Note: We don't check cancellation_token here because it's used
+            // to cancel async operations (LLM queries), not to exit the app.
+            // App exit is handled by the Quit event handler returning Ok(false).
             let event = tokio::select! {
                 maybe_event = event_rx.recv() => {
                     match maybe_event {
@@ -403,12 +408,8 @@ impl InfrawareTerminal {
                         }
                     }
                 }
-                _ = self.cancellation_token.cancelled() => {
-                    log::info!("Main loop: cancelled via token during recv");
-                    break;
-                }
                 _ = tokio::time::sleep(Duration::from_millis(100)) => {
-                    // Periodic check for cancellation
+                    // Timeout - continue polling
                     continue;
                 }
             };
@@ -434,7 +435,7 @@ impl InfrawareTerminal {
         match event {
             TerminalEvent::Quit => {
                 log::info!("Quit signal received, cancelling ongoing operations");
-                self.cancellation_token.cancel();
+                self.cancellation_token_tx.borrow().cancel();
                 return Ok(false);
             }
             TerminalEvent::InputChar(c) => {
@@ -472,8 +473,22 @@ impl InfrawareTerminal {
             TerminalEvent::ClearScreen => {
                 self.state.output.clear();
             }
-            TerminalEvent::ClearInput => {
+            TerminalEvent::CtrlC => {
+                // Poller already cancelled the token (for async interruption)
+                // Here we just clear input and conditionally reset token
+                log::info!("Ctrl+C: Clearing input (mode={:?})", self.state.mode);
                 self.state.clear_input();
+
+                // Reset token only if:
+                // 1. Token was cancelled (by poller)
+                // 2. We're NOT in WaitingLLM mode (avoid race with async operation checking token)
+                // If in WaitingLLM, the async handler will reset the token after it sees cancellation
+                if self.cancellation_token_tx.borrow().is_cancelled()
+                    && self.state.mode != TerminalMode::WaitingLLM
+                {
+                    log::info!("Ctrl+C: Resetting cancellation token");
+                    let _ = self.cancellation_token_tx.send(CancellationToken::new());
+                }
             }
             TerminalEvent::Resize(_, _) => {
                 // Terminal resized - re-render will handle it
@@ -538,7 +553,7 @@ impl InfrawareTerminal {
                 // Handle exit builtin - exit immediately
                 if command == "exit" {
                     self.state.add_output(MessageFormatter::info("Goodbye!"));
-                    self.cancellation_token.cancel(); // Signal poller to stop
+                    self.cancellation_token_tx.borrow().cancel(); // Signal any async operations
                     return Ok(false);
                 }
 
@@ -552,13 +567,20 @@ impl InfrawareTerminal {
             InputType::NaturalLanguage(query) => {
                 self.state.add_output(MessageFormatter::command(&input));
 
-                // Clone token (cheap Arc increment)
-                let token = self.cancellation_token.clone();
-                self.handle_natural_language(&query, token).await?;
+                // Set mode BEFORE awaiting to prevent race condition with Ctrl+C
+                // If mode is set inside handle_natural_language, Ctrl+C pressed immediately
+                // after Enter will see mode=Normal and clear input instead of cancelling
+                self.state.mode = TerminalMode::WaitingLLM;
 
-                // Reset token for next operation if it was cancelled
-                if self.cancellation_token.is_cancelled() {
-                    self.cancellation_token = CancellationToken::new();
+                // Clone current token (cheap Arc increment) for this operation
+                let token = self.cancellation_token_tx.borrow().clone();
+                self.handle_natural_language(&query, token.clone()).await?;
+
+                // Reset token if THIS specific token was cancelled (not checking channel's current token)
+                // This avoids TOCTOU: we check the exact token used for this operation
+                if token.is_cancelled() {
+                    log::info!("LLM query was cancelled, resetting token for next operation");
+                    let _ = self.cancellation_token_tx.send(CancellationToken::new());
                 }
             }
             InputType::CommandTypo {
@@ -684,13 +706,14 @@ impl InfrawareTerminal {
     /// Handle natural language query
     ///
     /// Delegates to NaturalLanguageOrchestrator (SRP compliance)
+    /// Note: state.mode is set to WaitingLLM in handle_submit() BEFORE calling this,
+    /// to prevent race condition with Ctrl+C cancellation detection
     async fn handle_natural_language(
         &mut self,
         query: &str,
         cancel_token: CancellationToken,
     ) -> Result<()> {
         log::info!("Natural language query: {}", query);
-        self.state.mode = TerminalMode::WaitingLLM;
 
         self.nl_orchestrator
             .handle_query(query, &mut self.state, &mut self.ui, cancel_token)
