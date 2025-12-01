@@ -88,6 +88,9 @@ impl InputClassifier {
     /// - Natural language (precompiled patterns)
     /// - Fallback (catch-all)
     pub fn new() -> Self {
+        // Create context first to access language patterns
+        let context = ClassifierContext::new();
+
         let chain = ClassifierChain::new()
             // 1. Empty input (fastest check)
             .add_handler(HandlerPosition::Empty, Box::new(EmptyInputHandler::new()))
@@ -129,7 +132,11 @@ impl InputClassifier {
             // 9. Typo detection (prevents "dokcer ps" → LLM)
             .add_handler(
                 HandlerPosition::TypoDetection,
-                Box::new(TypoDetectionHandler::with_defaults()),
+                Box::new(TypoDetectionHandler::from_config(
+                    crate::input::known_commands::default_devops_commands(),
+                    0, // max_distance=0 (disabled by default for M1)
+                    &context.language_patterns,
+                )),
             )
             // 10. Natural language patterns (precompiled regex, multilingual)
             .add_handler(
@@ -141,7 +148,7 @@ impl InputClassifier {
 
         Self {
             chain,
-            context: ClassifierContext::new(),
+            context,
             history: None,
         }
     }
@@ -183,7 +190,11 @@ impl InputClassifier {
             )
             .add_handler(
                 HandlerPosition::TypoDetection,
-                Box::new(TypoDetectionHandler::with_defaults()),
+                Box::new(TypoDetectionHandler::from_config(
+                    crate::input::known_commands::default_devops_commands(),
+                    0, // max_distance=0 (disabled by default for M1)
+                    &self.context.language_patterns,
+                )),
             )
             .add_handler(
                 HandlerPosition::NaturalLanguage,

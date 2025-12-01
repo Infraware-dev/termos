@@ -29,6 +29,8 @@ use strsim::levenshtein;
 pub struct TypoDetectionHandler {
     known_commands: Vec<String>,
     max_distance: usize,
+    /// Single-word natural language indicators (from language config)
+    nl_single_words: Vec<String>,
 }
 
 impl TypoDetectionHandler {
@@ -37,16 +39,53 @@ impl TypoDetectionHandler {
     /// # Arguments
     /// * `known_commands` - List of valid commands to check against
     /// * `max_distance` - Maximum Levenshtein distance to consider (default: 2)
-    pub const fn new(known_commands: Vec<String>, max_distance: usize) -> Self {
+    /// * `nl_single_words` - Natural language single words to filter out
+    pub fn new(
+        known_commands: Vec<String>,
+        max_distance: usize,
+        nl_single_words: Vec<String>,
+    ) -> Self {
         Self {
             known_commands,
             max_distance,
+            nl_single_words,
         }
     }
 
     /// Create handler with default DevOps commands and max_distance=0 (disabled)
     pub fn with_defaults() -> Self {
-        Self::new(crate::input::known_commands::default_devops_commands(), 0)
+        // Default English NL words (fallback when no config is loaded)
+        let nl_words = vec![
+            "what", "how", "why", "when", "where", "who", "which", "hello", "hi", "hey", "yes",
+            "no", "ok", "thanks", "help",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+
+        Self::new(
+            crate::input::known_commands::default_devops_commands(),
+            0,
+            nl_words,
+        )
+    }
+
+    /// Create handler from language configuration
+    ///
+    /// # Arguments
+    /// * `known_commands` - List of valid commands to check against
+    /// * `max_distance` - Maximum Levenshtein distance to consider
+    /// * `lang_patterns` - Language patterns from configuration
+    pub fn from_config(
+        known_commands: Vec<String>,
+        max_distance: usize,
+        lang_patterns: &crate::config::LanguagePatterns,
+    ) -> Self {
+        Self::new(
+            known_commands,
+            max_distance,
+            lang_patterns.single_words.clone(),
+        )
     }
 
     /// Find the closest matching command within max_distance
@@ -103,13 +142,8 @@ impl TypoDetectionHandler {
 
         // Single word → might be a command typo, but filter common NL words
         if word_count == 1 {
-            const NL_SINGLE_WORDS: &[&str] = &[
-                "what", "how", "why", "when", "where", "who", "which", "hello", "hi", "hey", "yes",
-                "no", "ok", "thanks", "help",
-            ];
-
             let lower = input.to_lowercase();
-            return !NL_SINGLE_WORDS.contains(&lower.as_str());
+            return !self.nl_single_words.iter().any(|w| w == &lower);
         }
 
         // Has flags/operators → might be a command typo (e.g., "dokcer -v")
@@ -200,7 +234,28 @@ mod tests {
 
     /// Create a handler with typo detection enabled (max_distance=2) for testing
     fn handler_with_typo_detection() -> TypoDetectionHandler {
-        TypoDetectionHandler::new(crate::input::known_commands::default_devops_commands(), 2)
+        let nl_words = vec![
+            "what".to_string(),
+            "how".to_string(),
+            "why".to_string(),
+            "when".to_string(),
+            "where".to_string(),
+            "who".to_string(),
+            "which".to_string(),
+            "hello".to_string(),
+            "hi".to_string(),
+            "hey".to_string(),
+            "yes".to_string(),
+            "no".to_string(),
+            "ok".to_string(),
+            "thanks".to_string(),
+            "help".to_string(),
+        ];
+        TypoDetectionHandler::new(
+            crate::input::known_commands::default_devops_commands(),
+            2,
+            nl_words,
+        )
     }
 
     fn create_context() -> ClassifierContext {
@@ -233,7 +288,7 @@ mod tests {
 
         // Exact match returns None (distance must be > 0)
         // But "docker" might match "packer" at distance 2, so we test with unique word
-        let handler_single = TypoDetectionHandler::new(vec!["uniquecmd".to_string()], 2);
+        let handler_single = TypoDetectionHandler::new(vec!["uniquecmd".to_string()], 2, vec![]);
         assert_eq!(handler_single.find_closest_match("uniquecmd"), None);
     }
 
@@ -336,14 +391,14 @@ mod tests {
 
     #[test]
     fn test_distance_threshold() {
-        let handler = TypoDetectionHandler::new(vec!["docker".to_string()], 1);
+        let handler = TypoDetectionHandler::new(vec!["docker".to_string()], 1, vec![]);
 
         // Within threshold (distance=1)
         let result = handler.find_closest_match("docer");
         assert!(result.is_some());
 
         // Beyond threshold (distance=2)
-        let handler_strict = TypoDetectionHandler::new(vec!["docker".to_string()], 1);
+        let handler_strict = TypoDetectionHandler::new(vec!["docker".to_string()], 1, vec![]);
         let result = handler_strict.find_closest_match("dokcer");
         // dokcer has distance 2 from docker, should be None with max_distance=1
         assert_eq!(result, None);
@@ -355,6 +410,7 @@ mod tests {
         let handler = TypoDetectionHandler::new(
             vec!["grep".to_string(), "gzip".to_string(), "gunzip".to_string()],
             2,
+            vec![],
         );
 
         // "grpe" is closer to "grep" than others

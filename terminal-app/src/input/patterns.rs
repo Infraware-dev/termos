@@ -1,3 +1,4 @@
+use crate::config::LanguagePatterns;
 use regex::RegexSet;
 
 /// Precompiled regex patterns for command and natural language detection
@@ -135,6 +136,75 @@ impl CompiledPatterns {
             // English articles only (indicates natural language structure)
             articles: RegexSet::new([r"\s(a|an|the)\s", r"^(a|an|the)\s"])
                 .expect("Failed to compile articles patterns"),
+        }
+    }
+
+    /// Create CompiledPatterns from external language configuration
+    ///
+    /// This allows loading patterns from a configuration file to support
+    /// multiple languages without code changes.
+    ///
+    /// # Arguments
+    /// * `lang_patterns` - Language patterns loaded from configuration
+    ///
+    /// # Example
+    /// ```no_run
+    /// use infraware_terminal::config::LanguageConfig;
+    /// use infraware_terminal::input::patterns::CompiledPatterns;
+    ///
+    /// let config = LanguageConfig::load_default();
+    /// let patterns = CompiledPatterns::from_config(
+    ///     config.get_default_patterns().unwrap()
+    /// );
+    /// ```
+    pub fn from_config(lang_patterns: &LanguagePatterns) -> Self {
+        // Command syntax and shell operators are language-independent
+        let command_syntax = RegexSet::new([
+            r"^[a-zA-Z0-9_-]+(\s+--?[a-zA-Z0-9])", // Flags: --flag, -f
+            r"(^|\s)(\./|\.\./)[\w.-]+",           // Relative paths: ./, ../
+            r"^/[\w/.-]+",                         // Absolute paths: /usr/bin
+            r"\$\{?[A-Z_][A-Z0-9_]*\}?",           // Env vars: $VAR, ${VAR}
+        ])
+        .expect("Failed to compile command_syntax patterns");
+
+        let shell_operators = RegexSet::new([
+            r"\|",      // Pipe
+            r"&&|\|\|", // Logical operators
+            r"[<>]",    // Redirects
+            r"[;&]",    // Command separators
+            r"\$\(",    // Subshell start
+            r"`[^`]+`", // Backtick command substitution
+            r"\{|\}",   // Braces
+            r"\(|\)",   // Parentheses
+        ])
+        .expect("Failed to compile shell_operators patterns");
+
+        // Language-dependent patterns from configuration
+        let natural_language = {
+            // Combine universal patterns with language-specific polite patterns
+            let mut patterns = vec![
+                r"[\?¿]".to_string(),      // Question marks (universal)
+                r"!".to_string(),          // Exclamation marks
+                r"\.\s+[A-Z]".to_string(), // Sentence boundaries
+                r",\s+\w+".to_string(),    // Commas with continuation
+            ];
+            patterns.extend(lang_patterns.polite_patterns.clone());
+
+            RegexSet::new(&patterns).expect("Failed to compile natural_language patterns")
+        };
+
+        let question_words = RegexSet::new(&lang_patterns.question_patterns)
+            .expect("Failed to compile question_words patterns");
+
+        let articles = RegexSet::new(&lang_patterns.article_patterns)
+            .expect("Failed to compile articles patterns");
+
+        Self {
+            command_syntax,
+            natural_language,
+            shell_operators,
+            question_words,
+            articles,
         }
     }
 

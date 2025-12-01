@@ -22,14 +22,34 @@ pub struct ClassifierContext {
     pub cache: Arc<RwLock<CommandCache>>,
     /// Precompiled regex patterns for classification
     pub patterns: Arc<CompiledPatterns>,
+    /// Language-specific patterns (for typo detection NL words, etc.)
+    pub language_patterns: Arc<crate::config::LanguagePatterns>,
 }
 
 impl ClassifierContext {
     /// Create a new context with default cache and patterns
+    ///
+    /// Loads language configuration from:
+    /// 1. `./config/language.toml` (project directory)
+    /// 2. `~/.config/infraware-terminal/language.toml` (user config)
+    /// 3. Built-in English defaults (fallback)
     pub fn new() -> Self {
+        let lang_config = crate::config::LanguageConfig::load_default();
+        let lang_patterns = lang_config
+            .get_default_patterns()
+            .cloned()
+            .unwrap_or_else(|| {
+                log::warn!("No patterns found for default language, using built-in English");
+                crate::config::LanguageConfig::default_english()
+                    .get_default_patterns()
+                    .cloned()
+                    .expect("Built-in English patterns should always exist")
+            });
+
         Self {
             cache: Arc::new(RwLock::new(CommandCache::new())),
-            patterns: Arc::new(CompiledPatterns::new()),
+            patterns: Arc::new(CompiledPatterns::from_config(&lang_patterns)),
+            language_patterns: Arc::new(lang_patterns),
         }
     }
 
@@ -38,7 +58,17 @@ impl ClassifierContext {
         cache: Arc<RwLock<CommandCache>>,
         patterns: Arc<CompiledPatterns>,
     ) -> Self {
-        Self { cache, patterns }
+        // Use built-in English patterns for tests
+        let lang_patterns = crate::config::LanguageConfig::default_english()
+            .get_default_patterns()
+            .cloned()
+            .expect("Built-in English patterns should always exist");
+
+        Self {
+            cache,
+            patterns,
+            language_patterns: Arc::new(lang_patterns),
+        }
     }
 }
 
@@ -53,6 +83,7 @@ impl std::fmt::Debug for ClassifierContext {
         f.debug_struct("ClassifierContext")
             .field("cache", &"<Arc<RwLock<CommandCache>>>")
             .field("patterns", &"<Arc<CompiledPatterns>>")
+            .field("language_patterns", &"<Arc<LanguagePatterns>>")
             .finish()
     }
 }
