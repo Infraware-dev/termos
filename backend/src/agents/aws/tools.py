@@ -28,8 +28,11 @@ Alternative approaches considered:
 """
 
 import asyncio
+import logging
 
 from langchain_mcp_adapters.client import MultiServerMCPClient
+
+logger = logging.getLogger(__name__)
 
 
 def _initialize_mcp_tools():
@@ -67,9 +70,9 @@ def _initialize_mcp_tools():
 # This runs once when the module is first imported by LangGraph
 try:
     mcp_tools = _initialize_mcp_tools()
-    print(f"✓ Successfully initialized {len(mcp_tools)} AWS MCP tools")
+    logger.info("Successfully initialized %d AWS MCP tools", len(mcp_tools))
 except Exception as e:
     # Graceful degradation: if MCP initialization fails, agent still works
     # but without MCP tools (will fall back to shell tool only)
-    print(f"Warning: Failed to initialize AWS MCP tools: {e}")
+    logger.warning("Failed to initialize AWS MCP tools: %s", e)
     mcp_tools = []
