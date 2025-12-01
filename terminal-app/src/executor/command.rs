@@ -94,9 +94,6 @@ const INTERACTIVE_BLOCKED: &[&str] = &[
 /// Device paths that produce infinite output
 const INFINITE_DEVICES: &[&str] = &["/dev/zero", "/dev/urandom", "/dev/random"];
 
-/// Commands blocked when targeting infinite devices
-const DEVICE_COMMANDS: &[&str] = &["cat", "dd"];
-
 /// All interactive commands (for `is_interactive_command` check)
 static ALL_INTERACTIVE: std::sync::LazyLock<HashSet<&'static str>> =
     std::sync::LazyLock::new(|| {
@@ -112,21 +109,79 @@ static REQUIRES_INTERACTIVE_SET: std::sync::LazyLock<HashSet<&'static str>> =
     std::sync::LazyLock::new(|| REQUIRES_INTERACTIVE.iter().copied().collect());
 
 /// Check if command targets an infinite device (e.g., cat /dev/zero)
+///
+/// For `dd`, allows execution if `count=` is specified (limits output).
 fn targets_infinite_device(cmd: &str, args: &[String]) -> bool {
-    if !DEVICE_COMMANDS.contains(&cmd) {
+    if cmd == "cat" {
+        // cat: block any infinite device argument
+        return args
+            .iter()
+            .any(|arg| INFINITE_DEVICES.iter().any(|dev| arg == *dev));
+    }
+
+    if cmd == "dd" {
+        // dd: check for infinite input source
+        let has_infinite_input = args.iter().any(|arg| {
+            INFINITE_DEVICES
+                .iter()
+                .any(|dev| arg.starts_with("if=") && arg[3..].starts_with(dev))
+        });
+
+        // Allow if count= is specified (limits output)
+        let has_count_limit = args.iter().any(|arg| arg.starts_with("count="));
+
+        return has_infinite_input && !has_count_limit;
+    }
+
+    false
+}
+
+/// Check if ping is missing a limiting flag (would run infinitely)
+///
+/// Supports multiple platforms:
+/// - `-c` count (Linux/macOS)
+/// - `-n` count (Windows)
+/// - `-w` deadline seconds (Linux)
+/// - `-W` timeout (macOS)
+fn is_infinite_ping(cmd: &str, args: &[String]) -> bool {
+    if cmd != "ping" {
         return false;
     }
 
-    args.iter().any(|arg| {
-        INFINITE_DEVICES
-            .iter()
-            .any(|dev| arg == *dev || arg.starts_with(&format!("if={dev}")))
-    })
+    // Check for any flag that limits ping duration
+    let has_limit = args.iter().any(|a| {
+        a == "-c"
+            || a.starts_with("-c")
+            || a == "-n"
+            || a.starts_with("-n")
+            || a == "-w"
+            || a.starts_with("-w")
+            || a == "-W"
+            || a.starts_with("-W")
+    });
+
+    !has_limit
 }
 
-/// Check if ping is missing count flag (would run infinitely)
-fn is_infinite_ping(cmd: &str, args: &[String]) -> bool {
-    cmd == "ping" && !args.iter().any(|a| a == "-c" || a.starts_with("-c"))
+/// Check if a shell command string contains references to infinite devices
+///
+/// Used to detect bypasses via shell interpretation (e.g., `sh -c "cat /dev/zero"`)
+fn shell_command_has_infinite_device(shell_input: &str) -> bool {
+    // Check for infinite device references
+    let has_infinite_device = INFINITE_DEVICES.iter().any(|dev| shell_input.contains(dev));
+
+    if !has_infinite_device {
+        return false;
+    }
+
+    // Allow if output is piped to a limiting command
+    let has_output_limit = shell_input.contains("| head")
+        || shell_input.contains("|head")
+        || shell_input.contains("| tail")
+        || shell_input.contains("|tail")
+        || shell_input.contains("count=");
+
+    has_infinite_device && !has_output_limit
 }
 
 /// Command executor for running shell commands
@@ -271,6 +326,22 @@ impl CommandExecutor {
                 format!("{} {}", cmd, args.join(" "))
             };
 
+            // CRITICAL: Check for infinite device bypass in shell builtin arguments
+            if shell_command_has_infinite_device(&full_command) {
+                log::warn!(
+                    "Blocked shell builtin with infinite device: {}",
+                    full_command
+                );
+                return Ok(CommandOutput {
+                    stdout: String::new(),
+                    stderr: "Command blocked: contains reference to infinite device.\n\n\
+                             Reason: Reading from /dev/zero, /dev/urandom, or /dev/random would freeze the terminal.\n\n\
+                             Suggestion: Pipe output through 'head' to limit, e.g., 'cat /dev/urandom | head -c 100'"
+                        .to_string(),
+                    exit_code: 1,
+                });
+            }
+
             let (shell, shell_flag) = Self::get_platform_shell();
             let execution = TokioCommand::new(shell)
                 .arg(shell_flag)
@@ -293,6 +364,22 @@ impl CommandExecutor {
 
         // If original_input is provided, use platform shell for shell operator interpretation
         if let Some(shell_input) = original_input {
+            // CRITICAL: Check for infinite device bypass in shell command
+            if shell_command_has_infinite_device(shell_input) {
+                log::warn!(
+                    "Blocked shell command with infinite device: {}",
+                    shell_input
+                );
+                return Ok(CommandOutput {
+                    stdout: String::new(),
+                    stderr: "Command blocked: contains reference to infinite device.\n\n\
+                             Reason: Reading from /dev/zero, /dev/urandom, or /dev/random would freeze the terminal.\n\n\
+                             Suggestion: Pipe output through 'head' to limit, e.g., 'cat /dev/urandom | head -c 100'"
+                        .to_string(),
+                    exit_code: 1,
+                });
+            }
+
             let (shell, shell_flag) = Self::get_platform_shell();
             let execution = TokioCommand::new(shell)
                 .arg(shell_flag)
