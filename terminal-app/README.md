@@ -202,7 +202,7 @@ Once running, you can:
 7. **Tab completion**: Press Tab to complete commands/paths
 8. **Reload aliases**: Type `reload-aliases` to refresh aliases from config files (useful if editing `.bashrc` during a session)
 9. **Reload commands**: Type `reload-commands` to clear the command cache (useful after installing new commands during a session)
-10. **Quit**: Press Ctrl+C or Ctrl+D
+10. **Quit**: Press Ctrl+C or type `exit`
 
 #### Interactive Commands
 

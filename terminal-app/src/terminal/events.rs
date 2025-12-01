@@ -45,8 +45,6 @@ impl EventHandler {
         match (key.code, key.modifiers) {
             // Ctrl+C - Quit
             (KeyCode::Char('c'), KeyModifiers::CONTROL) => TerminalEvent::Quit,
-            // Ctrl+D - Quit
-            (KeyCode::Char('d'), KeyModifiers::CONTROL) => TerminalEvent::Quit,
             // Ctrl+L - Clear screen
             (KeyCode::Char('l'), KeyModifiers::CONTROL) => TerminalEvent::ClearScreen,
 
@@ -233,14 +231,6 @@ mod tests {
     fn test_ctrl_c_quit() {
         let handler = EventHandler::new();
         let event = create_key_event(KeyCode::Char('c'), KeyModifiers::CONTROL);
-        let result = handler.map_key_event(event);
-        assert!(matches!(result, TerminalEvent::Quit));
-    }
-
-    #[test]
-    fn test_ctrl_d_quit() {
-        let handler = EventHandler::new();
-        let event = create_key_event(KeyCode::Char('d'), KeyModifiers::CONTROL);
         let result = handler.map_key_event(event);
         assert!(matches!(result, TerminalEvent::Quit));
     }
