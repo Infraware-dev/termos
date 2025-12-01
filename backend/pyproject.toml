@@ -18,6 +18,8 @@ dependencies = [
     "fastapi>=0.115.0",
     "uvicorn[standard]>=0.32.0",
     "httpx>=0.27.0",
+    "pip>=25.3",
+    "langchain-mcp-adapters>=0.1.14",
 ]
 
 
