@@ -23,6 +23,20 @@ This document describes the architecture and design of the interactive command s
 - Debuggers: gdb, lldb, pdb
 - Admin tools: passwd, visudo
 - Root-only monitors: iotop, iftop, nethogs
+- Infinite output: yes
+
+**Infinite Output Commands** (context-aware blocking):
+Commands that produce infinite output are blocked with helpful suggestions:
+- `cat /dev/zero`, `cat /dev/urandom`, `cat /dev/random` - blocked (infinite device)
+- `dd if=/dev/zero`, `dd if=/dev/urandom` - blocked (infinite source)
+- `ping` without `-c N` flag - blocked (infinite ping)
+
+Normal usage is allowed: `cat file.txt`, `dd if=/dev/null`, `ping -c 4 host`
+
+**Not blocked** (useful for DevOps, Ctrl+C cancellation works):
+- `tail -f` - follow file indefinitely (log monitoring)
+- `docker logs -f` - follow container logs
+- `watch` - in REQUIRES_INTERACTIVE (TUI suspended)
 
 **Non-Interactive Commands**:
 - Everything else (ls, grep, echo, apt-get, etc.)

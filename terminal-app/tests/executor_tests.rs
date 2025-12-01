@@ -242,3 +242,99 @@ async fn test_yes_command_error_message_helpful() {
         "Error message should provide helpful suggestions"
     );
 }
+
+#[tokio::test]
+async fn test_cat_dev_zero_blocked() {
+    let output = CommandExecutor::execute("cat", &["/dev/zero".to_string()], None)
+        .await
+        .unwrap();
+    assert!(!output.is_success());
+    assert!(
+        output.stderr.contains("blocked") || output.stderr.contains("infinite"),
+        "Error should mention blocking or infinite: {}",
+        output.stderr
+    );
+}
+
+#[tokio::test]
+async fn test_cat_dev_urandom_blocked() {
+    let output = CommandExecutor::execute("cat", &["/dev/urandom".to_string()], None)
+        .await
+        .unwrap();
+    assert!(!output.is_success());
+    assert!(output.stderr.contains("blocked") || output.stderr.contains("infinite"));
+}
+
+#[tokio::test]
+async fn test_cat_normal_file_allowed() {
+    // cat of a normal file should work
+    let output = CommandExecutor::execute("cat", &["/etc/hostname".to_string()], None)
+        .await
+        .unwrap();
+    // Should either succeed or fail with "No such file", but NOT be blocked
+    assert!(
+        !output.stderr.contains("blocked"),
+        "Normal cat should not be blocked"
+    );
+}
+
+#[tokio::test]
+async fn test_dd_dev_zero_blocked() {
+    let output = CommandExecutor::execute("dd", &["if=/dev/zero".to_string()], None)
+        .await
+        .unwrap();
+    assert!(!output.is_success());
+    assert!(
+        output.stderr.contains("blocked") || output.stderr.contains("infinite"),
+        "dd with /dev/zero should be blocked"
+    );
+}
+
+#[tokio::test]
+async fn test_dd_normal_usage_allowed() {
+    // dd with normal file should not be blocked
+    let output = CommandExecutor::execute(
+        "dd",
+        &[
+            "if=/dev/null".to_string(),
+            "of=/dev/null".to_string(),
+            "count=1".to_string(),
+        ],
+        None,
+    )
+    .await
+    .unwrap();
+    // /dev/null is not in INFINITE_DEVICES, so it should be allowed
+    assert!(
+        !output.stderr.contains("blocked"),
+        "dd with /dev/null should not be blocked"
+    );
+}
+
+#[tokio::test]
+async fn test_ping_without_count_blocked() {
+    let output = CommandExecutor::execute("ping", &["localhost".to_string()], None)
+        .await
+        .unwrap();
+    assert!(!output.is_success());
+    assert!(
+        output.stderr.contains("-c") || output.stderr.contains("count"),
+        "Error should suggest using -c flag"
+    );
+}
+
+#[tokio::test]
+async fn test_ping_with_count_allowed() {
+    let output = CommandExecutor::execute(
+        "ping",
+        &["-c".to_string(), "1".to_string(), "localhost".to_string()],
+        None,
+    )
+    .await
+    .unwrap();
+    // Should not be blocked - may fail for network reasons, but not blocked
+    assert!(
+        !output.stderr.contains("blocked"),
+        "ping with -c should not be blocked"
+    );
+}

@@ -91,6 +91,12 @@ const INTERACTIVE_BLOCKED: &[&str] = &[
     "yes", // Produces infinite "y" output - would freeze terminal
 ];
 
+/// Device paths that produce infinite output
+const INFINITE_DEVICES: &[&str] = &["/dev/zero", "/dev/urandom", "/dev/random"];
+
+/// Commands blocked when targeting infinite devices
+const DEVICE_COMMANDS: &[&str] = &["cat", "dd"];
+
 /// All interactive commands (for `is_interactive_command` check)
 static ALL_INTERACTIVE: std::sync::LazyLock<HashSet<&'static str>> =
     std::sync::LazyLock::new(|| {
@@ -104,6 +110,24 @@ static ALL_INTERACTIVE: std::sync::LazyLock<HashSet<&'static str>> =
 /// Set of commands that require interactive execution (O(1) lookup)
 static REQUIRES_INTERACTIVE_SET: std::sync::LazyLock<HashSet<&'static str>> =
     std::sync::LazyLock::new(|| REQUIRES_INTERACTIVE.iter().copied().collect());
+
+/// Check if command targets an infinite device (e.g., cat /dev/zero)
+fn targets_infinite_device(cmd: &str, args: &[String]) -> bool {
+    if !DEVICE_COMMANDS.contains(&cmd) {
+        return false;
+    }
+
+    args.iter().any(|arg| {
+        INFINITE_DEVICES
+            .iter()
+            .any(|dev| arg == *dev || arg.starts_with(&format!("if={dev}")))
+    })
+}
+
+/// Check if ping is missing count flag (would run infinitely)
+fn is_infinite_ping(cmd: &str, args: &[String]) -> bool {
+    cmd == "ping" && !args.iter().any(|a| a == "-c" || a.starts_with("-c"))
+}
 
 /// Command executor for running shell commands
 #[derive(Debug)]
@@ -183,6 +207,39 @@ impl CommandExecutor {
                      - For 'top': use 'ps aux' or 'top -b -n 1' for batch mode\n\
                      - For 'ssh/tmux/screen': use in a separate terminal window\n\
                      - For REPLs: pass code as argument (e.g., 'python -c \"print(1+1)\"')"
+                ),
+                exit_code: 1,
+            });
+        }
+
+        // Block commands targeting infinite devices (e.g., cat /dev/zero)
+        if targets_infinite_device(cmd, args) {
+            log::warn!("Blocked infinite device command: {} {:?}", cmd, args);
+            return Ok(CommandOutput {
+                stdout: String::new(),
+                stderr: format!(
+                    "Command '{} {}' is blocked.\n\n\
+                     Reason: Reading from infinite device would freeze the terminal.\n\n\
+                     Suggestion: Use 'head' to limit output, e.g., '{} {} | head -c 1000'",
+                    cmd,
+                    args.join(" "),
+                    cmd,
+                    args.join(" ")
+                ),
+                exit_code: 1,
+            });
+        }
+
+        // Block ping without count flag (would run infinitely)
+        if is_infinite_ping(cmd, args) {
+            log::warn!("Blocked infinite ping: {} {:?}", cmd, args);
+            return Ok(CommandOutput {
+                stdout: String::new(),
+                stderr: format!(
+                    "Command 'ping' without count limit is blocked.\n\n\
+                     Reason: Infinite ping would freeze the terminal.\n\n\
+                     Suggestion: Use '-c N' to limit, e.g., 'ping -c 4 {}'",
+                    args.first().map_or("host", String::as_str)
                 ),
                 exit_code: 1,
             });

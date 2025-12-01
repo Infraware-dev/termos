@@ -143,6 +143,15 @@ These commands are recognized early in the classification chain to prevent miscl
 - Implementation: `TerminalUI::suspend()` → command runs → `TerminalUI::resume()`
 - Panic-safe via RAII `TuiGuard`
 
+### Infinite Output Commands (Blocked)
+Commands that would freeze the terminal by producing infinite output are blocked with helpful suggestions:
+- `yes` - produces infinite "y" output
+- `cat /dev/zero`, `cat /dev/urandom`, `cat /dev/random` - infinite device output
+- `dd if=/dev/zero`, `dd if=/dev/urandom` - infinite data copy
+- `ping` without `-c N` flag - infinite ping
+
+**Not blocked** (useful for DevOps, Ctrl+C works): `tail -f`, `docker logs -f`, `watch`
+
 ### Shell Builtins
 - 45+ recognized without PATH verification (., :, [, [[, export, eval, exec, etc.)
 - Executed via `sh -c` (Unix) or `cmd /C` (Windows)
