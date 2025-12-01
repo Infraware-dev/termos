@@ -6,6 +6,78 @@ use anyhow::Result;
 
 use super::InputType;
 
+/// Explicit ordering for handlers in the classification chain
+///
+/// This enum defines the exact position of each handler, preventing
+/// accidental reordering that could break classification logic.
+///
+/// # Handler Order Rationale
+/// - Fast paths first (Empty, History) for performance
+/// - Specific checks before general (Builtins before PATH)
+/// - Expensive checks last (PATH discovery, typo detection)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(u8)]
+pub enum HandlerPosition {
+    /// Position 1: Empty input handler (fastest check, <1μs)
+    Empty = 1,
+    /// Position 2: History expansion (!!,  !$, !^, !* - must happen before parsing)
+    HistoryExpansion = 2,
+    /// Position 3: Application builtins (clear, reload-aliases, etc.)
+    ApplicationBuiltin = 3,
+    /// Position 4: Shell builtins (., :, [, [[, source - no PATH verification)
+    ShellBuiltin = 4,
+    /// Position 5: Executable paths (./script.sh, /usr/bin/cmd - unambiguous)
+    PathCommand = 5,
+    /// Position 6: Known commands (whitelist + PATH verification with caching)
+    KnownCommand = 6,
+    /// Position 7: PATH discovery (auto-detect newly installed commands)
+    PathDiscovery = 7,
+    /// Position 8: Command syntax (flags, pipes, redirects)
+    CommandSyntax = 8,
+    /// Position 9: Typo detection (Levenshtein distance ≤2)
+    TypoDetection = 9,
+    /// Position 10: Natural language patterns (multilingual heuristics)
+    NaturalLanguage = 10,
+    /// Position 11: Default fallback (catch-all → natural language)
+    Default = 11,
+}
+
+impl HandlerPosition {
+    /// Get all positions in correct order
+    pub const fn all_ordered() -> [HandlerPosition; 11] {
+        [
+            HandlerPosition::Empty,
+            HandlerPosition::HistoryExpansion,
+            HandlerPosition::ApplicationBuiltin,
+            HandlerPosition::ShellBuiltin,
+            HandlerPosition::PathCommand,
+            HandlerPosition::KnownCommand,
+            HandlerPosition::PathDiscovery,
+            HandlerPosition::CommandSyntax,
+            HandlerPosition::TypoDetection,
+            HandlerPosition::NaturalLanguage,
+            HandlerPosition::Default,
+        ]
+    }
+
+    /// Get human-readable name
+    pub const fn name(self) -> &'static str {
+        match self {
+            HandlerPosition::Empty => "EmptyInputHandler",
+            HandlerPosition::HistoryExpansion => "HistoryExpansionHandler",
+            HandlerPosition::ApplicationBuiltin => "ApplicationBuiltinHandler",
+            HandlerPosition::ShellBuiltin => "ShellBuiltinHandler",
+            HandlerPosition::PathCommand => "PathCommandHandler",
+            HandlerPosition::KnownCommand => "KnownCommandHandler",
+            HandlerPosition::PathDiscovery => "PathDiscoveryHandler",
+            HandlerPosition::CommandSyntax => "CommandSyntaxHandler",
+            HandlerPosition::TypoDetection => "TypoDetectionHandler",
+            HandlerPosition::NaturalLanguage => "NaturalLanguageHandler",
+            HandlerPosition::Default => "DefaultHandler",
+        }
+    }
+}
+
 /// Handler trait for the Chain of Responsibility pattern
 ///
 /// Each handler in the chain can either:
@@ -22,7 +94,7 @@ pub trait InputHandler: Send + Sync {
 
 /// Chain of handlers for input classification
 pub struct ClassifierChain {
-    handlers: Vec<Box<dyn InputHandler>>,
+    handlers: Vec<(HandlerPosition, Box<dyn InputHandler>)>,
 }
 
 impl std::fmt::Debug for ClassifierChain {
@@ -41,9 +113,42 @@ impl ClassifierChain {
         }
     }
 
-    /// Add a handler to the end of the chain
-    pub fn add_handler(mut self, handler: Box<dyn InputHandler>) -> Self {
-        self.handlers.push(handler);
+    /// Add a handler at a specific position in the chain
+    ///
+    /// # Panics
+    /// Panics if handlers are not added in the correct order defined by `HandlerPosition`.
+    /// This is a deliberate design choice to catch ordering bugs at development time.
+    pub fn add_handler(
+        mut self,
+        position: HandlerPosition,
+        handler: Box<dyn InputHandler>,
+    ) -> Self {
+        // Validate that handlers are added in order
+        let expected_position = (self.handlers.len() + 1) as u8;
+        let actual_position = position as u8;
+
+        if actual_position != expected_position {
+            panic!(
+                "Handler added out of order: expected position {}, got {} ({})",
+                expected_position,
+                actual_position,
+                position.name()
+            );
+        }
+
+        self.handlers.push((position, handler));
+        self
+    }
+
+    /// Add a handler for testing purposes without position validation
+    ///
+    /// This method skips position validation and should only be used in tests
+    /// where a subset of handlers is being tested.
+    #[cfg(test)]
+    pub fn add_handler_for_test(mut self, handler: Box<dyn InputHandler>) -> Self {
+        // Use a dummy position for testing (we don't validate in tests)
+        let position = HandlerPosition::Empty; // Arbitrary position
+        self.handlers.push((position, handler));
         self
     }
 
@@ -51,7 +156,7 @@ impl ClassifierChain {
     ///
     /// Returns the first successful classification, or None if no handler matches
     pub fn process(&self, input: &str) -> Option<InputType> {
-        for handler in &self.handlers {
+        for (_position, handler) in &self.handlers {
             if let Some(result) = handler.handle(input) {
                 return Some(result);
             }
@@ -627,6 +732,7 @@ impl Default for DefaultHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::input::history_expansion::HistoryExpansionHandler;
 
     #[test]
     fn test_empty_input_handler() {
@@ -944,11 +1050,11 @@ mod tests {
     #[test]
     fn test_classifier_chain() {
         let chain = ClassifierChain::new()
-            .add_handler(Box::new(EmptyInputHandler::new()))
-            .add_handler(Box::new(KnownCommandHandler::with_defaults()))
-            .add_handler(Box::new(CommandSyntaxHandler::new()))
-            .add_handler(Box::new(NaturalLanguageHandler::new()))
-            .add_handler(Box::new(DefaultHandler::new()));
+            .add_handler_for_test(Box::new(EmptyInputHandler::new()))
+            .add_handler_for_test(Box::new(KnownCommandHandler::with_defaults()))
+            .add_handler_for_test(Box::new(CommandSyntaxHandler::new()))
+            .add_handler_for_test(Box::new(NaturalLanguageHandler::new()))
+            .add_handler_for_test(Box::new(DefaultHandler::new()));
 
         // Empty input
         assert_eq!(chain.process(""), Some(InputType::Empty));
@@ -982,15 +1088,45 @@ mod tests {
     fn test_chain_order_matters() {
         // Different order - empty handler should be first
         let chain = ClassifierChain::new()
-            .add_handler(Box::new(EmptyInputHandler::new()))
-            .add_handler(Box::new(KnownCommandHandler::with_defaults()));
+            .add_handler_for_test(Box::new(EmptyInputHandler::new()))
+            .add_handler_for_test(Box::new(KnownCommandHandler::with_defaults()));
 
         assert_eq!(chain.process(""), Some(InputType::Empty));
 
         // Without empty handler first, default would catch it
-        let chain2 = ClassifierChain::new().add_handler(Box::new(DefaultHandler::new()));
+        let chain2 = ClassifierChain::new().add_handler_for_test(Box::new(DefaultHandler::new()));
 
         assert!(matches!(chain2.process(""), Some(InputType::Empty)));
+    }
+
+    #[test]
+    fn test_handler_position_validation() {
+        // Verify that handlers must be added in correct order
+        let chain = ClassifierChain::new()
+            .add_handler(HandlerPosition::Empty, Box::new(EmptyInputHandler::new()))
+            .add_handler(
+                HandlerPosition::HistoryExpansion,
+                Box::new(HistoryExpansionHandler::new()),
+            )
+            .add_handler(
+                HandlerPosition::ApplicationBuiltin,
+                Box::new(ApplicationBuiltinHandler::new()),
+            );
+
+        // Verify chain processes empty input correctly
+        assert_eq!(chain.process(""), Some(InputType::Empty));
+    }
+
+    #[test]
+    #[should_panic(expected = "Handler added out of order")]
+    fn test_handler_position_validation_fails_on_wrong_order() {
+        // This should panic - skipping position 2
+        let _chain = ClassifierChain::new()
+            .add_handler(HandlerPosition::Empty, Box::new(EmptyInputHandler::new()))
+            .add_handler(
+                HandlerPosition::ApplicationBuiltin, // Position 3, but we should add position 2 next
+                Box::new(ApplicationBuiltinHandler::new()),
+            );
     }
 
     #[test]

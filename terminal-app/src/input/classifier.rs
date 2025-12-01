@@ -6,8 +6,8 @@ use anyhow::Result;
 
 use super::handler::{
     ApplicationBuiltinHandler, ClassifierChain, CommandSyntaxHandler, DefaultHandler,
-    EmptyInputHandler, KnownCommandHandler, NaturalLanguageHandler, PathCommandHandler,
-    PathDiscoveryHandler,
+    EmptyInputHandler, HandlerPosition, KnownCommandHandler, NaturalLanguageHandler,
+    PathCommandHandler, PathDiscoveryHandler,
 };
 use super::history_expansion::HistoryExpansionHandler;
 use super::shell_builtins::ShellBuiltinHandler;
@@ -88,27 +88,54 @@ impl InputClassifier {
     pub fn new() -> Self {
         let chain = ClassifierChain::new()
             // 1. Empty input (fastest check)
-            .add_handler(Box::new(EmptyInputHandler::new()))
+            .add_handler(HandlerPosition::Empty, Box::new(EmptyInputHandler::new()))
             // 2. History expansion (!!,  !$, !^, !* - must happen before command parsing)
-            .add_handler(Box::new(HistoryExpansionHandler::new()))
+            .add_handler(
+                HandlerPosition::HistoryExpansion,
+                Box::new(HistoryExpansionHandler::new()),
+            )
             // 3. Application builtins (clear, reload-aliases, reload-commands)
-            .add_handler(Box::new(ApplicationBuiltinHandler::new()))
+            .add_handler(
+                HandlerPosition::ApplicationBuiltin,
+                Box::new(ApplicationBuiltinHandler::new()),
+            )
             // 4. Shell builtins (., :, [, [[, source, export, etc. - no PATH verification)
-            .add_handler(Box::new(ShellBuiltinHandler::new()))
+            .add_handler(
+                HandlerPosition::ShellBuiltin,
+                Box::new(ShellBuiltinHandler::new()),
+            )
             // 5. Executable paths (unambiguous: ./script.sh, /usr/bin/cmd)
-            .add_handler(Box::new(PathCommandHandler::new()))
+            .add_handler(
+                HandlerPosition::PathCommand,
+                Box::new(PathCommandHandler::new()),
+            )
             // 6. Known commands with PATH existence check (cached)
-            .add_handler(Box::new(KnownCommandHandler::with_defaults()))
+            .add_handler(
+                HandlerPosition::KnownCommand,
+                Box::new(KnownCommandHandler::with_defaults()),
+            )
             // 7. PATH discovery - auto-detect newly installed commands via `which`
-            .add_handler(Box::new(PathDiscoveryHandler::new()))
+            .add_handler(
+                HandlerPosition::PathDiscovery,
+                Box::new(PathDiscoveryHandler::new()),
+            )
             // 8. Command syntax detection (flags, pipes, redirects)
-            .add_handler(Box::new(CommandSyntaxHandler::new()))
+            .add_handler(
+                HandlerPosition::CommandSyntax,
+                Box::new(CommandSyntaxHandler::new()),
+            )
             // 9. Typo detection (prevents "dokcer ps" → LLM)
-            .add_handler(Box::new(TypoDetectionHandler::with_defaults()))
+            .add_handler(
+                HandlerPosition::TypoDetection,
+                Box::new(TypoDetectionHandler::with_defaults()),
+            )
             // 10. Natural language patterns (precompiled regex, multilingual)
-            .add_handler(Box::new(NaturalLanguageHandler::new()))
+            .add_handler(
+                HandlerPosition::NaturalLanguage,
+                Box::new(NaturalLanguageHandler::new()),
+            )
             // 11. Fallback to natural language
-            .add_handler(Box::new(DefaultHandler::new()));
+            .add_handler(HandlerPosition::Default, Box::new(DefaultHandler::new()));
 
         Self {
             chain,
@@ -122,19 +149,44 @@ impl InputClassifier {
     pub fn with_history(mut self, history: Arc<RwLock<Vec<String>>>) -> Self {
         // Rebuild the chain with history-aware HistoryExpansionHandler
         self.chain = ClassifierChain::new()
-            .add_handler(Box::new(EmptyInputHandler::new()))
-            .add_handler(Box::new(HistoryExpansionHandler::with_history(
-                history.clone(),
-            )))
-            .add_handler(Box::new(ApplicationBuiltinHandler::new()))
-            .add_handler(Box::new(ShellBuiltinHandler::new()))
-            .add_handler(Box::new(PathCommandHandler::new()))
-            .add_handler(Box::new(KnownCommandHandler::with_defaults()))
-            .add_handler(Box::new(PathDiscoveryHandler::new()))
-            .add_handler(Box::new(CommandSyntaxHandler::new()))
-            .add_handler(Box::new(TypoDetectionHandler::with_defaults()))
-            .add_handler(Box::new(NaturalLanguageHandler::new()))
-            .add_handler(Box::new(DefaultHandler::new()));
+            .add_handler(HandlerPosition::Empty, Box::new(EmptyInputHandler::new()))
+            .add_handler(
+                HandlerPosition::HistoryExpansion,
+                Box::new(HistoryExpansionHandler::with_history(history.clone())),
+            )
+            .add_handler(
+                HandlerPosition::ApplicationBuiltin,
+                Box::new(ApplicationBuiltinHandler::new()),
+            )
+            .add_handler(
+                HandlerPosition::ShellBuiltin,
+                Box::new(ShellBuiltinHandler::new()),
+            )
+            .add_handler(
+                HandlerPosition::PathCommand,
+                Box::new(PathCommandHandler::new()),
+            )
+            .add_handler(
+                HandlerPosition::KnownCommand,
+                Box::new(KnownCommandHandler::with_defaults()),
+            )
+            .add_handler(
+                HandlerPosition::PathDiscovery,
+                Box::new(PathDiscoveryHandler::new()),
+            )
+            .add_handler(
+                HandlerPosition::CommandSyntax,
+                Box::new(CommandSyntaxHandler::new()),
+            )
+            .add_handler(
+                HandlerPosition::TypoDetection,
+                Box::new(TypoDetectionHandler::with_defaults()),
+            )
+            .add_handler(
+                HandlerPosition::NaturalLanguage,
+                Box::new(NaturalLanguageHandler::new()),
+            )
+            .add_handler(HandlerPosition::Default, Box::new(DefaultHandler::new()));
 
         self.history = Some(history);
         self
