@@ -9,6 +9,7 @@
 use infraware_terminal::{auth, input, llm, logging, orchestrators, terminal, utils};
 
 use anyhow::Result;
+use std::path::PathBuf;
 use std::time::Duration;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
@@ -557,6 +558,13 @@ impl InfrawareTerminal {
                     return Ok(false);
                 }
 
+                // Handle cd builtin - must be handled by parent process
+                if command == "cd" {
+                    self.state.add_output(MessageFormatter::command(&input));
+                    self.handle_cd_command(&args);
+                    return Ok(true);
+                }
+
                 // Don't echo input for clear command (it clears the output)
                 if command != "clear" {
                     self.state.add_output(MessageFormatter::command(&input));
@@ -620,6 +628,49 @@ impl InfrawareTerminal {
         self.command_orchestrator
             .handle_command(cmd, args, original_input, &mut self.state, &mut self.ui)
             .await
+    }
+
+    /// Handle the built-in "cd" command
+    ///
+    /// Changes the working directory of the terminal process.
+    /// Unlike shell builtins, this must be handled directly by the parent process.
+    ///
+    /// Supported forms:
+    /// - `cd` or `cd ~` → home directory
+    /// - `cd ..` → parent directory
+    /// - `cd /path` → absolute path
+    /// - `cd path` → relative path
+    fn handle_cd_command(&mut self, args: &[String]) {
+        let target = args.first().map(|s| s.as_str()).unwrap_or("");
+
+        let path = if target.is_empty() || target == "~" {
+            // cd or cd ~ -> home directory
+            dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"))
+        } else if let Some(suffix) = target.strip_prefix("~/") {
+            // cd ~/path -> expand ~ to home
+            let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("/"));
+            home.join(suffix)
+        } else {
+            // cd path (relative or absolute)
+            PathBuf::from(target)
+        };
+
+        match std::env::set_current_dir(&path) {
+            Ok(()) => {
+                // Show the new directory
+                if let Ok(cwd) = std::env::current_dir() {
+                    self.state
+                        .add_output(MessageFormatter::success(cwd.display().to_string()));
+                }
+            }
+            Err(e) => {
+                self.state.add_output(MessageFormatter::error(format!(
+                    "cd: {}: {}",
+                    path.display(),
+                    e
+                )));
+            }
+        }
     }
 
     /// Handle the built-in "auth-status" command
