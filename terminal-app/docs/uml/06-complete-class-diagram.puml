@@ -229,7 +229,7 @@ package "Terminal UI & State" {
     - terminal: Terminal<CrosstermBackend>
     --
     + new(): Result<Self>
-    + render(state): Result<()>
+    + render(&mut state): Result<()>
     + suspend(): Result<()>
     + resume(): Result<()>
   }
@@ -239,19 +239,28 @@ package "Terminal UI & State" {
     + input: InputBuffer
     + history: CommandHistory
     + mode: TerminalMode
+    + pending_interaction: Option<PendingInteraction>
+    - visible_lines: usize
     --
     + add_output(line)
     + insert_char(c)
     + submit_input(): String
+    + scroll_up(): void
+    + scroll_down(): void
+    + set_visible_lines(lines): void
+    + visible_lines() -> usize
   }
 
   class OutputBuffer {
-    - lines: Vec<String>
-    - scroll_offset: usize
+    - buffer: Vec<String>
+    - scroll_position: usize
     --
     + add_line(line)
     + clear()
-    + scroll_up()
+    + scroll_up(): void
+    + scroll_down(visible_lines): void
+    + set_visible_lines(visible_lines): void
+    + pop(): Option<String>
   }
 
   class InputBuffer {
@@ -275,6 +284,8 @@ package "Terminal UI & State" {
     ExecutingCommand
     WaitingLLM
     PromptingInstall
+    AwaitingCommandApproval
+    AwaitingAnswer
   }
 
   class EventHandler {
@@ -285,9 +296,18 @@ package "Terminal UI & State" {
     Quit
     InputChar(char)
     Submit
-    TabComplete
+    DeleteChar
+    MoveCursorLeft
+    MoveCursorRight
     HistoryPrevious
     HistoryNext
+    ScrollUp
+    ScrollDown
+    TabComplete
+    ClearScreen
+    CtrlC
+    Resize(u16, u16)
+    Unknown
   }
 
   TerminalState --> OutputBuffer : owns
@@ -295,8 +315,7 @@ package "Terminal UI & State" {
   TerminalState --> CommandHistory : owns
   TerminalState --> TerminalMode : tracks
   EventHandler --> TerminalEvent : generates
-  TerminalUI --> TerminalState : renders
-}
+  TerminalUI --> TerminalState : renders (&mut)
 
 ' ==================== RELATIONSHIPS ====================
 

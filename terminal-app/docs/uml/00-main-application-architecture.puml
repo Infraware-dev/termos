@@ -31,6 +31,13 @@ package "Main Application" {
     - Manages event loop
     - Routes events to orchestrators
     - Coordinates UI and state
+    - Handles scrolling via TerminalState
+
+    **Event Handling**
+    - ScrollUp/ScrollDown events
+    - Calls state.scroll_up()/scroll_down()
+    - TerminalState manages visible_lines
+    - OutputBuffer uses visible_lines for bounds
   end note
 }
 

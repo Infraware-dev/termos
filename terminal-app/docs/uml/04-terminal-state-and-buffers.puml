@@ -9,6 +9,8 @@ package "Terminal State" {
     + input: InputBuffer
     + history: CommandHistory
     + mode: TerminalMode
+    + pending_interaction: Option<PendingInteraction>
+    - visible_lines: usize
     --
     + new(): Self
     --
@@ -24,6 +26,8 @@ package "Terminal State" {
     + history_next(): void
     + scroll_up(): void
     + scroll_down(): void
+    + set_visible_lines(lines): void
+    + visible_lines() -> usize
   }
 
   note right of TerminalState
@@ -36,12 +40,20 @@ package "Terminal State" {
     - InputBuffer: Cursor-aware input line
     - CommandHistory: Command history navigation
     - TerminalMode: Current mode tracking
+    - visible_lines: Terminal viewport height
 
     **Mode Enum**
     - Normal: Waiting for input
     - ExecutingCommand: Running shell command
     - WaitingLLM: Querying LLM
     - PromptingInstall: M2/M3 auto-install (reserved)
+    - AwaitingCommandApproval: HITL approval (y/n)
+    - AwaitingAnswer: HITL free-form answer
+
+    **Visible Lines Management**
+    - Updated during render()
+    - Used for scroll calculations
+    - Passed to OutputBuffer::scroll_down()
   end note
 }
 
@@ -49,36 +61,44 @@ package "Terminal State" {
 
 package "Output Buffer" {
   class OutputBuffer {
-    - lines: Vec<String>
-    - scroll_offset: usize
-    - max_lines: usize
+    - buffer: Vec<String>
+    - scroll_position: usize
     --
     + new(): Self
     + add_line(line): void
     + add_lines(lines): void
     + clear(): void
-    + all_lines(): &[String]
-    + visible_lines(height): Vec<&str>
+    + lines(): &[String]
+    + scroll_position() -> usize
     + scroll_up(): void
-    + scroll_down(): void
+    + scroll_down(visible_lines): void
+    + set_visible_lines(visible_lines): void
+    + pop(): Option<String>
   }
 
   note right of OutputBuffer
     **Responsibilities**
-    - Manages display output
-    - Circular buffer (bounded memory)
+    - Manages display output buffer
     - Scrolling support (up/down)
-    - Line wrapping capability
+    - Auto-scroll to bottom on new output
+    - Memory management with trimming
+
+    **Scrolling Implementation**
+    - scroll_up(): Move view up 1 line
+    - scroll_down(visible_lines): Scroll down with bounds check
+    - set_visible_lines(): Clamp position on resize
+    - auto_scroll_to_bottom(): Smart scroll on new content
 
     **Performance**
     - Append: O(1) amortized
     - Scroll: O(1)
-    - Display: O(viewport_height)
+    - Trim: O(n) where n = trimmed lines
 
     **Memory Management**
-    - max_lines: configurable limit
-    - Circular buffer pattern
-    - Old lines discarded when full
+    - MAX_OUTPUT_LINES: 10,000
+    - TRIM_LINES: 1,000 (headroom on trim)
+    - Scroll position adjusted on trim
+    - Auto-scroll to latest content
   end note
 }
 
@@ -178,16 +198,17 @@ package "Terminal Events" {
     Submit
     TabComplete
     ClearScreen
+    CtrlC
     Resize(u16, u16)
     Unknown
   }
 
   class EventHandler {
-    - events: crossterm::event::EventReader
     --
     + new(): Self
     + poll_event(timeout): Result<Option<TerminalEvent>>
-    - handle_keyboard_event(): Option<TerminalEvent>
+    - map_event(event): TerminalEvent
+    - map_key_event(key): TerminalEvent
   }
 
   note right of EventHandler
@@ -196,17 +217,21 @@ package "Terminal Events" {
     - Translate to TerminalEvent
     - Handle Windows quirks
 
-    **Event Translation**
+    **Keyboard Event Translation**
     - Key::Char(c) → InputChar
     - Key::Backspace → DeleteChar
     - Key::Left → MoveCursorLeft
     - Key::Right → MoveCursorRight
-    - Key::Up → HistoryPrevious
-    - Key::Down → HistoryNext
+    - Key::Up (no mod) → HistoryPrevious
+    - Key::Down (no mod) → HistoryNext
+    - Key::Up + Ctrl → ScrollUp
+    - Key::Down + Ctrl → ScrollDown
+    - Key::PageUp → ScrollUp
+    - Key::PageDown → ScrollDown
     - Key::Tab → TabComplete
     - Key::Enter → Submit
     - Ctrl+L → ClearScreen
-    - Ctrl+C → Quit
+    - Ctrl+C → CtrlC
 
     **Windows-Specific**
     - Filter KeyEventKind::Press only
@@ -229,7 +254,7 @@ package "TUI Rendering" {
     - terminal: Terminal<CrosstermBackend>
     --
     + new(): Result<Self>
-    + render(state): Result<()>
+    + render(&mut state): Result<()>
     + clear(): Result<()>
     + suspend(): Result<()>
     + resume(): Result<()>
@@ -243,12 +268,20 @@ package "TUI Rendering" {
     - Raw mode management
     - Alternate screen handling
     - Interactive command suspension
+    - Visible lines calculation
+
+    **Render Process**
+    1. Calculate visible lines from terminal size
+    2. Call state.set_visible_lines(lines)
+    3. Render frame using state
+    4. Scrolling uses visible_lines value
 
     **Render Layout**
     - Header: banner + mode indicator
     - Output: scrollable display area
     - Input: user input line
     - Cursor: blinking at input position
+    - Scrollbar: visual indicator
 
     **Interactive Command Flow**
     1. suspend(): Leave TUI mode
@@ -260,6 +293,11 @@ package "TUI Rendering" {
     - Panic-safe via RAII (TuiGuard)
     - Cleanup on exit guaranteed
     - Raw mode disabled safely
+
+    **Mutable State Parameter**
+    - Signature: render(&mut TerminalState)
+    - Updates visible_lines during render
+    - Allows OutputBuffer sync
   end note
 }
 
@@ -293,19 +331,29 @@ TerminalUI --> "ratatui" : uses for rendering
 
 ' Data flow
 note top
-  **Data Flow (Simplified)**
+  **Data Flow with Scrolling**
 
   EventHandler polls events
          ↓
-  TerminalEvent (e.g., InputChar('a'))
+  TerminalEvent (e.g., ScrollUp, ScrollDown, CtrlUp, CtrlDown)
          ↓
   InfrawareTerminal::handle_event()
          ↓
-  Updates TerminalState buffer/history
+  Updates TerminalState buffer/history/scroll
          ↓
-  TerminalUI::render() displays new state
+  TerminalUI::render(&mut state)
+         ├─ Calculates visible_lines from terminal size
+         ├─ Calls state.set_visible_lines(lines)
+         └─ Renders with updated state
          ↓
   Event loop repeats
+
+  **Scrolling Implementation**
+  - Keyboard Events: Ctrl+Up/Down or PageUp/Down → ScrollUp/Down
+  - Handler: InfrawareTerminal calls state.scroll_up/down()
+  - TerminalState: Delegates to OutputBuffer.scroll_down(visible_lines)
+  - OutputBuffer: Uses visible_lines for bounds checking
+  - Render: Updates visible_lines from terminal size
 
   **History Expansion Sync**
   - HistoryExpansionHandler uses Arc<RwLock>

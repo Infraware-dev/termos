@@ -139,6 +139,17 @@ Application-specific commands recognized by `ApplicationBuiltinHandler` (positio
 
 These commands are recognized early in the classification chain to prevent misclassification as natural language.
 
+### Output Scrolling
+
+Infraware Terminal supports scrolling through command output when content exceeds the visible area:
+
+- **Primary controls**: `PageUp` / `PageDown` keys scroll output one page at a time
+- **Laptop-friendly alternative**: `Ctrl+↑` / `Ctrl+↓` scroll output (useful when Fn+PageUp/PageDown is inconvenient)
+- **Visual feedback**: Vertical scrollbar (▲│█▼) appears on the right side of the output area when content exceeds visible lines
+- **No conflict with history**: Arrow keys (↑/↓ without Ctrl) navigate command history; arrow keys with Ctrl navigate output
+- **Auto-scroll**: Output automatically scrolls to the bottom when new command results arrive
+- **Implementation**: Scroll position managed in `OutputBuffer`, rendered via ratatui's `Scrollbar` widget
+
 ### Interactive Commands
 - **28 supported** (TUI suspends): vim, nvim, nano, emacs, less, more, man, top, htop, sudo, watch, mc, ranger, etc.
 - **31 blocked** (helpful error): ssh, tmux, screen, python, mysql, gdb, etc.
@@ -266,6 +277,36 @@ question_patterns = ["(?i)^(come|cosa|perché|quando|dove|chi|quale)\\s"]
 - History: Session-only, not persisted to disk
 - Markdown: Basic rendering only, no tables/images
 - Cache TTL: No automatic invalidation (use `reload-commands` after installing new commands)
+
+## Keyboard Shortcuts
+
+The terminal implements the following keyboard shortcuts via the `EventHandler` in `src/terminal/events.rs`:
+
+| Key(s) | Event | Purpose |
+|--------|-------|---------|
+| **Input & Submission** | | |
+| Character (a-z, A-Z, 0-9, symbols) | `InputChar(c)` | Type character into input |
+| Backspace | `DeleteChar` | Delete character before cursor |
+| Enter | `Submit` | Execute command or query |
+| ← | `MoveCursorLeft` | Move cursor left in input |
+| → | `MoveCursorRight` | Move cursor right in input |
+| **History Navigation** | | |
+| ↑ (no modifiers) | `HistoryPrevious` | Navigate to previous command |
+| ↓ (no modifiers) | `HistoryNext` | Navigate to next command |
+| **Output Scrolling** | | |
+| PageUp | `ScrollUp` | Scroll output up |
+| PageDown | `ScrollDown` | Scroll output down |
+| Ctrl+↑ | `ScrollUp` | Alternative scroll up (laptop-friendly) |
+| Ctrl+↓ | `ScrollDown` | Alternative scroll down (laptop-friendly) |
+| **Control** | | |
+| Ctrl+C | `CtrlC` | Context-aware: cancel ops or clear input |
+| Ctrl+L | `ClearScreen` | Clear screen |
+| Tab | `TabComplete` | Tab completion |
+
+**Key Implementation Details**:
+- Windows support: Filters `KeyEventKind::Release` and `KeyEventKind::Repeat` to avoid duplicate input
+- Arrow key conflict prevention: Ctrl+↑/↓ for scrolling, plain ↑/↓ for history (no collision)
+- Event mapping in `EventHandler::map_key_event()` - single source of truth for keyboard handling
 
 ## Common Patterns
 

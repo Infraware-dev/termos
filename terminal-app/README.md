@@ -221,10 +221,35 @@ Once running, you can:
 4. **Use aliases**: Type user-defined aliases from `~/.bashrc`, `~/.bash_aliases`, `~/.zshrc` (e.g., `ll` → expands to `ls -la`)
 5. **Ask questions**: Type natural language queries (e.g., "how do I list files?")
 6. **Navigate history**: Use ↑/↓ arrow keys
-7. **Tab completion**: Press Tab to complete commands/paths
-8. **Reload aliases**: Type `reload-aliases` to refresh aliases from config files (useful if editing `.bashrc` during a session)
-9. **Reload commands**: Type `reload-commands` to clear the command cache (useful after installing new commands during a session)
-10. **Quit**: Press Ctrl+C or type `exit`
+7. **Scroll output**: Navigate previous command output when it exceeds the visible area
+8. **Tab completion**: Press Tab to complete commands/paths
+9. **Reload aliases**: Type `reload-aliases` to refresh aliases from config files (useful if editing `.bashrc` during a session)
+10. **Reload commands**: Type `reload-commands` to clear the command cache (useful after installing new commands during a session)
+11. **Quit**: Press Ctrl+C or type `exit`
+
+#### Keyboard Shortcuts
+
+| Action | Key(s) | Description |
+|--------|--------|-------------|
+| **Input Navigation** | | |
+| Move cursor left | ← | Move left in input line |
+| Move cursor right | → | Move right in input line |
+| Delete character | Backspace | Delete character before cursor |
+| Submit input | Enter | Execute command or query |
+| **History Navigation** | | |
+| Previous command | ↑ | Navigate to previous command in history |
+| Next command | ↓ | Navigate to next command in history |
+| **Output Scrolling** | | |
+| Scroll up | PageUp | Scroll output up one page |
+| Scroll down | PageDown | Scroll output down one page |
+| Scroll up (laptop) | Ctrl+↑ | Alternative scroll up for laptops (when Fn+PageUp is inconvenient) |
+| Scroll down (laptop) | Ctrl+↓ | Alternative scroll down for laptops (when Fn+PageDown is inconvenient) |
+| **Other** | | |
+| Tab completion | Tab | Complete command or file path |
+| Clear screen | Ctrl+L | Clear terminal output buffer |
+| Quit/Cancel | Ctrl+C | Context-aware: cancel operations or clear input |
+
+**Note**: The visual scrollbar appears on the right side of the output area when the content exceeds the visible space, showing your position in the output history.
 
 #### Interactive Commands
 
