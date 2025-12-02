@@ -63,8 +63,10 @@ impl TerminalState {
     }
 
     /// Update the number of visible lines (called during render)
+    /// Also propagates to OutputBuffer for scroll calculations
     pub fn set_visible_lines(&mut self, lines: usize) {
         self.visible_lines = lines;
+        self.output.set_visible_lines(lines);
     }
 
     /// Get the number of visible lines
@@ -136,9 +138,8 @@ impl TerminalState {
     }
 
     /// Scroll output down
-    /// Uses the stored visible_lines to calculate the maximum scroll position
     pub fn scroll_down(&mut self) {
-        self.output.scroll_down(self.visible_lines);
+        self.output.scroll_down();
     }
 
     /// Check if terminal is in a Human-in-the-Loop (HITL) waiting state
