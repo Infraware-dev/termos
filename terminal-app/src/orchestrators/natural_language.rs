@@ -111,6 +111,8 @@ impl NaturalLanguageOrchestrator {
                 // Render the response with formatting
                 let formatted_lines = self.renderer.render(&response);
                 state.add_output_lines(formatted_lines);
+                // Return to normal mode after complete response
+                state.mode = TerminalMode::Normal;
             }
             LLMQueryResult::CommandApproval { command, message } => {
                 // Human-in-the-loop: show command approval request

@@ -708,55 +708,50 @@ impl HttpLLMClient {
                     {
                         for interrupt in interrupts {
                             if let Some(value) = interrupt.get("value") {
-                                let interrupt_type =
-                                    value.get("type").and_then(|v| v.as_str()).unwrap_or("");
-
-                                match interrupt_type {
-                                    "command_approval" => {
-                                        let command = value
-                                            .get("command")
-                                            .and_then(|v| v.as_str())
-                                            .unwrap_or("unknown")
-                                            .to_string();
-                                        let message = value
-                                            .get("message")
-                                            .and_then(|v| v.as_str())
-                                            .unwrap_or("Command requires approval")
-                                            .to_string();
-                                        log::info!(
-                                            "Command approval requested for: {} - awaiting user decision",
-                                            command
-                                        );
-                                        return Ok(Some(InterruptData::CommandApproval {
-                                            command,
-                                            message,
-                                        }));
-                                    }
-                                    // Treat "question" or any other type as a question
-                                    _ => {
-                                        let question = value
-                                            .get("question")
-                                            .or_else(|| value.get("message"))
-                                            .and_then(|v| v.as_str())
-                                            .unwrap_or("Agent is asking for input")
-                                            .to_string();
-                                        let options = value
-                                            .get("options")
-                                            .and_then(|v| v.as_array())
-                                            .map(|arr| {
-                                                arr.iter()
-                                                    .filter_map(|v| v.as_str().map(String::from))
-                                                    .collect()
-                                            });
-                                        log::info!(
-                                            "Question received: {} - awaiting user answer",
-                                            question
-                                        );
-                                        return Ok(Some(InterruptData::Question {
-                                            question,
-                                            options,
-                                        }));
-                                    }
+                                // Detect interrupt type by field presence (compatible with Python backend)
+                                // Backend sends: {"command": "...", "message": "..."} for approvals
+                                // or {"question": "...", "options": [...]} for questions
+                                if value.get("command").is_some() {
+                                    // CommandApproval: has "command" field
+                                    let command = value
+                                        .get("command")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("unknown")
+                                        .to_string();
+                                    let message = value
+                                        .get("message")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("Command requires approval")
+                                        .to_string();
+                                    log::info!(
+                                        "Command approval requested for: {} - awaiting user decision",
+                                        command
+                                    );
+                                    return Ok(Some(InterruptData::CommandApproval {
+                                        command,
+                                        message,
+                                    }));
+                                } else {
+                                    // Question: has "question" field or only "message"
+                                    let question = value
+                                        .get("question")
+                                        .or_else(|| value.get("message"))
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("Agent is asking for input")
+                                        .to_string();
+                                    let options = value
+                                        .get("options")
+                                        .and_then(|v| v.as_array())
+                                        .map(|arr| {
+                                            arr.iter()
+                                                .filter_map(|v| v.as_str().map(String::from))
+                                                .collect()
+                                        });
+                                    log::info!(
+                                        "Question received: {} - awaiting user answer",
+                                        question
+                                    );
+                                    return Ok(Some(InterruptData::Question { question, options }));
                                 }
                             }
                         }

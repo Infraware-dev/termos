@@ -508,7 +508,9 @@ impl InfrawareTerminal {
         // Handle human-in-the-loop command approval mode (y/n)
         if self.state.mode == TerminalMode::AwaitingCommandApproval {
             let trimmed = input.trim().to_lowercase();
-            let approved = trimmed == "y" || trimmed == "yes";
+            // Approve: "y", "yes", or empty (Enter = default approve, like Python backend)
+            // Reject: "n", "no", or any other input
+            let approved = trimmed.is_empty() || trimmed == "y" || trimmed == "yes";
             self.state.add_output(MessageFormatter::command(&input));
 
             // Delegate to orchestrator for approval handling
@@ -604,7 +606,14 @@ impl InfrawareTerminal {
         }
 
         self.state.add_output(String::new()); // Empty line for spacing
-        self.state.mode = TerminalMode::Normal;
+
+        // Only reset to Normal if not in a HITL waiting state
+        // (handle_query_result may have set AwaitingCommandApproval or AwaitingAnswer)
+        if self.state.mode != TerminalMode::AwaitingCommandApproval
+            && self.state.mode != TerminalMode::AwaitingAnswer
+        {
+            self.state.mode = TerminalMode::Normal;
+        }
 
         Ok(true)
     }
