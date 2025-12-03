@@ -1,14 +1,14 @@
 /// Command execution orchestrator
 ///
 /// This orchestrator is responsible for:
-/// - Handling built-in commands (like "clear")
+/// - Handling built-in commands (like "clear", "jobs")
 /// - Checking command existence
-/// - Executing commands
+/// - Executing commands (foreground and background)
 /// - Formatting command output
 use anyhow::Result;
 
 use crate::executor::command::CommandOutput;
-use crate::executor::{CommandExecutor, PackageInstaller};
+use crate::executor::{CommandExecutor, JobInfo, JobStatus, PackageInstaller, SharedJobManager};
 use crate::input::shell_builtins::ShellBuiltinHandler;
 use crate::terminal::{TerminalState, TerminalUI};
 use crate::utils::MessageFormatter;
@@ -27,7 +27,8 @@ impl CommandOrchestrator {
     /// Handle command execution with all the necessary logic
     ///
     /// This method encapsulates:
-    /// - Built-in command handling (e.g., "clear")
+    /// - Built-in command handling (e.g., "clear", "jobs")
+    /// - Background command handling (commands ending with &)
     /// - Command existence checking
     /// - Command execution
     /// - Output formatting and display
@@ -38,6 +39,7 @@ impl CommandOrchestrator {
     /// * `original_input` - Optional original input string (for shell operators like pipes)
     /// * `state` - Terminal state
     /// * `ui` - Terminal UI
+    /// * `job_manager` - Shared job manager for background processes
     pub async fn handle_command(
         &self,
         cmd: &str,
@@ -45,6 +47,7 @@ impl CommandOrchestrator {
         original_input: Option<&str>,
         state: &mut TerminalState,
         ui: &mut TerminalUI,
+        job_manager: &SharedJobManager,
     ) -> Result<()> {
         // Handle special built-in commands that would interfere with TUI
         if cmd == "clear" {
@@ -59,6 +62,20 @@ impl CommandOrchestrator {
         // Handle reload-commands built-in command
         if cmd == "reload-commands" {
             return self.handle_reload_commands_command(state);
+        }
+
+        // Handle jobs built-in command
+        if cmd == "jobs" {
+            return self.handle_jobs_command(state, job_manager);
+        }
+
+        // Check for background command (ends with &)
+        if let Some(input) = original_input {
+            if CommandExecutor::is_background_command(input) {
+                return self
+                    .execute_background_and_display(input, state, job_manager)
+                    .await;
+            }
         }
 
         // Check if command exists BEFORE trying any execution
@@ -143,6 +160,59 @@ impl CommandOrchestrator {
         state.add_output(MessageFormatter::success(
             "Command cache cleared. New commands will be discovered on next use.",
         ));
+
+        Ok(())
+    }
+
+    /// Handle the built-in "jobs" command
+    ///
+    /// Lists all background jobs with their status.
+    fn handle_jobs_command(
+        &self,
+        state: &mut TerminalState,
+        job_manager: &SharedJobManager,
+    ) -> Result<()> {
+        let jobs: Vec<JobInfo> = {
+            let mgr = job_manager
+                .read()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            mgr.list_jobs()
+        };
+
+        if jobs.is_empty() {
+            state.add_output(MessageFormatter::info("No background jobs"));
+        } else {
+            for job in jobs {
+                let status_str = match job.status {
+                    JobStatus::Running => "Running".to_string(),
+                    JobStatus::Done(code) => format!("Done (exit: {})", code),
+                    JobStatus::Terminated => "Terminated".to_string(),
+                };
+                state.add_output(format!(
+                    "[{}] {} {} (PID: {})",
+                    job.id, status_str, job.command, job.pid
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Execute a command in the background and display status
+    async fn execute_background_and_display(
+        &self,
+        command: &str,
+        state: &mut TerminalState,
+        job_manager: &SharedJobManager,
+    ) -> Result<()> {
+        match CommandExecutor::execute_background(command, job_manager).await {
+            Ok((job_id, pid)) => {
+                state.add_output(format!("[{}] {} (PID: {})", job_id, command.trim(), pid));
+            }
+            Err(e) => {
+                state.add_output(MessageFormatter::execution_error(e.to_string()));
+            }
+        }
 
         Ok(())
     }

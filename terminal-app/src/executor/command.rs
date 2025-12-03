@@ -5,6 +5,7 @@ use std::process::Stdio;
 use tokio::process::Command as TokioCommand;
 use tokio::time::{timeout, Duration};
 
+use super::job_manager::SharedJobManager;
 use crate::input::shell_builtins::ShellBuiltinHandler;
 
 /// Output from a command execution
@@ -546,6 +547,110 @@ impl CommandExecutor {
             exit_code: output.status.code().unwrap_or(-1),
         })
     }
+
+    /// Check if a command should be executed in the background
+    ///
+    /// Returns true if the command ends with `&` but NOT `&&`.
+    /// Also checks that the `&` is not inside quotes.
+    ///
+    /// # Examples
+    /// ```
+    /// use infraware_terminal::executor::CommandExecutor;
+    ///
+    /// assert!(CommandExecutor::is_background_command("sleep 10 &"));
+    /// assert!(CommandExecutor::is_background_command("echo hello &"));
+    /// assert!(!CommandExecutor::is_background_command("cmd1 && cmd2"));
+    /// assert!(!CommandExecutor::is_background_command("echo hello"));
+    /// assert!(!CommandExecutor::is_background_command("echo \"a & b\""));
+    /// ```
+    #[must_use]
+    pub fn is_background_command(input: &str) -> bool {
+        let trimmed = input.trim();
+
+        // Must end with & but not &&
+        if !trimmed.ends_with('&') || trimmed.ends_with("&&") {
+            return false;
+        }
+
+        // Check that the trailing & is not inside quotes and not escaped
+        let mut in_single_quote = false;
+        let mut in_double_quote = false;
+        let mut last_was_backslash = false;
+        let chars: Vec<char> = trimmed.chars().collect();
+
+        for (i, &c) in chars.iter().enumerate() {
+            let is_last = i == chars.len() - 1;
+
+            if last_was_backslash {
+                // This character is escaped
+                if is_last && c == '&' {
+                    // The trailing & is escaped
+                    return false;
+                }
+                last_was_backslash = false;
+                continue;
+            }
+
+            match c {
+                '\\' if !in_single_quote => {
+                    // Backslash escapes next char (unless in single quotes)
+                    last_was_backslash = true;
+                }
+                '\'' if !in_double_quote => {
+                    in_single_quote = !in_single_quote;
+                }
+                '"' if !in_single_quote => {
+                    in_double_quote = !in_double_quote;
+                }
+                _ => {}
+            }
+        }
+
+        // If we're still inside quotes at the end, the & is quoted
+        !in_single_quote && !in_double_quote
+    }
+
+    /// Execute a command in the background without waiting
+    ///
+    /// Spawns the process and immediately returns, adding it to the job manager.
+    /// The job manager tracks the process and can report when it completes.
+    ///
+    /// # Arguments
+    /// * `command` - The full command string (including the trailing &)
+    /// * `job_manager` - Shared job manager for tracking
+    ///
+    /// # Returns
+    /// Tuple of (job_id, pid) on success
+    pub async fn execute_background(
+        command: &str,
+        job_manager: &SharedJobManager,
+    ) -> Result<(usize, u32)> {
+        let (shell, flag) = Self::get_platform_shell();
+
+        log::info!("Spawning background command: {}", command);
+
+        let child = TokioCommand::new(shell)
+            .arg(flag)
+            .arg(command)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null()) // Don't capture output for background
+            .stderr(Stdio::null())
+            .spawn()
+            .context("Failed to spawn background command")?;
+
+        let pid = child.id().unwrap_or(0);
+
+        let job_id = {
+            let mut mgr = job_manager
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            mgr.add_job(command.to_string(), pid, child)
+        };
+
+        log::info!("Background job [{}] started with PID {}", job_id, pid);
+
+        Ok((job_id, pid))
+    }
 }
 
 #[cfg(test)]
@@ -863,5 +968,51 @@ mod tests {
             .unwrap();
         assert!(output.is_success());
         assert_eq!(output.stdout.trim(), "nested");
+    }
+
+    // ========== Background Command Detection Tests ==========
+
+    #[test]
+    fn test_is_background_command_simple() {
+        assert!(CommandExecutor::is_background_command("sleep 10 &"));
+        assert!(CommandExecutor::is_background_command("echo hello &"));
+        assert!(CommandExecutor::is_background_command("  sleep 5 &  ")); // with whitespace
+    }
+
+    #[test]
+    fn test_is_background_command_not_double_ampersand() {
+        assert!(!CommandExecutor::is_background_command("cmd1 && cmd2"));
+        assert!(!CommandExecutor::is_background_command("echo a && echo b"));
+    }
+
+    #[test]
+    fn test_is_background_command_no_ampersand() {
+        assert!(!CommandExecutor::is_background_command("echo hello"));
+        assert!(!CommandExecutor::is_background_command("ls -la"));
+    }
+
+    #[test]
+    fn test_is_background_command_ampersand_in_quotes() {
+        // Ampersand inside quotes is NOT a background operator
+        assert!(!CommandExecutor::is_background_command("echo \"a & b\""));
+        assert!(!CommandExecutor::is_background_command(
+            "echo 'run in background &'"
+        ));
+    }
+
+    #[test]
+    fn test_is_background_command_escaped_ampersand() {
+        // Escaped ampersand is NOT a background operator
+        assert!(!CommandExecutor::is_background_command("echo hello \\&"));
+    }
+
+    #[test]
+    fn test_is_background_command_complex() {
+        // Multiple commands with final background
+        assert!(CommandExecutor::is_background_command("cmd1; cmd2 &"));
+        // Pipe with background
+        assert!(CommandExecutor::is_background_command(
+            "cat file | grep pattern &"
+        ));
     }
 }

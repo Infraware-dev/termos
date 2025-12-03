@@ -12,6 +12,7 @@
 /// - `cd`: Change working directory (must be handled by parent process)
 /// - `clear`: Clear the terminal output buffer
 /// - `exit`: Exit the terminal application
+/// - `jobs`: List background jobs
 /// - `reload-aliases`: Reload alias definitions from system and user config files
 /// - `reload-commands`: Clear the command cache (useful after installing new commands)
 /// - `auth-status`: Check backend authentication status
@@ -23,6 +24,7 @@
 /// assert!(APPLICATION_BUILTINS.contains(&"cd"));
 /// assert!(APPLICATION_BUILTINS.contains(&"clear"));
 /// assert!(APPLICATION_BUILTINS.contains(&"exit"));
+/// assert!(APPLICATION_BUILTINS.contains(&"jobs"));
 /// assert!(APPLICATION_BUILTINS.contains(&"reload-aliases"));
 /// assert!(APPLICATION_BUILTINS.contains(&"reload-commands"));
 /// assert!(APPLICATION_BUILTINS.contains(&"auth-status"));
@@ -31,6 +33,7 @@ pub const APPLICATION_BUILTINS: &[&str] = &[
     "cd",
     "clear",
     "exit",
+    "jobs",
     "reload-aliases",
     "reload-commands",
     "auth-status",
@@ -101,15 +104,21 @@ mod tests {
 
     #[test]
     fn test_builtin_list_count() {
-        // Verify we have exactly 6 application builtins
-        assert_eq!(APPLICATION_BUILTINS.len(), 6);
+        // Verify we have exactly 7 application builtins
+        assert_eq!(APPLICATION_BUILTINS.len(), 7);
         // Verify they are the expected ones
         assert!(APPLICATION_BUILTINS.contains(&"cd"));
         assert!(APPLICATION_BUILTINS.contains(&"clear"));
         assert!(APPLICATION_BUILTINS.contains(&"exit"));
+        assert!(APPLICATION_BUILTINS.contains(&"jobs"));
         assert!(APPLICATION_BUILTINS.contains(&"reload-aliases"));
         assert!(APPLICATION_BUILTINS.contains(&"reload-commands"));
         assert!(APPLICATION_BUILTINS.contains(&"auth-status"));
+    }
+
+    #[test]
+    fn test_jobs_is_builtin() {
+        assert!(is_application_builtin("jobs"));
     }
 
     #[test]

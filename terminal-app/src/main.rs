@@ -6,7 +6,7 @@
 /// 2. LLM backend for natural language queries
 ///
 /// Target use case: DevOps operations in cloud environments (AWS/Azure) with AI assistance
-use infraware_terminal::{auth, input, llm, logging, orchestrators, terminal, utils};
+use infraware_terminal::{auth, executor, input, llm, logging, orchestrators, terminal, utils};
 
 use anyhow::Result;
 use std::path::PathBuf;
@@ -15,6 +15,7 @@ use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
 
 use auth::{AuthConfig, Authenticator, HttpAuthenticator};
+use executor::{create_shared_job_manager, SharedJobManager};
 use input::{InputClassifier, InputType};
 use llm::{HttpLLMClient, LLMClientTrait, MockLLMClient, ResponseRenderer};
 use orchestrators::{
@@ -55,6 +56,8 @@ pub struct InfrawareTerminal {
     /// Watch channel sender for cancellation token - allows sharing current token with poller
     /// Main loop can send new token to reset, poller can read current token to cancel
     cancellation_token_tx: watch::Sender<CancellationToken>,
+    /// Shared job manager for background processes
+    job_manager: SharedJobManager,
 }
 
 impl std::fmt::Debug for InfrawareTerminal {
@@ -77,6 +80,7 @@ impl std::fmt::Debug for InfrawareTerminal {
                     self.cancellation_token_tx.borrow().is_cancelled()
                 ),
             )
+            .field("job_manager", &"<SharedJobManager>")
             .finish()
     }
 }
@@ -248,6 +252,8 @@ impl InfrawareTerminalBuilder {
             using_mock_llm: self.using_mock_llm,
             // Create watch channel for cancellation token sharing with poller
             cancellation_token_tx: watch::channel(CancellationToken::new()).0,
+            // Create shared job manager for background processes
+            job_manager: create_shared_job_manager(),
         })
     }
 }
@@ -421,6 +427,9 @@ impl InfrawareTerminal {
             if !self.handle_event(event).await? {
                 break; // Quit requested
             }
+
+            // Check for completed background jobs
+            self.check_completed_jobs();
 
             // Re-render after handling event
             self.ui.render(&mut self.state)?;
@@ -688,7 +697,14 @@ impl InfrawareTerminal {
         }
 
         self.command_orchestrator
-            .handle_command(cmd, args, original_input, &mut self.state, &mut self.ui)
+            .handle_command(
+                cmd,
+                args,
+                original_input,
+                &mut self.state,
+                &mut self.ui,
+                &self.job_manager,
+            )
             .await
     }
 
@@ -773,6 +789,30 @@ impl InfrawareTerminal {
         Ok(())
     }
 
+    /// Check for completed background jobs and display notifications
+    ///
+    /// Called after each event to provide timely feedback when background
+    /// processes complete.
+    fn check_completed_jobs(&mut self) {
+        let completed: Vec<executor::JobInfo> = {
+            let mut mgr = self
+                .job_manager
+                .write()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            mgr.check_completed()
+        };
+
+        for job in completed {
+            let exit_info = match job.status {
+                executor::JobStatus::Done(code) => format!("exit: {}", code),
+                executor::JobStatus::Terminated => "terminated".to_string(),
+                executor::JobStatus::Running => continue, // Should not happen
+            };
+            self.state
+                .add_output(format!("[{}] Done ({}) {}", job.id, exit_info, job.command));
+        }
+    }
+
     /// Handle command typo
     ///
     /// Auto-corrects the typo and executes the suggested command
@@ -804,7 +844,14 @@ impl InfrawareTerminal {
         match CommandParser::parse(&corrected_input) {
             Ok((command, args)) => {
                 self.command_orchestrator
-                    .handle_command(&command, &args, None, &mut self.state, &mut self.ui)
+                    .handle_command(
+                        &command,
+                        &args,
+                        None,
+                        &mut self.state,
+                        &mut self.ui,
+                        &self.job_manager,
+                    )
                     .await
             }
             Err(e) => {
