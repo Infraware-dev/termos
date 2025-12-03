@@ -51,6 +51,8 @@ const TRIM_LINES: usize = 1_000;
 pub struct OutputBuffer {
     buffer: Vec<String>,
     scroll_position: usize,
+    /// Number of visible lines in the viewport (for scroll calculations)
+    visible_lines: usize,
 }
 
 impl OutputBuffer {
@@ -59,6 +61,7 @@ impl OutputBuffer {
         Self {
             buffer: Vec::new(),
             scroll_position: 0,
+            visible_lines: 20, // Default, updated by TUI
         }
     }
 
@@ -86,17 +89,29 @@ impl OutputBuffer {
         self.scroll_position
     }
 
-    /// Scroll up by one line
-    pub const fn scroll_up(&mut self) {
+    /// Scroll up by one line (moves view window up)
+    pub fn scroll_up(&mut self) {
         if self.scroll_position > 0 {
             self.scroll_position -= 1;
         }
     }
 
-    /// Scroll down by one line
-    pub const fn scroll_down(&mut self) {
-        if self.scroll_position < self.buffer.len().saturating_sub(1) {
+    /// Scroll down by one line (moves view window down)
+    pub fn scroll_down(&mut self) {
+        let max_scroll = self.buffer.len().saturating_sub(self.visible_lines);
+        if self.scroll_position < max_scroll {
             self.scroll_position += 1;
+        }
+    }
+
+    /// Set the number of visible lines for scroll calculations
+    /// Call this when the terminal is resized
+    pub fn set_visible_lines(&mut self, visible_lines: usize) {
+        self.visible_lines = visible_lines;
+        // Clamp scroll position to valid range
+        let max_scroll = self.buffer.len().saturating_sub(visible_lines);
+        if self.scroll_position > max_scroll {
+            self.scroll_position = max_scroll;
         }
     }
 
@@ -110,8 +125,11 @@ impl OutputBuffer {
     }
 
     /// Auto-scroll to the bottom of the buffer
-    const fn auto_scroll_to_bottom(&mut self) {
-        self.scroll_position = self.buffer.len().saturating_sub(1);
+    /// Sets scroll_position to the maximum valid value (shows last visible_lines)
+    fn auto_scroll_to_bottom(&mut self) {
+        // max_scroll is the position that shows the last visible_lines
+        let max_scroll = self.buffer.len().saturating_sub(self.visible_lines);
+        self.scroll_position = max_scroll;
     }
 
     /// Remove the last line from the buffer (used for removing temporary messages)
@@ -201,7 +219,7 @@ impl InputBuffer {
     }
 
     /// Move cursor left
-    pub const fn move_cursor_left(&mut self) {
+    pub fn move_cursor_left(&mut self) {
         if self.cursor_position > 0 {
             self.cursor_position -= 1;
         }
@@ -303,7 +321,7 @@ impl CommandHistory {
     }
 
     /// Reset the history navigation position
-    pub const fn reset_position(&mut self) {
+    pub fn reset_position(&mut self) {
         self.position = None;
     }
 
@@ -337,18 +355,32 @@ mod tests {
     #[test]
     fn test_output_buffer_scroll() {
         let mut buffer = OutputBuffer::new();
+        // Set visible lines first (simulating TUI setup)
+        buffer.set_visible_lines(2);
+
         buffer.add_line("line 1".to_string());
         buffer.add_line("line 2".to_string());
         buffer.add_line("line 3".to_string());
 
-        // Auto-scrolls to bottom
-        assert_eq!(buffer.scroll_position(), 2);
-
-        buffer.scroll_up();
+        // With 3 lines and 2 visible, max_scroll = 3-2 = 1
+        // Auto-scrolls to bottom (scroll_position = max_scroll = 1)
         assert_eq!(buffer.scroll_position(), 1);
 
+        // Scroll up from position 1 to 0
+        buffer.scroll_up();
+        assert_eq!(buffer.scroll_position(), 0);
+
+        // Try scrolling up past 0 - should stay at 0
+        buffer.scroll_up();
+        assert_eq!(buffer.scroll_position(), 0);
+
+        // Scroll down back to max
         buffer.scroll_down();
-        assert_eq!(buffer.scroll_position(), 2);
+        assert_eq!(buffer.scroll_position(), 1);
+
+        // Try scrolling down past max - should stay at max
+        buffer.scroll_down();
+        assert_eq!(buffer.scroll_position(), 1);
     }
 
     #[test]
@@ -450,21 +482,28 @@ mod tests {
     #[test]
     fn test_output_buffer_pop_adjusts_scroll() {
         let mut buffer = OutputBuffer::new();
+        // Set visible lines to 1 so we have scrollable content
+        buffer.set_visible_lines(1);
+
         buffer.add_line("line 1".to_string());
         buffer.add_line("line 2".to_string());
         buffer.add_line("line 3".to_string());
+
+        // With 3 lines and 1 visible, max_scroll = 2
+        // Auto-scrolls to bottom (scroll_position = 2)
+        assert_eq!(buffer.scroll_position(), 2);
 
         // Scroll up from bottom
         buffer.scroll_up();
         assert_eq!(buffer.scroll_position(), 1);
 
-        // Pop last line
+        // Pop last line (now 2 lines, max_scroll = 2-1 = 1)
         let popped = buffer.pop();
         assert_eq!(popped, Some("line 3".to_string()));
         assert_eq!(buffer.lines().len(), 2);
 
-        // Scroll should still be valid
-        assert!(buffer.scroll_position() <= buffer.lines().len());
+        // Scroll position should still be valid (1 <= max_scroll=1)
+        assert_eq!(buffer.scroll_position(), 1);
     }
 
     #[test]

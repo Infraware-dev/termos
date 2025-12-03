@@ -30,9 +30,8 @@
 /// ```
 pub fn default_devops_commands() -> Vec<String> {
     vec![
-        // Basic shell
+        // Basic shell (cd is handled as application builtin)
         "ls",
-        "cd",
         "pwd",
         "cat",
         "echo",
@@ -208,7 +207,7 @@ mod tests {
     fn test_contains_basic_shell_commands() {
         let commands = default_devops_commands();
         assert!(commands.contains(&"ls".to_string()));
-        assert!(commands.contains(&"cd".to_string()));
+        // cd is handled as application builtin, not a known command
         assert!(commands.contains(&"pwd".to_string()));
     }
 

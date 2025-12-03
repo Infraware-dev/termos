@@ -34,6 +34,8 @@ enum AnimationPhase {
 
 /// Light blue color for final logo
 const LOGO_COLOR: Color = Color::Rgb(100, 180, 255);
+/// Darker blue for shimmer effect
+const LOGO_COLOR_ALT: Color = Color::Rgb(60, 140, 220);
 
 /// A single particle in the animation
 #[derive(Debug, Clone)]
@@ -50,8 +52,6 @@ struct Particle {
     start_x: f64,
     /// Starting Y position (random scatter position)
     start_y: f64,
-    /// Base color of this particle
-    color: Color,
     /// Random offset for color animation
     color_offset: f64,
 }
@@ -69,10 +69,6 @@ impl Particle {
         let start_x = ((seed * 7.3).sin() * 0.5 + 0.5) * screen_width as f64;
         let start_y = ((seed * 11.7).cos() * 0.5 + 0.5) * screen_height as f64;
 
-        // Color based on position for rainbow effect
-        let hue = (target_x / 70.0) * 360.0;
-        let color = hue_to_rgb(hue);
-
         Self {
             x: start_x,
             y: start_y,
@@ -80,7 +76,6 @@ impl Particle {
             target_y,
             start_x,
             start_y,
-            color,
             color_offset: seed * 0.1,
         }
     }
@@ -94,22 +89,23 @@ impl Particle {
         self.y = self.start_y + (self.target_y - self.start_y) * eased;
     }
 
-    /// Get current color with pulse effect
+    /// Get current color with shimmer effect between two shades of celeste
     fn get_color(&self, time: f64, phase: AnimationPhase) -> Color {
         match phase {
             AnimationPhase::Scatter => {
-                // Bright random colors during scatter
-                let hue = ((time * 2.0 + self.color_offset * 10.0) * 60.0) % 360.0;
-                hue_to_rgb(hue)
+                // Fast shimmer between two celestes during scatter
+                let shimmer = (time * 5.0 + self.color_offset * 10.0).sin() * 0.5 + 0.5;
+                lerp_color(LOGO_COLOR_ALT, LOGO_COLOR, shimmer)
             }
             AnimationPhase::Assembly => {
-                // Transition to target color
-                self.color
+                // Slower shimmer during assembly
+                let shimmer = (time * 3.0 + self.color_offset * 5.0).sin() * 0.5 + 0.5;
+                lerp_color(LOGO_COLOR_ALT, LOGO_COLOR, shimmer)
             }
             AnimationPhase::Pulse => {
-                // Pulsing brightness with rainbow
+                // Pulsing brightness on celeste
                 let pulse = ((time * 3.0 + self.color_offset).sin() * 0.3 + 0.7).clamp(0.4, 1.0);
-                brighten_color(self.color, pulse)
+                brighten_color(LOGO_COLOR, pulse)
             }
             AnimationPhase::Hold => {
                 // Solid light blue for final display
@@ -288,23 +284,6 @@ impl SplashScreen {
     }
 }
 
-/// Convert HSL hue (0-360) to RGB Color
-fn hue_to_rgb(hue: f64) -> Color {
-    let h = (hue % 360.0) / 60.0;
-    let x = 1.0 - (h % 2.0 - 1.0).abs();
-
-    let (r, g, b) = match h as u32 {
-        0 => (1.0, x, 0.0),
-        1 => (x, 1.0, 0.0),
-        2 => (0.0, 1.0, x),
-        3 => (0.0, x, 1.0),
-        4 => (x, 0.0, 1.0),
-        _ => (1.0, 0.0, x),
-    };
-
-    Color::Rgb((r * 255.0) as u8, (g * 255.0) as u8, (b * 255.0) as u8)
-}
-
 /// Brighten or darken a color
 fn brighten_color(color: Color, factor: f64) -> Color {
     match color {
@@ -329,6 +308,19 @@ fn fade_color(color: Color, opacity: f64) -> Color {
     }
 }
 
+/// Linear interpolation between two colors
+fn lerp_color(a: Color, b: Color, t: f64) -> Color {
+    if let (Color::Rgb(r1, g1, b1), Color::Rgb(r2, g2, b2)) = (a, b) {
+        Color::Rgb(
+            (r1 as f64 + (r2 as f64 - r1 as f64) * t) as u8,
+            (g1 as f64 + (g2 as f64 - g1 as f64) * t) as u8,
+            (b1 as f64 + (b2 as f64 - b1 as f64) * t) as u8,
+        )
+    } else {
+        b
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -337,18 +329,6 @@ mod tests {
     fn test_particle_creation() {
         let particles = SplashScreen::create_particles(100, 30);
         assert!(!particles.is_empty());
-    }
-
-    #[test]
-    fn test_hue_to_rgb() {
-        let red = hue_to_rgb(0.0);
-        assert!(matches!(red, Color::Rgb(255, 0, 0)));
-
-        let green = hue_to_rgb(120.0);
-        assert!(matches!(green, Color::Rgb(0, 255, 0)));
-
-        let blue = hue_to_rgb(240.0);
-        assert!(matches!(blue, Color::Rgb(0, 0, 255)));
     }
 
     #[test]

@@ -111,6 +111,8 @@ impl NaturalLanguageOrchestrator {
                 // Render the response with formatting
                 let formatted_lines = self.renderer.render(&response);
                 state.add_output_lines(formatted_lines);
+                // Return to normal mode after complete response
+                state.mode = TerminalMode::Normal;
             }
             LLMQueryResult::CommandApproval { command, message } => {
                 // Human-in-the-loop: show command approval request
@@ -198,9 +200,7 @@ impl NaturalLanguageOrchestrator {
         }
 
         // If we're not in another waiting state, return to Normal
-        if state.mode != TerminalMode::AwaitingCommandApproval
-            && state.mode != TerminalMode::AwaitingAnswer
-        {
+        if !state.is_in_hitl_mode() {
             state.mode = TerminalMode::Normal;
         }
 
@@ -241,9 +241,7 @@ impl NaturalLanguageOrchestrator {
         }
 
         // If we're not in another waiting state, return to Normal
-        if state.mode != TerminalMode::AwaitingCommandApproval
-            && state.mode != TerminalMode::AwaitingAnswer
-        {
+        if !state.is_in_hitl_mode() {
             state.mode = TerminalMode::Normal;
         }
 

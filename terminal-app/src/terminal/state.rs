@@ -45,6 +45,8 @@ pub struct TerminalState {
     pub mode: TerminalMode,
     /// Pending interaction for human-in-the-loop (HITL) flow
     pub pending_interaction: Option<PendingInteraction>,
+    /// Number of visible lines in output area (updated during render)
+    visible_lines: usize,
 }
 
 impl TerminalState {
@@ -56,7 +58,20 @@ impl TerminalState {
             history: CommandHistory::new(),
             mode: TerminalMode::Normal,
             pending_interaction: None,
+            visible_lines: 20, // Default, updated during render
         }
+    }
+
+    /// Update the number of visible lines (called during render)
+    /// Also propagates to OutputBuffer for scroll calculations
+    pub fn set_visible_lines(&mut self, lines: usize) {
+        self.visible_lines = lines;
+        self.output.set_visible_lines(lines);
+    }
+
+    /// Get the number of visible lines
+    pub const fn visible_lines(&self) -> usize {
+        self.visible_lines
     }
 
     /// Add a line to the output buffer
@@ -93,7 +108,7 @@ impl TerminalState {
     }
 
     /// Move cursor left
-    pub const fn move_cursor_left(&mut self) {
+    pub fn move_cursor_left(&mut self) {
         self.input.move_cursor_left();
     }
 
@@ -118,13 +133,23 @@ impl TerminalState {
     }
 
     /// Scroll output up
-    pub const fn scroll_up(&mut self) {
+    pub fn scroll_up(&mut self) {
         self.output.scroll_up();
     }
 
     /// Scroll output down
-    pub const fn scroll_down(&mut self) {
+    pub fn scroll_down(&mut self) {
         self.output.scroll_down();
+    }
+
+    /// Check if terminal is in a Human-in-the-Loop (HITL) waiting state
+    ///
+    /// Returns true if waiting for user approval (y/n) or answer (free text)
+    pub fn is_in_hitl_mode(&self) -> bool {
+        matches!(
+            self.mode,
+            TerminalMode::AwaitingCommandApproval | TerminalMode::AwaitingAnswer
+        )
     }
 }
 

@@ -6,15 +6,23 @@ use crossterm::{
 /// TUI rendering logic using ratatui
 use ratatui::{
     backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout, Rect},
+    layout::{Constraint, Direction, Layout, Margin, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Wrap},
+    widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap},
     Frame, Terminal,
 };
 use std::io;
 
 use super::state::{TerminalMode, TerminalState};
+
+// Layout constants for terminal areas
+/// Height of the status bar (1 line)
+const STATUS_BAR_HEIGHT: u16 = 1;
+/// Height of the input area (3 lines including borders)
+const INPUT_AREA_HEIGHT: u16 = 3;
+/// Height of output area borders (top + bottom)
+const OUTPUT_BORDER_HEIGHT: u16 = 2;
 
 /// TUI wrapper for the terminal
 pub struct TerminalUI {
@@ -42,7 +50,19 @@ impl TerminalUI {
     }
 
     /// Render the terminal UI
-    pub fn render(&mut self, state: &TerminalState) -> Result<()> {
+    /// Updates state.visible_lines based on actual terminal size
+    pub fn render(&mut self, state: &mut TerminalState) -> Result<()> {
+        // Calculate visible lines from terminal size before rendering
+        let size = self.terminal.size()?;
+
+        // Output area height = total - status bar - input area
+        let output_height = size
+            .height
+            .saturating_sub(STATUS_BAR_HEIGHT + INPUT_AREA_HEIGHT);
+        // Visible content lines = output area minus borders
+        let visible_lines = output_height.saturating_sub(OUTPUT_BORDER_HEIGHT) as usize;
+        state.set_visible_lines(visible_lines);
+
         self.terminal.draw(|frame| {
             render_frame(frame, state);
         })?;
@@ -139,19 +159,28 @@ fn render_frame(frame: &mut Frame, state: &TerminalState) {
     render_input(frame, chunks[2], state);
 }
 
-/// Render the output buffer
+/// Render the output buffer with scrollbar
 fn render_output(frame: &mut Frame, area: Rect, state: &TerminalState) {
-    let output_text = if state.output.lines().is_empty() {
+    let total_lines = state.output.lines().len();
+    // Use pre-calculated visible_lines from state (set in render())
+    let visible_lines = state.visible_lines();
+
+    // Calculate scroll position once for both content and scrollbar
+    let scroll_pos = state.output.scroll_position();
+    let max_scroll = total_lines.saturating_sub(visible_lines);
+    let effective_scroll = scroll_pos.min(max_scroll);
+
+    let output_text = if total_lines == 0 {
         vec![Line::from(Span::styled(
             "Infraware Terminal - Type a command or ask a question",
             Style::default().fg(Color::Gray),
         ))]
     } else {
-        // Show the last N lines that fit in the area
-        let visible_lines = area.height.saturating_sub(2) as usize; // -2 for borders
-        let start = state.output.lines().len().saturating_sub(visible_lines);
+        // Calculate start and end indices for visible window
+        let start = effective_scroll;
+        let end = (start + visible_lines).min(total_lines);
 
-        state.output.lines()[start..]
+        state.output.lines()[start..end]
             .iter()
             .map(|line| {
                 // Parse ANSI codes and convert to ratatui spans with proper styling
@@ -178,6 +207,24 @@ fn render_output(frame: &mut Frame, area: Rect, state: &TerminalState) {
         .wrap(Wrap { trim: false });
 
     frame.render_widget(output_widget, area);
+
+    // Render scrollbar only if content exceeds visible area
+    if total_lines > visible_lines {
+        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+            .begin_symbol(Some("▲"))
+            .end_symbol(Some("▼"))
+            .track_symbol(Some("│"))
+            .thumb_symbol("█");
+
+        let mut scrollbar_state = ScrollbarState::new(max_scroll).position(effective_scroll);
+
+        // Render scrollbar in the inner area (inside the border)
+        let inner_area = area.inner(Margin {
+            horizontal: 0,
+            vertical: 1,
+        });
+        frame.render_stateful_widget(scrollbar, inner_area, &mut scrollbar_state);
+    }
 }
 
 /// Render the status bar

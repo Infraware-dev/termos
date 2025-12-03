@@ -46,7 +46,9 @@ pub fn init() -> Result<()> {
 
     let file = RollingFileAppender::builder()
         .encoder(Box::new(PatternEncoder::new(
-            "[{d(%Y-%m-%d %H:%M:%S%.3f)}] {l} [{t}] {m}\n",
+            // ISO 8601 timestamp with milliseconds, log level, thread, message
+            // Example: [2025-12-02T14:30:45.123] INFO [main] Application started
+            "[{d(%Y-%m-%dT%H:%M:%S%.3f)}] {l} [{t}] {m}\n",
         )))
         .build(log_file, Box::new(policy))
         .context("Failed to create rolling file appender")?;

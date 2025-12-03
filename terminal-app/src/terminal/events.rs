@@ -43,10 +43,8 @@ impl EventHandler {
         }
 
         match (key.code, key.modifiers) {
-            // Ctrl+C - Quit
-            (KeyCode::Char('c'), KeyModifiers::CONTROL) => TerminalEvent::Quit,
-            // Ctrl+D - Quit
-            (KeyCode::Char('d'), KeyModifiers::CONTROL) => TerminalEvent::Quit,
+            // Ctrl+C - Context-aware (cancel ops or clear input)
+            (KeyCode::Char('c'), KeyModifiers::CONTROL) => TerminalEvent::CtrlC,
             // Ctrl+L - Clear screen
             (KeyCode::Char('l'), KeyModifiers::CONTROL) => TerminalEvent::ClearScreen,
 
@@ -56,9 +54,13 @@ impl EventHandler {
             // Backspace - Delete character
             (KeyCode::Backspace, _) => TerminalEvent::DeleteChar,
 
-            // Arrow keys
-            (KeyCode::Up, _) => TerminalEvent::HistoryPrevious,
-            (KeyCode::Down, _) => TerminalEvent::HistoryNext,
+            // Ctrl+Arrow - Scroll output (alternative to PageUp/PageDown for laptops)
+            (KeyCode::Up, KeyModifiers::CONTROL) => TerminalEvent::ScrollUp,
+            (KeyCode::Down, KeyModifiers::CONTROL) => TerminalEvent::ScrollDown,
+
+            // Arrow keys (without modifiers) - History and cursor navigation
+            (KeyCode::Up, KeyModifiers::NONE) => TerminalEvent::HistoryPrevious,
+            (KeyCode::Down, KeyModifiers::NONE) => TerminalEvent::HistoryNext,
             (KeyCode::Left, _) => TerminalEvent::MoveCursorLeft,
             (KeyCode::Right, _) => TerminalEvent::MoveCursorRight,
 
@@ -109,6 +111,8 @@ pub enum TerminalEvent {
     TabComplete,
     /// Clear screen
     ClearScreen,
+    /// Ctrl+C pressed - context-aware handler
+    CtrlC,
     /// Quit application
     Quit,
     /// Terminal resized (width, height) - M2/M3 feature
@@ -230,19 +234,27 @@ mod tests {
     }
 
     #[test]
-    fn test_ctrl_c_quit() {
+    fn test_ctrl_arrow_up_scroll() {
         let handler = EventHandler::new();
-        let event = create_key_event(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        let event = create_key_event(KeyCode::Up, KeyModifiers::CONTROL);
         let result = handler.map_key_event(event);
-        assert!(matches!(result, TerminalEvent::Quit));
+        assert!(matches!(result, TerminalEvent::ScrollUp));
     }
 
     #[test]
-    fn test_ctrl_d_quit() {
+    fn test_ctrl_arrow_down_scroll() {
         let handler = EventHandler::new();
-        let event = create_key_event(KeyCode::Char('d'), KeyModifiers::CONTROL);
+        let event = create_key_event(KeyCode::Down, KeyModifiers::CONTROL);
         let result = handler.map_key_event(event);
-        assert!(matches!(result, TerminalEvent::Quit));
+        assert!(matches!(result, TerminalEvent::ScrollDown));
+    }
+
+    #[test]
+    fn test_ctrl_c_event() {
+        let handler = EventHandler::new();
+        let event = create_key_event(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        let result = handler.map_key_event(event);
+        assert!(matches!(result, TerminalEvent::CtrlC));
     }
 
     #[test]

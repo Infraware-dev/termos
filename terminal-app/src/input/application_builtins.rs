@@ -9,9 +9,9 @@
 /// List of application builtin commands
 ///
 /// These are commands implemented directly in the terminal application:
+/// - `cd`: Change working directory (must be handled by parent process)
 /// - `clear`: Clear the terminal output buffer
 /// - `exit`: Exit the terminal application
-/// - `quit`: Exit the terminal application (alias for exit)
 /// - `reload-aliases`: Reload alias definitions from system and user config files
 /// - `reload-commands`: Clear the command cache (useful after installing new commands)
 /// - `auth-status`: Check backend authentication status
@@ -20,17 +20,17 @@
 /// ```
 /// use infraware_terminal::input::application_builtins::APPLICATION_BUILTINS;
 ///
+/// assert!(APPLICATION_BUILTINS.contains(&"cd"));
 /// assert!(APPLICATION_BUILTINS.contains(&"clear"));
 /// assert!(APPLICATION_BUILTINS.contains(&"exit"));
-/// assert!(APPLICATION_BUILTINS.contains(&"quit"));
 /// assert!(APPLICATION_BUILTINS.contains(&"reload-aliases"));
 /// assert!(APPLICATION_BUILTINS.contains(&"reload-commands"));
 /// assert!(APPLICATION_BUILTINS.contains(&"auth-status"));
 /// ```
 pub const APPLICATION_BUILTINS: &[&str] = &[
+    "cd",
     "clear",
     "exit",
-    "quit",
     "reload-aliases",
     "reload-commands",
     "auth-status",
@@ -100,20 +100,20 @@ mod tests {
     }
 
     #[test]
-    fn test_quit_is_builtin() {
-        assert!(is_application_builtin("quit"));
-    }
-
-    #[test]
     fn test_builtin_list_count() {
         // Verify we have exactly 6 application builtins
         assert_eq!(APPLICATION_BUILTINS.len(), 6);
         // Verify they are the expected ones
+        assert!(APPLICATION_BUILTINS.contains(&"cd"));
         assert!(APPLICATION_BUILTINS.contains(&"clear"));
         assert!(APPLICATION_BUILTINS.contains(&"exit"));
-        assert!(APPLICATION_BUILTINS.contains(&"quit"));
         assert!(APPLICATION_BUILTINS.contains(&"reload-aliases"));
         assert!(APPLICATION_BUILTINS.contains(&"reload-commands"));
         assert!(APPLICATION_BUILTINS.contains(&"auth-status"));
+    }
+
+    #[test]
+    fn test_cd_is_builtin() {
+        assert!(is_application_builtin("cd"));
     }
 }

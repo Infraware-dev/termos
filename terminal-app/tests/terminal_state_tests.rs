@@ -155,24 +155,35 @@ fn test_terminal_state_history_navigation() {
 fn test_terminal_state_scroll() {
     let mut state = TerminalState::new();
 
+    // Set visible lines first (simulating terminal size)
+    state.set_visible_lines(20);
+
     // Add many lines
     for i in 0..100 {
         state.add_output(format!("Line {}", i));
     }
 
-    // Auto-scrolls to bottom, position should be 99
-    assert_eq!(state.output.scroll_position(), 99);
+    // With 100 lines and 20 visible, max_scroll = 100-20 = 80
+    // Auto-scrolls to bottom (scroll_position = max_scroll = 80)
+    assert_eq!(state.output.scroll_position(), 80);
 
     // Scroll up
     state.scroll_up();
-    assert_eq!(state.output.scroll_position(), 98);
+    assert_eq!(state.output.scroll_position(), 79);
 
     state.scroll_up();
-    assert_eq!(state.output.scroll_position(), 97);
+    assert_eq!(state.output.scroll_position(), 78);
 
-    // Scroll down
+    // Scroll down back toward max
     state.scroll_down();
-    assert_eq!(state.output.scroll_position(), 98);
+    assert_eq!(state.output.scroll_position(), 79);
+
+    state.scroll_down();
+    assert_eq!(state.output.scroll_position(), 80);
+
+    // Try scrolling past max - should stay at max
+    state.scroll_down();
+    assert_eq!(state.output.scroll_position(), 80);
 }
 
 #[test]
@@ -290,21 +301,24 @@ fn test_cursor_editing() {
 fn test_scroll_boundary_conditions() {
     let mut state = TerminalState::new();
 
-    // Add a few lines
+    // Set visible lines (simulating terminal size)
+    state.set_visible_lines(10);
+
+    // Add a few lines (less than visible_lines)
     state.add_output("Line 0".to_string());
     state.add_output("Line 1".to_string());
     state.add_output("Line 2".to_string());
 
-    // Auto-scrolls to bottom (position 2)
-    assert_eq!(state.output.scroll_position(), 2);
+    // With 3 lines and 10 visible, max_scroll = max(0, 3-10) = 0
+    // Auto-scrolls to bottom (scroll_position = 0)
+    assert_eq!(state.output.scroll_position(), 0);
 
-    // Scroll up to top
-    state.scroll_up();
+    // Try scrolling up (already at 0, should stay)
     state.scroll_up();
     assert_eq!(state.output.scroll_position(), 0);
 
-    // Try scrolling past the top (should stay at 0)
-    state.scroll_up();
+    // Try scrolling down (already at max=0, should stay)
+    state.scroll_down();
     assert_eq!(state.output.scroll_position(), 0);
 }
 

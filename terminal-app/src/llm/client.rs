@@ -263,19 +263,28 @@ impl HttpLLMClient {
 
     /// Create a new LLM thread via POST /threads
     async fn create_thread(&self) -> Result<String> {
-        log::debug!("Creating new LLM thread at {}/threads", self.base_url);
+        let url = format!("{}/threads", self.base_url);
+        log::info!("[HTTP-OUT] POST {}", url);
 
         let request = CreateThreadRequest {
             metadata: serde_json::json!({}),
         };
 
+        let request_start = std::time::Instant::now();
         let response = self
             .client
-            .post(format!("{}/threads", self.base_url))
+            .post(&url)
             .header("X-Api-Key", &self.api_key)
             .json(&request)
             .send()
             .await?;
+
+        let elapsed = request_start.elapsed();
+        log::info!(
+            "[HTTP-IN] POST /threads | status={} | elapsed={}ms",
+            response.status(),
+            elapsed.as_millis()
+        );
 
         if !response.status().is_success() {
             let status = response.status();
@@ -322,10 +331,10 @@ impl HttpLLMClient {
         cancel_token: CancellationToken,
     ) -> Result<StreamResult> {
         let url = format!("{}/threads/{}/runs/stream", self.base_url, thread_id);
-        log::info!("Starting stream run at {}", url);
         log::info!(
-            "Stream request: input={:?}, resume={}",
-            input.map(|s| s.chars().take(50).collect::<String>()),
+            "[HTTP-OUT] POST {} | input={} | resume={}",
+            url,
+            input.is_some(),
             resume
         );
 
@@ -351,8 +360,7 @@ impl HttpLLMClient {
             });
         }
 
-        log::info!("Sending POST request to {} ...", url);
-        let send_start = std::time::Instant::now();
+        let request_start = std::time::Instant::now();
 
         // Use tokio::select! to race HTTP request vs cancellation
         let response = tokio::select! {
@@ -371,9 +379,9 @@ impl HttpLLMClient {
         };
 
         log::info!(
-            "POST response received in {:?}: status={}",
-            send_start.elapsed(),
-            response.status()
+            "[HTTP-IN] POST /runs/stream | status={} | elapsed={}ms",
+            response.status(),
+            request_start.elapsed().as_millis()
         );
 
         if !response.status().is_success() {
@@ -400,7 +408,7 @@ impl HttpLLMClient {
         let mut current_event: Option<String> = None;
         let mut buffer = String::new();
         let mut chunk_count: u32 = 0;
-        let start_time = std::time::Instant::now();
+        let stream_start = std::time::Instant::now();
 
         log::info!("SSE stream started, waiting for chunks...");
 
@@ -415,11 +423,11 @@ impl HttpLLMClient {
                 Ok(chunk) => {
                     chunk_count += 1;
                     let text = String::from_utf8_lossy(&chunk);
-                    log::info!(
-                        "SSE chunk #{} received ({} bytes) after {:?}",
+                    log::debug!(
+                        "SSE chunk #{} received ({} bytes) after {}ms",
                         chunk_count,
                         chunk.len(),
-                        start_time.elapsed()
+                        stream_start.elapsed().as_millis()
                     );
                     buffer.push_str(&text);
 
@@ -455,9 +463,9 @@ impl HttpLLMClient {
                 }
                 Err(e) => {
                     log::error!(
-                        "SSE stream error after {} chunks ({:?}): {}",
+                        "SSE stream error after {} chunks ({}ms): {}",
                         chunk_count,
-                        start_time.elapsed(),
+                        stream_start.elapsed().as_millis(),
                         e
                     );
                     return Err(e.into());
@@ -481,10 +489,10 @@ impl HttpLLMClient {
         }
 
         log::debug!(
-            "SSE stream completed: {} chunks, {} chars, {:?} elapsed",
+            "SSE stream completed: {} chunks, {} chars, {}ms elapsed",
             chunk_count,
             result.len(),
-            start_time.elapsed()
+            stream_start.elapsed().as_millis()
         );
 
         // Return interrupt if detected, otherwise complete
@@ -700,55 +708,50 @@ impl HttpLLMClient {
                     {
                         for interrupt in interrupts {
                             if let Some(value) = interrupt.get("value") {
-                                let interrupt_type =
-                                    value.get("type").and_then(|v| v.as_str()).unwrap_or("");
-
-                                match interrupt_type {
-                                    "command_approval" => {
-                                        let command = value
-                                            .get("command")
-                                            .and_then(|v| v.as_str())
-                                            .unwrap_or("unknown")
-                                            .to_string();
-                                        let message = value
-                                            .get("message")
-                                            .and_then(|v| v.as_str())
-                                            .unwrap_or("Command requires approval")
-                                            .to_string();
-                                        log::info!(
-                                            "Command approval requested for: {} - awaiting user decision",
-                                            command
-                                        );
-                                        return Ok(Some(InterruptData::CommandApproval {
-                                            command,
-                                            message,
-                                        }));
-                                    }
-                                    // Treat "question" or any other type as a question
-                                    _ => {
-                                        let question = value
-                                            .get("question")
-                                            .or_else(|| value.get("message"))
-                                            .and_then(|v| v.as_str())
-                                            .unwrap_or("Agent is asking for input")
-                                            .to_string();
-                                        let options = value
-                                            .get("options")
-                                            .and_then(|v| v.as_array())
-                                            .map(|arr| {
-                                                arr.iter()
-                                                    .filter_map(|v| v.as_str().map(String::from))
-                                                    .collect()
-                                            });
-                                        log::info!(
-                                            "Question received: {} - awaiting user answer",
-                                            question
-                                        );
-                                        return Ok(Some(InterruptData::Question {
-                                            question,
-                                            options,
-                                        }));
-                                    }
+                                // Detect interrupt type by field presence (compatible with Python backend)
+                                // Backend sends: {"command": "...", "message": "..."} for approvals
+                                // or {"question": "...", "options": [...]} for questions
+                                if value.get("command").is_some() {
+                                    // CommandApproval: has "command" field
+                                    let command = value
+                                        .get("command")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("unknown")
+                                        .to_string();
+                                    let message = value
+                                        .get("message")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("Command requires approval")
+                                        .to_string();
+                                    log::info!(
+                                        "Command approval requested for: {} - awaiting user decision",
+                                        command
+                                    );
+                                    return Ok(Some(InterruptData::CommandApproval {
+                                        command,
+                                        message,
+                                    }));
+                                } else {
+                                    // Question: has "question" field or only "message"
+                                    let question = value
+                                        .get("question")
+                                        .or_else(|| value.get("message"))
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("Agent is asking for input")
+                                        .to_string();
+                                    let options = value
+                                        .get("options")
+                                        .and_then(|v| v.as_array())
+                                        .map(|arr| {
+                                            arr.iter()
+                                                .filter_map(|v| v.as_str().map(String::from))
+                                                .collect()
+                                        });
+                                    log::info!(
+                                        "Question received: {} - awaiting user answer",
+                                        question
+                                    );
+                                    return Ok(Some(InterruptData::Question { question, options }));
                                 }
                             }
                         }
@@ -925,8 +928,6 @@ impl LLMClientTrait for HttpLLMClient {
     }
 
     async fn resume_with_answer(&self, answer: &str) -> Result<LLMQueryResult> {
-        log::debug!("Resuming LLM run with user answer: {}", answer);
-
         let thread_id = self
             .thread_id
             .read()
@@ -935,7 +936,7 @@ impl LLMClientTrait for HttpLLMClient {
             .ok_or_else(|| anyhow::anyhow!("No active thread to resume"))?;
 
         let url = format!("{}/threads/{}/runs/stream", self.base_url, thread_id);
-        log::debug!("Resuming stream run with answer at {}", url);
+        log::info!("[HTTP-OUT] POST {} | answer_len={}", url, answer.len());
 
         // Send user's answer as a new message along with resume command
         let request = StreamRunRequest {
@@ -952,6 +953,7 @@ impl LLMClientTrait for HttpLLMClient {
             }),
         };
 
+        let request_start = std::time::Instant::now();
         let response = self
             .client
             .post(&url)
@@ -959,6 +961,13 @@ impl LLMClientTrait for HttpLLMClient {
             .json(&request)
             .send()
             .await?;
+
+        let elapsed = request_start.elapsed();
+        log::info!(
+            "[HTTP-IN] POST /runs/stream | status={} | elapsed={}ms",
+            response.status(),
+            elapsed.as_millis()
+        );
 
         if !response.status().is_success() {
             let status = response.status();
@@ -1056,13 +1065,20 @@ impl LLMClientTrait for MockLLMClient {
         cancel_token: CancellationToken,
     ) -> Result<LLMQueryResult> {
         // Simulate network delay with cancellation checks
-        // Split into 10 chunks of 100ms each to allow responsive cancellation
-        for i in 0..10 {
+        // 10 chunks × 100ms = 1s total simulated delay
+        // Small chunks allow responsive cancellation (checked every 100ms)
+        const MOCK_CHUNK_DELAY_MS: u64 = 100;
+        const MOCK_CHUNK_COUNT: u64 = 10;
+
+        for i in 0..MOCK_CHUNK_COUNT {
             if cancel_token.is_cancelled() {
-                log::info!("Mock LLM query cancelled after {}ms", i * 100);
+                log::info!(
+                    "Mock LLM query cancelled after {}ms",
+                    i * MOCK_CHUNK_DELAY_MS
+                );
                 anyhow::bail!("Query cancelled by user");
             }
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(MOCK_CHUNK_DELAY_MS)).await;
         }
 
         // Return mock response (same as non-cancellable version)
