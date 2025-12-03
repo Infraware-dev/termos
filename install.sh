@@ -103,6 +103,18 @@ else
     echo -e "${YELLOW}Not found${NC}"
     echo "Installing uv..."
     pip3 install uv --break-system-packages 2>/dev/null || pip3 install uv
+
+    # Refresh PATH to find newly installed uv
+    hash -r 2>/dev/null || true
+
+    # If still not found, try to locate it
+    if ! command_exists uv; then
+        UV_PATH=$(python3 -c "import site; print(site.USER_BASE + '/bin')" 2>/dev/null)
+        if [ -n "$UV_PATH" ] && [ -f "$UV_PATH/uv" ]; then
+            export PATH="$UV_PATH:$PATH"
+            echo "Added $UV_PATH to PATH"
+        fi
+    fi
 fi
 
 # Check wget
