@@ -61,29 +61,28 @@ else
     echo -e "${RED}Not found${NC}"
     echo "Installing pip..."
 
-    # Try ensurepip first
-    if python3 -m ensurepip --upgrade 2>/dev/null; then
-        echo "pip installed via ensurepip"
-    else
-        # Fall back to system package manager
-        if [[ "$OSTYPE" == "linux-gnu"* ]]; then
-            if command_exists apt-get; then
-                sudo apt-get update
-                sudo apt-get install -y python3-pip
-            elif command_exists yum; then
-                sudo yum install -y python3-pip
-            elif command_exists dnf; then
-                sudo dnf install -y python3-pip
-            else
-                echo -e "${RED}Unable to install pip. Please install manually.${NC}"
-                exit 1
-            fi
-        elif [[ "$OSTYPE" == "darwin"* ]]; then
-            python3 -m ensurepip --upgrade
+    if [[ "$OSTYPE" == "linux-gnu"* ]]; then
+        if command_exists apt-get; then
+            sudo apt-get update
+            sudo apt-get install -y python3-pip
+        elif command_exists yum; then
+            sudo yum install -y python3-pip
+        elif command_exists dnf; then
+            sudo dnf install -y python3-pip
         else
             echo -e "${RED}Unable to install pip. Please install manually.${NC}"
             exit 1
         fi
+    elif [[ "$OSTYPE" == "darwin"* ]]; then
+        if command_exists brew; then
+            brew install python3
+        else
+            echo -e "${RED}Homebrew not found. Please install pip manually.${NC}"
+            exit 1
+        fi
+    else
+        echo -e "${RED}Unable to install pip. Please install manually.${NC}"
+        exit 1
     fi
 fi
 
