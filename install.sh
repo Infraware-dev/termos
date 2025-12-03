@@ -224,9 +224,9 @@ for package in "${PACKAGES[@]}"; do
         echo -e "${YELLOW}Not found${NC}"
         echo "Installing $package..."
         if [ "$package" == "langgraph-cli" ]; then
-            uv pip install --system --upgrade langgraph-cli 'langgraph-cli[inmem]'
+            pip3 install --upgrade langgraph-cli 'langgraph-cli[inmem]' --break-system-packages 2>/dev/null || pip3 install --upgrade langgraph-cli 'langgraph-cli[inmem]'
         else
-            uv pip install --system --upgrade "$package"
+            pip3 install --upgrade "$package" --break-system-packages 2>/dev/null || pip3 install --upgrade "$package"
         fi
     fi
 done
