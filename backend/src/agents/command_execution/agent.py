@@ -48,5 +48,5 @@ local_agent = create_deep_agent(
     tools=[shell_tool],
     model=model,
     system_prompt=command_execution_instructions,
-    name="command_execution_agent"
+    name="command_execution_agent",
 )
