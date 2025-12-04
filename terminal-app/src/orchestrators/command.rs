@@ -19,7 +19,6 @@ pub struct CommandOrchestrator;
 
 impl CommandOrchestrator {
     /// Create a new command orchestrator
-    #[allow(dead_code)] // Constructor used in tests, Default trait is preferred
     pub const fn new() -> Self {
         Self
     }
@@ -173,9 +172,16 @@ impl CommandOrchestrator {
         job_manager: &SharedJobManager,
     ) -> Result<()> {
         let jobs: Vec<JobInfo> = {
-            let mgr = job_manager
-                .read()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let mgr = match job_manager.read() {
+                Ok(guard) => guard,
+                Err(poisoned) => {
+                    log::error!(
+                        "JobManager lock poisoned during handle_jobs_command. \
+                         Recovering but state may be inconsistent."
+                    );
+                    poisoned.into_inner()
+                }
+            };
             mgr.list_jobs()
         };
 

@@ -25,7 +25,6 @@ impl CommandOutput {
 
     /// Get combined output (stdout + stderr)
     #[must_use]
-    #[allow(dead_code)] // Public API for M2/M3
     pub fn combined_output(&self) -> String {
         let mut result = String::new();
         if !self.stdout.is_empty() {
@@ -516,7 +515,6 @@ impl CommandExecutor {
 
     /// Get the full path of a command
     #[must_use]
-    #[allow(dead_code)] // Public API for M2/M3
     pub fn get_command_path(cmd: &str) -> Option<String> {
         which::which(cmd)
             .ok()
@@ -524,7 +522,6 @@ impl CommandExecutor {
     }
 
     /// Execute a command with sudo privileges (M2/M3)
-    #[allow(dead_code)] // Used by package manager implementations for privileged operations
     pub async fn execute_sudo(cmd: &str, args: &[String]) -> Result<CommandOutput> {
         // Check if command exists
         if !Self::command_exists(cmd) {
@@ -627,24 +624,45 @@ impl CommandExecutor {
     ) -> Result<(usize, u32)> {
         let (shell, flag) = Self::get_platform_shell();
 
-        log::info!("Spawning background command: {}", command);
+        // Remove the trailing & from the command - we handle backgrounding ourselves
+        // If we pass "sleep 10 &" to bash, bash will fork internally and exit immediately,
+        // making it impossible to track the actual sleep process.
+        let command_without_amp = command.trim().trim_end_matches('&').trim();
+
+        log::info!(
+            "Spawning background command: {} (original: {})",
+            command_without_amp,
+            command
+        );
 
         let child = TokioCommand::new(shell)
             .arg(flag)
-            .arg(command)
+            .arg(command_without_amp)
             .stdin(Stdio::null())
             .stdout(Stdio::null()) // Don't capture output for background
             .stderr(Stdio::null())
             .spawn()
             .context("Failed to spawn background command")?;
 
-        let pid = child.id().unwrap_or(0);
+        let pid = child
+            .id()
+            .context("Failed to get PID for background process - this should never happen")?;
 
         let job_id = {
-            let mut mgr = job_manager
-                .write()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            mgr.add_job(command.to_string(), pid, child)
+            let mut mgr = match job_manager.write() {
+                Ok(guard) => guard,
+                Err(_poisoned) => {
+                    // Lock poisoning indicates a previous panic violated invariants.
+                    // Per Microsoft Rust Guidelines M-PANIC-IS-STOP, fail fast rather
+                    // than continue with potentially corrupted state.
+                    anyhow::bail!(
+                        "JobManager lock poisoned during execute_background. \
+                         Cannot safely track background job due to potential state corruption."
+                    );
+                }
+            };
+            // Store original command (with &) for display
+            mgr.add_job(command.trim().to_string(), pid, child)
         };
 
         log::info!("Background job [{}] started with PID {}", job_id, pid);

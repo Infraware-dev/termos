@@ -10,9 +10,19 @@ use infraware_terminal::{auth, executor, input, llm, logging, orchestrators, ter
 
 use anyhow::Result;
 use std::path::PathBuf;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
+
+/// Interval between background job completion checks.
+///
+/// Why 250ms: Balances responsiveness vs overhead. Users perceive <300ms as
+/// "instant", so job completion notifications feel immediate. This avoids
+/// acquiring write locks on every keystroke event.
+///
+/// Trade-offs: Higher values delay "Done" notifications. Lower values increase
+/// lock contention and CPU usage with many background jobs.
+const JOB_CHECK_INTERVAL: Duration = Duration::from_millis(250);
 
 use auth::{AuthConfig, Authenticator, HttpAuthenticator};
 use executor::{create_shared_job_manager, SharedJobManager};
@@ -401,6 +411,9 @@ impl InfrawareTerminal {
             }
         });
 
+        // Track last job check time for periodic checking (reduces lock contention)
+        let mut last_job_check = Instant::now();
+
         // Main event loop - receives events from background poller
         loop {
             // Wait for event with timeout
@@ -418,7 +431,12 @@ impl InfrawareTerminal {
                     }
                 }
                 _ = tokio::time::sleep(Duration::from_millis(100)) => {
-                    // Timeout - continue polling
+                    // Timeout - check jobs periodically even without events
+                    if last_job_check.elapsed() >= JOB_CHECK_INTERVAL {
+                        self.check_completed_jobs();
+                        last_job_check = Instant::now();
+                        self.ui.render(&mut self.state)?;
+                    }
                     continue;
                 }
             };
@@ -428,8 +446,12 @@ impl InfrawareTerminal {
                 break; // Quit requested
             }
 
-            // Check for completed background jobs
-            self.check_completed_jobs();
+            // Check for completed background jobs periodically (not on every event)
+            // This reduces lock contention during rapid typing
+            if last_job_check.elapsed() >= JOB_CHECK_INTERVAL {
+                self.check_completed_jobs();
+                last_job_check = Instant::now();
+            }
 
             // Re-render after handling event
             self.ui.render(&mut self.state)?;
@@ -791,14 +813,43 @@ impl InfrawareTerminal {
 
     /// Check for completed background jobs and display notifications
     ///
-    /// Called after each event to provide timely feedback when background
-    /// processes complete.
+    /// Called periodically (not on every event) to provide timely feedback
+    /// when background processes complete while minimizing lock contention.
     fn check_completed_jobs(&mut self) {
+        // Fast path: check if there are any jobs with read lock first
+        let has_jobs = {
+            match self.job_manager.read() {
+                Ok(guard) => guard.has_running_jobs(),
+                Err(_poisoned) => {
+                    // Lock poisoning indicates previous panic violated invariants.
+                    // Log error and skip this check - don't recover with corrupted state.
+                    log::error!(
+                        "JobManager lock poisoned during check_completed_jobs (read). \
+                         Skipping job check to avoid potential state corruption."
+                    );
+                    return;
+                }
+            }
+        };
+
+        if !has_jobs {
+            return; // No jobs, skip expensive write lock
+        }
+
+        // Jobs exist, acquire write lock to check completion
         let completed: Vec<executor::JobInfo> = {
-            let mut mgr = self
-                .job_manager
-                .write()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let mut mgr = match self.job_manager.write() {
+                Ok(guard) => guard,
+                Err(_poisoned) => {
+                    // Lock poisoning indicates previous panic violated invariants.
+                    // Log error and skip - don't recover with corrupted state.
+                    log::error!(
+                        "JobManager lock poisoned during check_completed_jobs (write). \
+                         Skipping job check to avoid potential state corruption."
+                    );
+                    return;
+                }
+            };
             mgr.check_completed()
         };
 
