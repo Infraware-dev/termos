@@ -564,19 +564,19 @@ impl CommandExecutor {
     pub fn is_background_command(input: &str) -> bool {
         let trimmed = input.trim();
 
-        // Must end with & but not &&
+        // Fast path: Must end with & but not &&
         if !trimmed.ends_with('&') || trimmed.ends_with("&&") {
             return false;
         }
 
-        // Check that the trailing & is not inside quotes and not escaped
+        // Zero-allocation quote tracking via character iterator with peekable
         let mut in_single_quote = false;
         let mut in_double_quote = false;
         let mut last_was_backslash = false;
-        let chars: Vec<char> = trimmed.chars().collect();
+        let mut chars = trimmed.chars().peekable();
 
-        for (i, &c) in chars.iter().enumerate() {
-            let is_last = i == chars.len() - 1;
+        while let Some(c) = chars.next() {
+            let is_last = chars.peek().is_none();
 
             if last_was_backslash {
                 // This character is escaped

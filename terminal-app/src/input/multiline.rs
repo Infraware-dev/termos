@@ -161,7 +161,9 @@ pub fn join_lines(lines: &[String]) -> String {
         return String::new();
     }
 
-    let mut result = String::new();
+    // Pre-allocate with estimated capacity to avoid reallocations
+    let estimated_size: usize = lines.iter().map(|s| s.len() + 1).sum();
+    let mut result = String::with_capacity(estimated_size);
 
     for (i, line) in lines.iter().enumerate() {
         if i > 0 {
@@ -178,7 +180,13 @@ pub fn join_lines(lines: &[String]) -> String {
 
         // Remove trailing backslash if present
         if has_trailing_backslash(line) {
-            result.push_str(line.trim_end().trim_end_matches('\\').trim_end());
+            // Optimized: find backslash position and slice directly
+            let trimmed = line.trim_end();
+            // We know it ends with odd number of backslashes, find content before last one
+            if let Some(pos) = trimmed.rfind(|c| c != '\\') {
+                result.push_str(trimmed[..=pos].trim_end());
+            }
+            // If entire string is backslashes, push nothing
         } else {
             result.push_str(line);
         }
