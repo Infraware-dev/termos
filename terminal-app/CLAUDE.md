@@ -21,30 +21,28 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 # Build and Run
-cargo build                          # Build
+cargo build                          # Debug build
 cargo build --release                # Release build
 cargo run                            # Run application
+cargo check                          # Fast type check (no codegen)
 
 # Testing
 cargo test                           # All tests
-cargo test --test classifier_tests   # SCAN algorithm tests (tests/classifier_tests.rs)
-cargo test --test executor_tests     # Executor tests (tests/executor_tests.rs)
-cargo test --test integration_tests  # Integration tests (tests/integration_tests.rs)
-cargo test --test terminal_state_tests # Terminal state tests
-cargo test --test interactive_command_test # Interactive command tests
-cargo test test_name                 # Run single test by name
-cargo test -- --nocapture            # Tests with output
-cargo test -- --show-output          # Show println! even for passing tests
+cargo test --test classifier_tests   # SCAN algorithm tests
+cargo test --test executor_tests     # Executor tests
+cargo test --test integration_tests  # Integration tests
+cargo test test_name                 # Single test by name
+cargo test -- --nocapture            # Show output during tests
+cargo test -- --show-output          # Show println! for passing tests
 
 # Benchmarking (benches/scan_benchmark.rs)
 cargo bench                          # All benchmarks
 cargo bench scan_                    # SCAN benchmarks only
-cargo bench scan_individual_handlers # Individual handler benchmarks (measures each handler in isolation)
-cargo bench scan_full_classification # Full classification pipeline benchmarks
+cargo bench scan_individual_handlers # Individual handler isolation benchmarks
+cargo bench scan_full_classification # Full pipeline benchmarks
 
-# Development (run before commits)
-cargo fmt                            # Format code
-cargo clippy                         # Lint (warnings = errors in CI)
+# Pre-commit (required)
+cargo fmt && cargo clippy            # Format + lint (CI enforces both)
 
 # Coverage (requires: cargo install cargo-llvm-cov)
 cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info
@@ -114,7 +112,9 @@ Chain of Responsibility with 11 handlers executing in strict order (<100μs aver
 6. If handler needs shared state (cache, patterns), access via `ClassifierContext` parameter (no global state)
 7. Run `cargo bench scan_individual_handlers` to measure handler performance in isolation
 8. Run `cargo bench scan_full_classification` to verify no regression in overall pipeline
-9. Use `#[serial_test::serial]` for tests that modify shared global state (CommandCache, aliases)
+
+### Testing with Shared State
+Use `#[serial_test::serial]` for tests that modify shared global state (CommandCache, aliases). This prevents flaky tests from concurrent test execution.
 
 ### History Expansion
 - Patterns: `!!` (previous cmd), `!$` (last arg), `!^` (first arg), `!*` (all args)
@@ -131,55 +131,29 @@ Chain of Responsibility with 11 handlers executing in strict order (<100μs aver
 
 ### Built-in Commands
 
-Application-specific commands recognized by `ApplicationBuiltinHandler` (position 3 in SCAN chain):
-- `cd` - Change working directory (handled by parent process to affect shell state)
-- `clear` - Clear terminal output buffer
-- `exit` - Exit the terminal application
-- `jobs` - List background jobs (see Background Process Support below)
-- `reload-aliases` - Reload aliases from system/user config files
-- `reload-commands` - Clear command cache (use after installing new commands)
-- `auth-status` - Check backend authentication status
+Application builtins (`ApplicationBuiltinHandler`, position 3): `cd`, `clear`, `exit`, `jobs`, `reload-aliases`, `reload-commands`, `auth-status`
 
-These commands are recognized early in the classification chain to prevent misclassification as natural language.
+Add new builtins to `src/input/application_builtins.rs`.
 
 ### Interactive Commands
 - **28 supported** (TUI suspends): vim, nvim, nano, emacs, less, more, man, top, htop, sudo, watch, mc, ranger, etc.
 - **31 blocked** (helpful error): ssh, tmux, screen, python, mysql, gdb, etc.
 - Unix/Linux/macOS only (Windows returns error)
-- Implementation: `TerminalUI::suspend()` → command runs → `TerminalUI::resume()`
-- Panic-safe via RAII `TuiGuard`
+- Implementation: `TerminalUI::suspend()` → command runs → `TerminalUI::resume()` (panic-safe via RAII `TuiGuard`)
 
-### Infinite Output Commands (Blocked)
-Commands that would freeze the terminal by producing infinite output are blocked with helpful suggestions:
-- `yes` - produces infinite "y" output
-- `cat /dev/zero`, `cat /dev/urandom`, `cat /dev/random` - infinite device output
-- `dd if=/dev/zero`, `dd if=/dev/urandom` - infinite data copy
-- `ping` without `-c N` flag - infinite ping
-
-**Not blocked** (useful for DevOps, Ctrl+C works): `tail -f`, `docker logs -f`, `watch`
+### Blocked Commands
+**Infinite output** (blocked with suggestions): `yes`, `cat /dev/zero`, `dd if=/dev/zero`, `ping` without `-c`
+**Not blocked** (Ctrl+C works): `tail -f`, `docker logs -f`, `watch`
 
 ### Background Process Support
 
-Commands can be executed in the background using the `&` suffix (similar to shell behavior):
-
-- **Syntax**: Type any command followed by `&` (e.g., `sleep 10 &`, `long-running-task &`)
-- **Job IDs**: Each background process is assigned a 1-based job ID (like Bash)
-- **Process IDs**: Both job ID and PID (process ID) are tracked
-- **Job listing**: Use `jobs` builtin command to display all background jobs with status
-- **Job status display**: Format is `[job_id] Status command` (e.g., `[1] Running sleep 10 &`)
-- **Completion notification**: When a job completes, terminal displays `[job_id] Done (exit: code) command`
-- **Non-blocking**: Background jobs run independently; the terminal remains responsive
-- **Implementation**: JobManager (`src/executor/job_manager.rs`) tracks jobs with `Arc<RwLock>` for thread-safe access
-- **Automatic checking**: Main event loop checks for completed jobs and displays notifications
+Commands with `&` suffix run in background. `jobs` builtin lists all jobs. Implementation: `JobManager` (`src/executor/job_manager.rs`) with `Arc<RwLock>` for thread-safe access. Main event loop checks for completed jobs.
 
 ### Multiline Command Support
 
-The terminal supports multiline input for complex commands:
-
-- **Line continuation**: End a line with `\` to continue on the next line
-- **Heredocs**: Use `<<EOF` syntax for multi-line input (common in shell scripts)
-- **Brace expansion**: Bash-style brace expansion (e.g., `file{1..3}` → `file1 file2 file3`)
-- **Implementation**: Commands with incomplete syntax wait for additional input before execution
+- **Line continuation**: End line with `\`
+- **Heredocs**: `<<EOF` syntax
+- **Brace expansion**: `file{1..3}` → `file1 file2 file3`
 
 ### Shell Builtins
 - 45+ recognized without PATH verification (., :, [, [[, export, eval, exec, etc.)
@@ -205,38 +179,16 @@ The `HttpLLMClient` supports conversational AI with HITL (Human-in-the-Loop) int
 
 ### Logging
 
-The application uses `log4rs` for structured logging with size-based rotation:
+Uses `log4rs` with size-based rotation (`src/logging.rs`). Use `log::debug!()`, `log::info!()`, etc.
 
-- **Configuration**: Environment variables (see below)
-- **Log File**: `infraware.log` with automatic rotation and gzip compression
-- **Timestamp Format**: ISO 8601 with milliseconds (e.g., `[2025-12-02T10:30:45.123]`)
-- **Usage**: Use `log::debug!()`, `log::info!()`, `log::warn!()`, `log::error!()`
-- **Initialization**: `logging::init()` called in `main.rs` before starting TUI
-- **Module**: `src/logging.rs`
-- **HTTP Logging**: All LLM HTTP operations log with structured prefixes:
-  - `[HTTP-OUT]` - Request initiated (includes URL)
-  - `[HTTP-IN]` - Response received (includes status code and elapsed time in ms)
-  - Example: `[HTTP-IN] POST /threads | status=200 OK | elapsed=333ms`
-- **SSE Logging**: Per-chunk logs use `debug` level to reduce I/O overhead
-
-**Running with debug logging**:
 ```bash
 LOG_LEVEL=debug cargo run       # Debug level
 LOG_LEVEL=trace cargo run       # Trace level (very verbose)
 ```
 
-**Environment variables**:
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `LOG_LEVEL` | trace, debug, info, warn, error | `info` |
-| `LOG_MAX_SIZE_MB` | Max file size before rotation | `10` |
-| `LOG_MAX_FILES` | Rotated files to keep | `5` |
-| `LOG_PATH` | Custom log directory | Platform-specific |
+HTTP operations use structured prefixes: `[HTTP-OUT]` (request), `[HTTP-IN]` (response with timing).
 
-**Log file locations**:
-- Linux: `~/.local/share/infraware-terminal/logs/`
-- macOS: `~/Library/Logs/infraware-terminal/`
-- Windows: `%APPDATA%\infraware-terminal\logs\`
+**Log locations**: Linux `~/.local/share/infraware-terminal/logs/`, macOS `~/Library/Logs/infraware-terminal/`, Windows `%APPDATA%\infraware-terminal\logs\`
 
 ## Constraints
 
@@ -295,18 +247,7 @@ question_patterns = ["(?i)^(come|cosa|perché|quando|dove|chi|quale)\\s"]
 
 ## Keyboard Shortcuts
 
-Defined in `EventHandler::map_key_event()` (`src/terminal/events.rs`):
-
-| Key | Action |
-|-----|--------|
-| ↑/↓ | History navigation |
-| ←/→ | Cursor movement |
-| PageUp/PageDown | Output scrolling |
-| Ctrl+↑/↓ | Output scrolling (laptop-friendly alternative) |
-| Tab | Tab completion |
-| Ctrl+C | Cancel/clear input |
-| Ctrl+L | Clear screen |
-| Enter | Execute |
+Defined in `EventHandler::map_key_event()` (`src/terminal/events.rs`). Add new shortcuts by adding `KeyEvent` patterns there.
 
 **Note**: Windows filters `KeyEventKind::Release/Repeat` to avoid duplicate input.
 
@@ -349,6 +290,23 @@ Context is passed to handlers that need shared state (e.g., `KnownCommandHandler
 | PATH lookup (cache miss) | 1-5ms |
 
 Run `cargo bench scan_` to verify. Use `cargo bench scan_individual_handlers` to measure each handler in isolation and identify bottlenecks.
+
+## Claude Code Agents
+
+Specialized agents in `.claude/agents/` for automated workflows:
+
+| Agent | Model | Purpose | When to Use |
+|-------|-------|---------|-------------|
+| `rust-clippy-enforcer` | sonnet | Run clippy and fix warnings | After code changes, before commits |
+| `rust-code-reviewer` | sonnet | Code review for best practices | After implementing features |
+| `code-metrics-analyzer` | sonnet | LOC, complexity, maintainability metrics | After significant code changes |
+| `docs-updater` | haiku | Update CLAUDE.md/README.md | After architectural changes |
+| `uml-diagram-generator` | haiku | Generate PlantUML diagrams | After refactoring |
+| `git-committer` | haiku | Create clean commits (no emojis, no Co-Author) | After completing work |
+
+**Usage**: Agents are invoked automatically by Claude Code when appropriate, or manually via Task tool.
+
+**Adding Agents**: Create `.claude/agents/<name>.md` with frontmatter (name, description, model, color) and system prompt.
 
 ## Windows Notes
 
