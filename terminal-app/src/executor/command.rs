@@ -91,6 +91,20 @@ const INTERACTIVE_BLOCKED: &[&str] = &[
     "yes", // Produces infinite "y" output - would freeze terminal
 ];
 
+/// Commands with specific subcommands that are interactive (open browser, etc.)
+/// Format: (command, subcommand) - blocks "command subcommand ..."
+const INTERACTIVE_SUBCOMMANDS: &[(&str, &str)] = &[
+    // Cloud CLI auth commands that open browser
+    ("gcloud", "auth"),    // gcloud auth login opens browser
+    ("az", "login"),       // az login opens browser
+    ("aws", "sso"),        // aws sso login opens browser
+    ("gh", "auth"),        // gh auth login opens browser
+    ("firebase", "login"), // firebase login opens browser
+    ("heroku", "login"),   // heroku login opens browser
+    ("netlify", "login"),  // netlify login opens browser
+    ("vercel", "login"),   // vercel login opens browser
+];
+
 /// Device paths that produce infinite output
 const INFINITE_DEVICES: &[&str] = &["/dev/zero", "/dev/urandom", "/dev/random"];
 
@@ -194,6 +208,41 @@ impl CommandExecutor {
         ALL_INTERACTIVE.contains(cmd)
     }
 
+    /// Check if a command with its arguments matches an interactive subcommand pattern
+    ///
+    /// Returns Some((cmd, subcmd)) if blocked, None otherwise.
+    /// Example: "gcloud auth login" matches ("gcloud", "auth")
+    fn is_interactive_subcommand(
+        cmd: &str,
+        args: &[String],
+    ) -> Option<(&'static str, &'static str)> {
+        let first_arg = args.first().map(|s| s.as_str()).unwrap_or("");
+
+        INTERACTIVE_SUBCOMMANDS
+            .iter()
+            .find(|(blocked_cmd, blocked_subcmd)| {
+                cmd == *blocked_cmd && first_arg == *blocked_subcmd
+            })
+            .copied()
+    }
+
+    /// Check if shell input contains an interactive subcommand pattern
+    fn shell_has_interactive_subcommand(shell_input: &str) -> Option<(&'static str, &'static str)> {
+        let normalized = shell_input.trim();
+
+        INTERACTIVE_SUBCOMMANDS
+            .iter()
+            .find(|(cmd, subcmd)| {
+                // Match "cmd subcmd" at start of input (with word boundary)
+                let pattern = format!("{} {}", cmd, subcmd);
+                normalized.starts_with(&pattern)
+                    && normalized
+                        .get(pattern.len()..pattern.len() + 1)
+                        .is_none_or(|c| c == " " || c.is_empty())
+            })
+            .copied()
+    }
+
     /// Check if a command requires interactive execution with TUI suspension
     ///
     /// These commands need a real TTY and will be executed with the TUI suspended.
@@ -262,6 +311,26 @@ impl CommandExecutor {
                      - For 'top': use 'ps aux' or 'top -b -n 1' for batch mode\n\
                      - For 'ssh/tmux/screen': use in a separate terminal window\n\
                      - For REPLs: pass code as argument (e.g., 'python -c \"print(1+1)\"')"
+                ),
+                exit_code: 1,
+            });
+        }
+
+        // Block interactive subcommands (e.g., "gcloud auth login" opens browser)
+        if let Some((blocked_cmd, blocked_subcmd)) = Self::is_interactive_subcommand(cmd, args) {
+            log::warn!(
+                "Blocked interactive subcommand: {} {}",
+                blocked_cmd,
+                blocked_subcmd
+            );
+            return Ok(CommandOutput {
+                stdout: String::new(),
+                stderr: format!(
+                    "Command '{blocked_cmd} {blocked_subcmd}' is not supported in this terminal.\n\n\
+                     Reason: This command opens a browser or requires interactive input.\n\n\
+                     Suggestions:\n\
+                     - Run '{blocked_cmd} {blocked_subcmd}' in a separate terminal window\n\
+                     - Use non-interactive authentication (service accounts, tokens, etc.)"
                 ),
                 exit_code: 1,
             });
@@ -376,6 +445,28 @@ impl CommandExecutor {
                              Reason: Reading from /dev/zero, /dev/urandom, or /dev/random would freeze the terminal.\n\n\
                              Suggestion: Pipe output through 'head' to limit, e.g., 'cat /dev/urandom | head -c 100'"
                         .to_string(),
+                    exit_code: 1,
+                });
+            }
+
+            // Check for interactive subcommands in shell input (e.g., "gcloud auth login")
+            if let Some((blocked_cmd, blocked_subcmd)) =
+                Self::shell_has_interactive_subcommand(shell_input)
+            {
+                log::warn!(
+                    "Blocked interactive subcommand in shell: {} {}",
+                    blocked_cmd,
+                    blocked_subcmd
+                );
+                return Ok(CommandOutput {
+                    stdout: String::new(),
+                    stderr: format!(
+                        "Command '{blocked_cmd} {blocked_subcmd}' is not supported in this terminal.\n\n\
+                         Reason: This command opens a browser or requires interactive input.\n\n\
+                         Suggestions:\n\
+                         - Run '{blocked_cmd} {blocked_subcmd}' in a separate terminal window\n\
+                         - Use non-interactive authentication (service accounts, tokens, etc.)"
+                    ),
                     exit_code: 1,
                 });
             }
@@ -854,6 +945,70 @@ mod tests {
         assert!(!CommandExecutor::is_interactive_command("apt"));
         assert!(!CommandExecutor::is_interactive_command("yum"));
         assert!(!CommandExecutor::is_interactive_command("dnf"));
+    }
+
+    #[test]
+    fn test_is_interactive_subcommand() {
+        // gcloud auth should be blocked
+        let args = vec!["auth".to_string(), "login".to_string()];
+        assert!(CommandExecutor::is_interactive_subcommand("gcloud", &args).is_some());
+
+        // gcloud compute should NOT be blocked
+        let args = vec!["compute".to_string(), "instances".to_string()];
+        assert!(CommandExecutor::is_interactive_subcommand("gcloud", &args).is_none());
+
+        // az login should be blocked
+        let args = vec!["login".to_string()];
+        assert!(CommandExecutor::is_interactive_subcommand("az", &args).is_some());
+
+        // az vm should NOT be blocked
+        let args = vec!["vm".to_string(), "list".to_string()];
+        assert!(CommandExecutor::is_interactive_subcommand("az", &args).is_none());
+
+        // gh auth should be blocked
+        let args = vec!["auth".to_string(), "login".to_string()];
+        assert!(CommandExecutor::is_interactive_subcommand("gh", &args).is_some());
+
+        // Empty args should not match
+        assert!(CommandExecutor::is_interactive_subcommand("gcloud", &[]).is_none());
+    }
+
+    #[test]
+    fn test_shell_has_interactive_subcommand() {
+        // Direct commands
+        assert!(CommandExecutor::shell_has_interactive_subcommand("gcloud auth login").is_some());
+        assert!(CommandExecutor::shell_has_interactive_subcommand("az login").is_some());
+        assert!(CommandExecutor::shell_has_interactive_subcommand("gh auth login").is_some());
+
+        // With extra args
+        assert!(CommandExecutor::shell_has_interactive_subcommand(
+            "gcloud auth login --no-launch-browser"
+        )
+        .is_some());
+
+        // Non-interactive subcommands
+        assert!(
+            CommandExecutor::shell_has_interactive_subcommand("gcloud compute instances list")
+                .is_none()
+        );
+        assert!(CommandExecutor::shell_has_interactive_subcommand("az vm list").is_none());
+
+        // Partial matches should NOT trigger (word boundary)
+        assert!(
+            CommandExecutor::shell_has_interactive_subcommand("gcloud authorization").is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_gcloud_auth_blocked() {
+        let output =
+            CommandExecutor::execute("gcloud", &["auth".to_string(), "login".to_string()], None)
+                .await
+                .unwrap();
+
+        assert!(!output.is_success());
+        assert!(output.stderr.contains("not supported"));
+        assert!(output.stderr.contains("opens a browser"));
     }
 
     #[test]

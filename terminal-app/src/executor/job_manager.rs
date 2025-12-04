@@ -139,8 +139,14 @@ impl JobManager {
                 Ok(None) => {
                     // Still running
                 }
-                Err(_) => {
-                    // Error checking status, assume terminated
+                Err(e) => {
+                    // Error checking status - log warning and assume terminated
+                    log::warn!(
+                        "try_wait() failed for job [{}] (PID {}): {}. Assuming terminated.",
+                        entry.info.id,
+                        entry.info.pid,
+                        e
+                    );
                     entry.info.status = JobStatus::Terminated;
                     completed.push(entry.info.clone());
                     to_remove.push(*id);
