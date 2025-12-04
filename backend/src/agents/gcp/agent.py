@@ -4,10 +4,10 @@
 from langchain.agents import create_agent
 
 from agents.gcp.tools import get_ip_gcp
-from agents.shared.models import model
+from src.shared.models import model
 
 # Tools
-from agents.shared.tools.shell_tool import shell_with_approval as shell_tool
+from src.shared.tools.shell_tool import shell_with_approval as shell_tool
 
 gcp_agent = create_agent(
     model=model,
