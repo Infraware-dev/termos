@@ -1,10 +1,14 @@
 """Authentication routes for API key management."""
 
+import logging
+
 from fastapi import APIRouter, HTTPException
 
 from ..auth import validate_anthropic_api_key
 from ..config import config
 from ..models import AuthRequest, AuthResponse, AuthStatusResponse
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["authentication"])
 
@@ -22,10 +26,22 @@ async def authenticate(request: AuthRequest) -> AuthResponse:
     Raises:
         HTTPException: If validation or storage fails
     """
+    logger.info("=== Authentication request received ===")
+    logger.info(f"API key length: {len(request.api_key)}")
+    logger.info(
+        f"API key prefix: {request.api_key[:15]}..."
+        if len(request.api_key) > 15
+        else f"API key: {request.api_key}"
+    )
+
     # Validate the API key
+    logger.info("Validating API key with Anthropic API...")
     is_valid, message = await validate_anthropic_api_key(request.api_key)
 
+    logger.info(f"Validation result: is_valid={is_valid}, message={message}")
+
     if not is_valid:
+        logger.error(f"API key validation failed: {message}")
         raise HTTPException(status_code=400, detail=message)
 
     # Store the API key in .env
