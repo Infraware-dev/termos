@@ -1,6 +1,6 @@
 //! Animated splash screen with particle assembly effect
 //!
-//! Shows "INFRAWARE" text assembled from scattered colorful particles
+//! Shows the Infraware logo assembled from scattered particles
 
 use crossterm::event::{self, Event, KeyEventKind};
 use ratatui::{backend::CrosstermBackend, layout::Rect, style::Color, Frame, Terminal};
@@ -9,18 +9,40 @@ use std::{
     time::{Duration, Instant},
 };
 
-/// ASCII art representation of "INFRAWARE" - each '#' becomes a particle
-const INFRAWARE_ART: &[&str] = &[
-    " ##  ##    ##  #####  #####     ###    ##   ##   ###    #####   ##### ",
-    " ##  ###   ##  ##     ##  ##   ## ##   ##   ##  ## ##   ##  ##  ##    ",
-    " ##  ####  ##  ####   #####   ##   ##  ## # ##  #####   #####   ####  ",
-    " ##  ## ## ##  ##     ##  ##  #######  ## # ##  ##  ##  ##  ##  ##    ",
-    " ##  ##  ####  ##     ##  ##  ##   ##  #######  ##  ##  ##  ##  ##    ",
-    " ##  ##   ###  ##     ##  ##  ##   ##   ## ##   ##  ##  ##  ##  ##### ",
+/// ASCII art representation of the Infraware logo - each '@' becomes a particle
+const LOGO_ART: &[&str] = &[
+    "                @@                               @",
+    "              @@@@@@                            @@",
+    "            @@@@@@@@@                         @@@@",
+    "           @@@@@@@@@@@@                     @@@@@@",
+    "         @@@@@@@@@@@@@@@@                 @@@@@@@@",
+    "       @@@@@@@@@@@@@@@@@@@@             @@@@@@@@@@",
+    "     @@@@@@@@@@@@@@@@@@@@@@@@          @@@@@@@@@@@",
+    "   @@@@@@@@@@@@@@@@@@@@@@@@@@@@      @@@@@@@@@@@@@",
+    "  @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@   @@@@@@@@@@@@@@@",
+    " @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@",
+    " @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@",
+    "@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@",
+    "@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@",
+    "@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@",
+    "@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@",
+    "@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@",
+    "@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@",
+    "@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@",
+    "@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@ ",
+    "@@@@@@@@@@@@@@@@  @@@@@@@@@@@@@@@@@@@@@@@@@@@@@@  ",
+    "@@@@@@@@@@@@@@      @@@@@@@@@@@@@@@@@@@@@@@@@@@   ",
+    "@@@@@@@@@@@@          @@@@@@@@@@@@@@@@@@@@@@@     ",
+    "@@@@@@@@@@              @@@@@@@@@@@@@@@@@@@@      ",
+    "@@@@@@@@                 @@@@@@@@@@@@@@@@@        ",
+    "@@@@@@@                    @@@@@@@@@@@@@          ",
+    "@@@@@                        @@@@@@@@@            ",
+    "@@@                            @@@@@              ",
+    "@                                @                ",
 ];
 
 /// Height of the ASCII art
-const ART_HEIGHT: usize = 6;
+const ART_HEIGHT: usize = 28;
 
 /// Animation phases
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -28,14 +50,14 @@ enum AnimationPhase {
     Scatter,  // Particles scattered randomly
     Assembly, // Particles moving to target positions
     Pulse,    // Text complete, colors pulsing
-    Hold,     // Hold the final logo in light blue
+    Hold,     // Hold the final logo in white
     FadeOut,  // Fading out before showing terminal
 }
 
-/// Light blue color for final logo
-const LOGO_COLOR: Color = Color::Rgb(100, 180, 255);
-/// Darker blue for shimmer effect
-const LOGO_COLOR_ALT: Color = Color::Rgb(60, 140, 220);
+/// White color for final logo
+const LOGO_COLOR: Color = Color::Rgb(255, 255, 255);
+/// Slightly dimmer white for shimmer effect
+const LOGO_COLOR_ALT: Color = Color::Rgb(200, 200, 200);
 
 /// A single particle in the animation
 #[derive(Debug, Clone)]
@@ -89,11 +111,11 @@ impl Particle {
         self.y = self.start_y + (self.target_y - self.start_y) * eased;
     }
 
-    /// Get current color with shimmer effect between two shades of celeste
+    /// Get current color with shimmer effect between two shades of white
     fn get_color(&self, time: f64, phase: AnimationPhase) -> Color {
         match phase {
             AnimationPhase::Scatter => {
-                // Fast shimmer between two celestes during scatter
+                // Fast shimmer between white shades during scatter
                 let shimmer = (time * 5.0 + self.color_offset * 10.0).sin() * 0.5 + 0.5;
                 lerp_color(LOGO_COLOR_ALT, LOGO_COLOR, shimmer)
             }
@@ -103,16 +125,16 @@ impl Particle {
                 lerp_color(LOGO_COLOR_ALT, LOGO_COLOR, shimmer)
             }
             AnimationPhase::Pulse => {
-                // Pulsing brightness on celeste
+                // Pulsing brightness on white
                 let pulse = ((time * 3.0 + self.color_offset).sin() * 0.3 + 0.7).clamp(0.4, 1.0);
                 brighten_color(LOGO_COLOR, pulse)
             }
             AnimationPhase::Hold => {
-                // Solid light blue for final display
+                // Solid white for final display
                 LOGO_COLOR
             }
             AnimationPhase::FadeOut => {
-                // Keep light blue during fade
+                // Keep white during fade
                 LOGO_COLOR
             }
         }
@@ -141,14 +163,14 @@ impl SplashScreen {
         let mut particles = Vec::new();
 
         // Calculate centering offset
-        let art_width = INFRAWARE_ART[0].len();
+        let art_width = LOGO_ART.first().map_or(0, |s| s.len());
         let offset_x = (screen_width as i32 - art_width as i32) / 2;
         let offset_y = (screen_height as i32 - ART_HEIGHT as i32) / 2;
 
         let mut index = 0;
-        for (row, line) in INFRAWARE_ART.iter().enumerate() {
+        for (row, line) in LOGO_ART.iter().enumerate() {
             for (col, ch) in line.chars().enumerate() {
-                if ch == '#' {
+                if ch == '@' {
                     let target_x = (col as i32 + offset_x).max(0) as f64;
                     let target_y = (row as i32 + offset_y).max(0) as f64;
 
@@ -171,14 +193,14 @@ impl SplashScreen {
     fn get_phase(&self) -> AnimationPhase {
         let elapsed = self.start_time.elapsed().as_secs_f64();
 
-        if elapsed < 0.3 {
+        if elapsed < 0.1 {
             AnimationPhase::Scatter
-        } else if elapsed < 2.0 {
+        } else if elapsed < 0.6 {
             AnimationPhase::Assembly
-        } else if elapsed < 2.5 {
+        } else if elapsed < 1.1 {
             AnimationPhase::Pulse
-        } else if elapsed < 4.5 {
-            AnimationPhase::Hold // 2 seconds of solid light blue logo
+        } else if elapsed < 2.6 {
+            AnimationPhase::Hold // 1.5 seconds of solid white logo
         } else {
             AnimationPhase::FadeOut
         }
@@ -188,10 +210,10 @@ impl SplashScreen {
     fn get_assembly_progress(&self) -> f64 {
         let elapsed = self.start_time.elapsed().as_secs_f64();
 
-        if elapsed < 0.3 {
+        if elapsed < 0.1 {
             0.0
-        } else if elapsed < 2.0 {
-            (elapsed - 0.3) / 1.7
+        } else if elapsed < 0.6 {
+            (elapsed - 0.1) / 0.5
         } else {
             1.0
         }
@@ -199,7 +221,7 @@ impl SplashScreen {
 
     /// Check if animation is complete
     pub fn is_complete(&self) -> bool {
-        self.start_time.elapsed().as_secs_f64() > 5.0 // Total: 5 seconds
+        self.start_time.elapsed().as_secs_f64() > 2.8 // Total: 2.8 seconds
     }
 
     /// Update animation state
@@ -218,7 +240,7 @@ impl SplashScreen {
 
         // Calculate fade out opacity
         let opacity = if phase == AnimationPhase::FadeOut {
-            let fade_progress = (time - 4.5) / 0.5; // 0.5s fade out
+            let fade_progress = (time - 2.6) / 0.2; // 0.2s fade out
             (1.0 - fade_progress).clamp(0.0, 1.0)
         } else {
             1.0
