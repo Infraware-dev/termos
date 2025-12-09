@@ -68,6 +68,11 @@ impl CommandOrchestrator {
             return self.handle_jobs_command(state, job_manager);
         }
 
+        // Handle history built-in command
+        if cmd == "history" {
+            return self.handle_history_command(state, args);
+        }
+
         // Check for background command (ends with &)
         if let Some(input) = original_input {
             if CommandExecutor::is_background_command(input) {
@@ -199,6 +204,68 @@ impl CommandOrchestrator {
                     job.id, status_str, job.command, job.pid
                 ));
             }
+        }
+
+        Ok(())
+    }
+
+    /// Handle the built-in "history" command
+    ///
+    /// Shows the command history, optionally limited to the last N entries.
+    /// Usage: `history` (show all) or `history N` (show last N entries)
+    fn handle_history_command(&self, state: &mut TerminalState, args: &[String]) -> Result<()> {
+        // Clone history to avoid borrow checker issues with state.add_output()
+        let all_history: Vec<String> = state.history.all().to_vec();
+
+        if all_history.is_empty() {
+            state.add_output(MessageFormatter::info("No command history"));
+            return Ok(());
+        }
+
+        // Parse optional limit argument (e.g., "history 10")
+        let limit = if let Some(arg) = args.first() {
+            match arg.parse::<usize>() {
+                Ok(n) if n > 0 => Some(n),
+                Ok(_) => {
+                    state.add_output(MessageFormatter::error(
+                        "history: limit must be a positive number",
+                    ));
+                    return Ok(());
+                }
+                Err(_) => {
+                    state.add_output(MessageFormatter::error(format!(
+                        "history: invalid number: {}",
+                        arg
+                    )));
+                    return Ok(());
+                }
+            }
+        } else {
+            None
+        };
+
+        // Determine which entries to show
+        let entries: Vec<(usize, String)> = if let Some(n) = limit {
+            // Show last N entries
+            let start_idx = all_history.len().saturating_sub(n);
+            all_history
+                .iter()
+                .enumerate()
+                .skip(start_idx)
+                .map(|(i, cmd)| (i + 1, cmd.clone()))
+                .collect()
+        } else {
+            // Show all entries
+            all_history
+                .iter()
+                .enumerate()
+                .map(|(i, cmd)| (i + 1, cmd.clone()))
+                .collect()
+        };
+
+        // Display each command with its number
+        for (num, cmd) in entries {
+            state.add_output(format!("  {} {}", num, cmd));
         }
 
         Ok(())

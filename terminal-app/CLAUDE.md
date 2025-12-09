@@ -4,253 +4,163 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**Infraware Terminal** is a hybrid command interpreter with AI assistance for DevOps operations. It intelligently routes user input to either shell command execution or an LLM backend for natural language queries.
+**Infraware Terminal** is a hybrid command interpreter with AI assistance for DevOps operations. It routes user input to either shell execution or an LLM backend.
 
 **Tech Stack**: Rust + TUI (ratatui/crossterm)
-**Status**: M1 Complete + Backend Integration in Progress (0 clippy warnings, Microsoft Pragmatic Rust Guidelines compliant)
-**Recent**: Background process support (`&` suffix), multiline command support (continuation `\`, heredocs `<<EOF`)
-**Target Users**: DevOps engineers working with cloud environments (AWS/Azure)
+**Status**: M1 Complete (0 clippy warnings, Microsoft Pragmatic Rust Guidelines compliant)
 
 **Prerequisites** (Linux): `sudo apt install -y pkg-config libssl-dev`
 
-**Environment Variables**:
-- `INFRAWARE_BACKEND_URL` - Backend API endpoint (e.g., `http://localhost:8000`)
-- `BACKEND_API_KEY` - API key for LLM backend authentication
+**Environment Variables**: `INFRAWARE_BACKEND_URL` (backend endpoint), `BACKEND_API_KEY` (LLM auth)
 
 ## Commands
 
 ```bash
 # Build and Run
-cargo build                          # Debug build
-cargo build --release                # Release build
-cargo run                            # Run application
-cargo check                          # Fast type check (no codegen)
+cargo build --release && cargo run   # Production build
+cargo check                          # Fast type check
 
 # Testing
 cargo test                           # All tests
 cargo test --test classifier_tests   # SCAN algorithm tests
-cargo test --test executor_tests     # Executor tests
-cargo test --test integration_tests  # Integration tests
-cargo test test_name                 # Single test by name
-cargo test -- --nocapture            # Show output during tests
-cargo test -- --show-output          # Show println! for passing tests
+cargo test test_name                 # Single test
+cargo test -- --nocapture            # With output
+cargo test -- --test-threads=1       # For tests with shared state
 
-# Benchmarking (benches/scan_benchmark.rs)
-cargo bench                          # All benchmarks
-cargo bench scan_                    # SCAN benchmarks only
-cargo bench scan_individual_handlers # Individual handler isolation benchmarks
-cargo bench scan_full_classification # Full pipeline benchmarks
+# Benchmarking
+cargo bench scan_individual_handlers # Handler isolation
+cargo bench scan_full_classification # Full pipeline
 
 # Pre-commit (required)
-cargo fmt && cargo clippy            # Format + lint (CI enforces both)
+cargo fmt && cargo clippy            # CI enforces both
 
-# Coverage (requires: cargo install cargo-llvm-cov)
+# Coverage
 cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info
 ```
 
 ## Architecture
 
-### Core Flow
 ```
-User Input → Alias Expansion → InputClassifier → [Command Path | Natural Language Path]
-              (if matches)    (11-handler chain)     ↓                    ↓
-                           incl. History Expansion  CommandExecutor      LLMClient
-                                                         ↓                    ↓
-                                                    Shell Output      ResponseRenderer
+User Input → Alias Expansion → InputClassifier → [Command | NaturalLanguage]
+                              (11-handler chain)      ↓            ↓
+                                               CommandExecutor  LLMClient
 ```
 
 ### SCAN Algorithm (Shell-Command And Natural-language)
 
-Chain of Responsibility with 11 handlers executing in strict order (<100μs average):
+Chain of Responsibility with 11 handlers. **Order enforced by `HandlerPosition` enum** - do not reorder without understanding performance implications (fast paths first).
 
-| # | Handler | Purpose |
-|---|---------|---------|
-| 1 | EmptyInputHandler | Fast path for empty/whitespace |
-| 2 | HistoryExpansionHandler | `!!`, `!$`, `!^`, `!*` expansion |
-| 3 | ApplicationBuiltinHandler | App builtins (clear, exit, jobs, reload-aliases, reload-commands, auth-status) |
-| 4 | ShellBuiltinHandler | 45+ builtins (., :, [, [[, export, eval, exec) |
-| 5 | PathCommandHandler | ./script.sh, /usr/bin/cmd, background suffix detection |
-| 6 | KnownCommandHandler | 60+ DevOps commands + PATH cache |
-| 7 | PathDiscoveryHandler | Auto-discover newly installed commands |
-| 8 | CommandSyntaxHandler | Language-agnostic: flags, pipes, redirects |
-| 9 | TypoDetectionHandler | Levenshtein ≤2 ("dokcer" → "docker"), disabled by default |
-| 10 | NaturalLanguageHandler | Language-agnostic heuristics (universal patterns) |
-| 11 | DefaultHandler | Fallback to LLM |
+| Position | Handler | Target Time |
+|----------|---------|-------------|
+| 1 | EmptyInputHandler | <1μs |
+| 2 | HistoryExpansionHandler (`!!`, `!$`, `!^`, `!*`) | ~5μs |
+| 3 | ApplicationBuiltinHandler (cd, clear, exit, jobs, history) | <1μs |
+| 4 | ShellBuiltinHandler (45+ builtins) | <1μs |
+| 5 | PathCommandHandler (./script, /usr/bin/cmd, `&` suffix) | ~10μs |
+| 6 | KnownCommandHandler (60+ DevOps commands + cache) | <1μs hit |
+| 7 | PathDiscoveryHandler (newly installed commands) | 1-5ms |
+| 8 | CommandSyntaxHandler (flags, pipes, redirects) | ~10μs |
+| 9 | TypoDetectionHandler (Levenshtein ≤2, disabled) | ~100μs |
+| 10 | NaturalLanguageHandler (universal patterns) | <5μs |
+| 11 | DefaultHandler (LLM fallback) | <1μs |
 
-**Key optimizations**: Precompiled RegexSet, thread-safe locks with fail-fast poisoning recovery, periodic job checking (250ms), fast paths first.
+### Quick Reference: Where to Find X
+
+| Task | Location |
+|------|----------|
+| Add known command | `src/input/known_commands.rs` |
+| Add app builtin | `src/input/application_builtins.rs` |
+| Add shell builtin | `src/input/shell_builtins.rs` |
+| Add keyboard shortcut | `src/terminal/events.rs` → `EventHandler::map_key_event()` |
+| Add terminal event | `src/terminal/events.rs` → `TerminalEvent` enum |
+| Modify TUI rendering | `src/terminal/tui.rs` |
+| Add package manager | `src/executor/package_manager.rs` |
+| Language patterns | `config/language.toml` |
+| Precompiled regex | `src/input/patterns.rs` |
 
 ### Key Modules
 
-| Directory | Purpose | Key Files |
-|-----------|---------|-----------|
-| `terminal/` | TUI rendering and state | `tui.rs` (suspend/resume), `buffers.rs` (SRP buffers), `events.rs` (keyboard) |
-| `input/` | SCAN Algorithm | `classifier.rs` (coordinator), `handler.rs` (11-handler chain), `known_commands.rs` (command registry) |
-| `executor/` | Command execution | `command.rs` (async exec, background processes), `package_manager.rs` (Strategy pattern), `job_manager.rs` (background job tracking) |
-| `orchestrators/` | Workflow coordination | `command.rs`, `natural_language.rs`, `tab_completion.rs` |
-| `llm/` | LLM integration | `client.rs` (Mock/HTTP clients with HITL support), `renderer.rs` (syntax highlighting) |
-| `auth/` | Backend authentication | `authenticator.rs` (HTTP/Mock auth), `config.rs` (env config), `models.rs` (API types) |
-| `config/` | Configuration management | `language.rs` (multilingual patterns), `language.toml` (language config) |
+| Directory | Purpose |
+|-----------|---------|
+| `terminal/` | TUI: `tui.rs` (suspend/resume), `buffers.rs` (SRP), `events.rs` (keyboard) |
+| `input/` | SCAN: `classifier.rs` (coordinator), `handler.rs` (chain), `patterns.rs` (regex) |
+| `executor/` | Execution: `command.rs` (async), `job_manager.rs` (background `&`) |
+| `orchestrators/` | Workflows: `command.rs`, `natural_language.rs`, `tab_completion.rs` |
+| `llm/` | LLM: `client.rs` (Mock/HTTP with HITL), `renderer.rs` (syntax highlighting) |
+| `auth/` | Auth: `authenticator.rs`, `config.rs`, `models.rs` |
 
 ### Design Patterns
-- **Chain of Responsibility**: Input classification (`input/handler.rs`)
-- **Strategy Pattern**: Package managers (`executor/package_manager.rs`)
-- **Builder Pattern**: Terminal construction (`main.rs`)
-- **SRP**: Orchestrators, buffer components
+- **Chain of Responsibility**: `input/handler.rs` (position-enforced)
+- **Strategy Pattern**: `executor/package_manager.rs`
+- **Dependency Injection**: `ClassifierContext` (cache, patterns, language config)
 
 ## Development Guidelines
 
-### Adding New Commands
-1. Add to `known_commands.rs` (single source of truth for KnownCommandHandler + TypoDetectionHandler)
-2. Commands auto-verified against PATH and cached
-
 ### Adding New Handlers
 1. Implement `InputHandler` trait in `handler.rs`
-2. Add new position to `HandlerPosition` enum - ORDER MATTERS (fast paths first, expensive checks last)
-3. Add to chain in `InputClassifier::new()` using the new `HandlerPosition` variant
+2. Add position to `HandlerPosition` enum (ORDER MATTERS - fast paths first)
+3. Add to chain in `InputClassifier::new()`
 4. Use precompiled patterns from `patterns.rs` - NEVER compile regex in handlers
-5. If handler needs language-specific patterns, use `ClassifierContext::language_patterns`
-6. If handler needs shared state (cache, patterns), access via `ClassifierContext` parameter (no global state)
-7. Run `cargo bench scan_individual_handlers` to measure handler performance in isolation
-8. Run `cargo bench scan_full_classification` to verify no regression in overall pipeline
+5. Access shared state via `ClassifierContext` (no global state)
+6. Run `cargo bench scan_individual_handlers` to verify performance
 
 ### Testing with Shared State
-Use `#[serial_test::serial]` for tests that modify shared global state (CommandCache, aliases). This prevents flaky tests from concurrent test execution.
+Use `#[serial_test::serial]` for tests modifying `CommandCache` or aliases to prevent flaky tests.
 
 ### History Expansion
-- Patterns: `!!` (previous cmd), `!$` (last arg), `!^` (first arg), `!*` (all args)
-- Thread-safe via `Arc<RwLock<Vec<String>>>`
-- Set via `InputClassifier::with_history()`
-- Get-second-to-last semantics (current input already in history when classified)
+`!!` (previous cmd), `!$` (last arg), `!^` (first arg), `!*` (all args). Thread-safe via `Arc<RwLock<Vec<String>>>`. Uses get-second-to-last semantics (current input already in history when classified).
 
 ### Aliases
-- System: `/etc/bash.bashrc`, `/etc/bashrc`, `/etc/profile`, `/etc/profile.d/*.sh`
-- User: `~/.bashrc`, `~/.bash_aliases`, `~/.zshrc` (override system)
-- Single-level expansion, O(1) HashMap lookup
-- Security: `is_safe_alias()` rejects dangerous patterns
-- Runtime reload: `reload-aliases` built-in command
-
-### Built-in Commands
-
-Application builtins (`ApplicationBuiltinHandler`, position 3): `cd`, `clear`, `exit`, `jobs`, `reload-aliases`, `reload-commands`, `auth-status`
-
-Add new builtins to `src/input/application_builtins.rs`.
+System files loaded first, then user files (`~/.bashrc`, `~/.bash_aliases`, `~/.zshrc`). Single-level expansion, O(1) lookup. `is_safe_alias()` rejects dangerous patterns. Runtime reload: `reload-aliases`.
 
 ### Interactive Commands
-- **28 supported** (TUI suspends): vim, nvim, nano, emacs, less, more, man, top, htop, sudo, watch, mc, ranger, etc.
-- **31 blocked** (helpful error): ssh, tmux, screen, python, mysql, gdb, etc.
-- Unix/Linux/macOS only (Windows returns error)
-- Implementation: `TerminalUI::suspend()` → command runs → `TerminalUI::resume()` (panic-safe via RAII `TuiGuard`)
+28 commands suspend TUI (vim, nano, less, etc.), 31 blocked with suggestions (ssh, tmux, python REPL). Implementation: `TerminalUI::suspend()` → run → `resume()` with RAII `TuiGuard` for panic safety. Unix only.
 
-### Blocked Commands
-**Infinite output** (blocked with suggestions): `yes`, `cat /dev/zero`, `dd if=/dev/zero`, `ping` without `-c`
-**Not blocked** (Ctrl+C works): `tail -f`, `docker logs -f`, `watch`
+### Background Processes
+`&` suffix → `JobManager` with `Arc<RwLock>`. 250ms polling interval. Lock poisoning triggers fail-fast per Microsoft guidelines.
 
-### Background Process Support
-
-Commands with `&` suffix run in background. `jobs` builtin lists all jobs. Implementation: `JobManager` (`src/executor/job_manager.rs`) with `Arc<RwLock>` for thread-safe access. Main event loop checks for completed jobs periodically (250ms interval) to minimize lock contention. Lock poisoning triggers fail-fast (bail/return early) per Microsoft Rust Guidelines.
-
-### Multiline Command Support
-
-- **Line continuation**: End line with `\`
-- **Heredocs**: `<<EOF` syntax
-- **Brace expansion**: `file{1..3}` → `file1 file2 file3`
-
-### Shell Builtins
-- 45+ recognized without PATH verification (., :, [, [[, export, eval, exec, etc.)
-- Executed via `sh -c` (Unix) or `cmd /C` (Windows)
-- `ShellBuiltinInfo` provides metadata: `requires_shell`, `unix_only`
-
-### LLM Integration (Human-in-the-Loop)
-
-The `HttpLLMClient` supports conversational AI with HITL (Human-in-the-Loop) interactions:
-
-- **Thread-based conversations**: Maintains context via `/threads` API
-- **SSE streaming**: Real-time responses via Server-Sent Events
-- **LLMQueryResult enum**:
-  - `Complete(String)` - Final response from LLM
-  - `CommandApproval { command, message }` - LLM wants to execute a command (y/n)
-  - `Question { question, options }` - LLM is asking a question (free-form text)
-- **Resume methods**: `resume_run()` for approval, `resume_with_answer()` for questions
-- **Authentication**: API key via `BACKEND_API_KEY` environment variable
+### LLM Integration (HITL)
+`HttpLLMClient` with SSE streaming. `LLMQueryResult` enum: `Complete`, `CommandApproval`, `Question`. Resume via `resume_run()` or `resume_with_answer()`.
 
 ### Error Handling
-- Use `anyhow::Result` for all errors
-- Display user-friendly messages in TUI, don't crash on failures
+Use `anyhow::Result`. Display user-friendly messages, never crash.
 
 ### Logging
-
-Uses `log4rs` with size-based rotation (`src/logging.rs`). Use `log::debug!()`, `log::info!()`, etc.
-
-```bash
-LOG_LEVEL=debug cargo run       # Debug level
-LOG_LEVEL=trace cargo run       # Trace level (very verbose)
-```
-
-HTTP operations use structured prefixes: `[HTTP-OUT]` (request), `[HTTP-IN]` (response with timing).
-
-**Log locations**: Linux `~/.local/share/infraware-terminal/logs/`, macOS `~/Library/Logs/infraware-terminal/`, Windows `%APPDATA%\infraware-terminal\logs\`
+`log4rs` with size rotation. `LOG_LEVEL=debug cargo run`. HTTP prefixes: `[HTTP-OUT]`, `[HTTP-IN]`.
 
 ## Constraints
 
 ### CI/CD
-- `cargo fmt --all --check` must pass
-- `cargo clippy --all-targets --all-features -- -D warnings` must pass
+- `cargo fmt --all --check` and `cargo clippy -- -D warnings` must pass
 - 75% test coverage minimum
 - Multi-platform: Ubuntu, Windows, macOS
 
 ### Git Commits
 - **NO Co-Authored-By** in commit messages
-- **Run `cargo fmt` before committing**
-- Keep descriptions brief and concise
+- Run `cargo fmt` before committing
 
 ### Code Style
-- SOLID principles, design patterns
+- Safe indexing (`.first()`, `.get()`) - no `parts[0]` or `.unwrap()` on arrays
 - Prefer zero-copy and CoW over clone
 - No dead code
-- Safe indexing (`.first()`, `.get()`) - no `parts[0]` or `.unwrap()` on arrays
 
-### Code Quality Standards
+### Microsoft Pragmatic Rust Guidelines
 
-**Microsoft Pragmatic Rust Guidelines Compliance** (https://microsoft.github.io/rust-guidelines/):
+See `.claude/skills/microsoft-rust-guidelines.md` for full details.
 
-- All public types implement `Debug` (custom impl for complex types to protect sensitive data)
+**Key requirements:**
+- All public types implement `Debug` (custom impl for sensitive data)
 - Use `#[expect]` instead of `#[allow]` for lint overrides
-- Panic safety (M-PANIC-IS-STOP): Lock poisoning triggers fail-fast (bail/return early), not recovery with potentially corrupted state
-- Zero clippy warnings, all tests passing
-- See `.claude/skills/microsoft-rust-guidelines.md` for detailed guidelines
+- Lock poisoning triggers fail-fast (M-PANIC-IS-STOP)
 
 ### Multilingual Support
 
-Language-specific patterns are now externalized to `config/language.toml`:
+`config/language.toml` contains language-specific patterns. Priority: `./config/language.toml` → `~/.config/infraware-terminal/language.toml` → English defaults. Add languages via `[languages.xx]` sections.
 
-- **Configuration File Priority** (checked in order):
-  1. `./config/language.toml` (project directory)
-  2. `~/.config/infraware-terminal/language.toml` (user config)
-  3. Built-in English defaults (fallback)
-- **Supported Languages**: English (en), Italian (it), Spanish (es) - easily extensible
-- **Pattern Types**: Single words, question patterns, article patterns, polite patterns
-- **Usage**: Patterns loaded via `ClassifierContext::language_patterns` at initialization
-- **Adding Languages**: Add new `[languages.xx]` section in `language.toml` with appropriate patterns
-
-Example from `config/language.toml`:
-```toml
-[languages.it]
-single_words = ["cosa", "come", "perché", "quando", "dove", "chi", "quale"]
-question_patterns = ["(?i)^(come|cosa|perché|quando|dove|chi|quale)\\s"]
-```
-
-### M1 Scope Limitations (Deferred to M2/M3)
-- Auto-install: Framework prompts but doesn't execute
-- Tab completion: Basic only, no bash/zsh integration
-- History: Session-only, not persisted to disk
-- Markdown: Basic rendering only, no tables/images
-- Cache TTL: No automatic invalidation (use `reload-commands` after installing new commands)
-
-## Keyboard Shortcuts
-
-Defined in `EventHandler::map_key_event()` (`src/terminal/events.rs`). Add new shortcuts by adding `KeyEvent` patterns there.
-
-**Note**: Windows filters `KeyEventKind::Release/Repeat` to avoid duplicate input.
+### M1 Limitations (Deferred)
+- Auto-install prompts only, no execution
+- Session-only history (not persisted)
+- No cache TTL (use `reload-commands` after installing)
 
 ## Common Patterns
 
@@ -259,26 +169,11 @@ Defined in `EventHandler::map_key_event()` (`src/terminal/events.rs`). Add new s
 2. Handle in `EventHandler::poll_event()`
 3. Implement in `InfrawareTerminal::handle_event()` in `main.rs`
 
-### Adding a Package Manager
-1. Implement `PackageManager` trait in `package_manager.rs`
-2. Add to `PackageInstaller::detect_package_manager()` in `install.rs`
-
-### InputType Enum (src/input/classifier.rs)
-- `Command { command, args, original_input }` - shell operators in `original_input`
-- `NaturalLanguage(String)` - sent to LLM
-- `Empty` - ignored
-- `CommandTypo { input, suggestion, distance }` - shows suggestion
+### InputType Enum
+`Command { command, args, original_input }`, `NaturalLanguage(String)`, `Empty`, `CommandTypo { input, suggestion, distance }`
 
 ### ClassifierContext (Dependency Injection)
-
-The `ClassifierContext` struct provides shared dependencies to all handlers via dependency injection:
-- **Command Cache**: Thread-safe `Arc<RwLock<CommandCache>>` for PATH lookups and alias storage
-- **Compiled Patterns**: Precompiled `Arc<CompiledPatterns>` from `patterns.rs` for performance
-- **Language Patterns**: External language-specific patterns from `config/language.toml`
-
-Context is passed to handlers that need shared state (e.g., `KnownCommandHandler`, `TypoDetectionHandler`, `NaturalLanguageHandler`). This design enables testability and avoids global state.
-
-**Recent Refactoring**: Chain of Responsibility refactored to use explicit `HandlerPosition` enum (preventing accidental reordering), `ClassifierContext` for dependency injection (eliminating global state), and external language configuration (supporting multilingual patterns without code changes).
+Provides `Arc<RwLock<CommandCache>>`, `Arc<CompiledPatterns>`, and language patterns to handlers. Enables testability and avoids global state.
 
 ## Performance Targets
 
@@ -286,33 +181,23 @@ Context is passed to handlers that need shared state (e.g., `KnownCommandHandler
 |-----------|--------|
 | Average classification | <100μs |
 | Known command (cache hit) | <1μs |
-| Typo detection | <100μs (disabled by default) |
-| Natural language | <5μs |
 | PATH lookup (cache miss) | 1-5ms |
-| Background job check (read path) | <1μs (no jobs) |
-| Job polling interval | 250ms (balances responsiveness vs lock contention) |
+| Job polling interval | 250ms |
 
-Run `cargo bench scan_` to verify. Use `cargo bench scan_individual_handlers` to measure each handler in isolation and identify bottlenecks.
+Run `cargo bench scan_` to verify.
 
 ## Claude Code Agents
 
-Specialized agents in `.claude/agents/` for automated workflows:
+Agents in `.claude/agents/` are invoked automatically when appropriate:
 
-| Agent | Model | Purpose | When to Use |
-|-------|-------|---------|-------------|
-| `rust-clippy-enforcer` | sonnet | Run clippy and fix warnings | After code changes, before commits |
-| `rust-code-reviewer` | sonnet | Code review for best practices | After implementing features |
-| `code-metrics-analyzer` | sonnet | LOC, complexity, maintainability metrics | After significant code changes |
-| `docs-updater` | haiku | Update CLAUDE.md/README.md | After architectural changes |
-| `uml-diagram-generator` | haiku | Generate PlantUML diagrams | After refactoring |
-| `git-committer` | haiku | Create clean commits (no emojis, no Co-Author) | After completing work |
+| Agent | Purpose |
+|-------|---------|
+| `rust-clippy-enforcer` | Run clippy and fix warnings (before commits) |
+| `rust-code-reviewer` | Code review for best practices |
+| `code-metrics-analyzer` | LOC, complexity metrics |
+| `docs-updater` | Update CLAUDE.md/README.md |
+| `git-committer` | Create commits (no emojis, no Co-Author) |
 
-**Usage**: Agents are invoked automatically by Claude Code when appropriate, or manually via Task tool.
+## Platform Notes
 
-**Adding Agents**: Create `.claude/agents/<name>.md` with frontmatter (name, description, model, color) and system prompt.
-
-## Windows Notes
-
-- Filter `KeyEventKind::Press` only in `events.rs` (crossterm generates Press/Repeat/Release)
-- Shell execution: `cmd /C` instead of `sh -c`
-- Interactive commands not supported (POSIX limitation)
+**Windows**: Filter `KeyEventKind::Press` only in `events.rs`. Use `cmd /C` for shell execution. Interactive commands not supported.
