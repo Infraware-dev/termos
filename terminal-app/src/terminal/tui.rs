@@ -13,6 +13,7 @@ use ratatui::{
     Frame, Terminal,
 };
 use std::io;
+use unicode_width::UnicodeWidthStr;
 
 use super::state::{TerminalMode, TerminalState};
 
@@ -125,7 +126,7 @@ impl Drop for TerminalUI {
 }
 
 /// Render a single frame - NEW DESIGN: 2 sections (Header + Unified Content)
-fn render_frame(frame: &mut Frame, state: &TerminalState) {
+fn render_frame(frame: &mut Frame, state: &mut TerminalState) {
     let size = frame.area();
 
     // Create layout: header bar + unified content area
@@ -168,7 +169,7 @@ fn render_header_bar(frame: &mut Frame, area: ratatui::layout::Rect) {
 fn render_unified_content(
     frame: &mut Frame,
     area: ratatui::layout::Rect,
-    state: &TerminalState,
+    state: &mut TerminalState,
 ) {
     let mut lines = Vec::new();
 
@@ -223,14 +224,14 @@ fn render_unified_content(
         match state.mode {
             TerminalMode::AwaitingCommandApproval => "Do you want to execute this command (y/n)? ".to_string(),
             TerminalMode::AwaitingAnswer => "Answer: ".to_string(),
-            _ => format_prompt(),
+            _ => state.get_prompt(),
         }
     } else if matches!(state.mode, TerminalMode::AwaitingMoreInput(_)) {
         // Use continuation prompt for multiline input
         "> ".to_string()
     } else {
-        // Normal prompt
-        format_prompt()
+        // Normal prompt (cached for performance)
+        state.get_prompt()
     };
 
     let input = state.input.text();
@@ -249,17 +250,16 @@ fn render_unified_content(
     // 2b. Add loading indicator if waiting for LLM (animated cursor)
     if matches!(state.mode, TerminalMode::WaitingLLM) {
         // Animate cursor: alternate between █ and space every 500ms
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis();
-        let blink = (now / 500) % 2 == 0;
-        let indicator = if blink { "█" } else { " " };
+        // Uses monotonic Instant clock for reliable animation timing
+        if let Some(elapsed_ms) = state.animation_elapsed() {
+            let blink = (elapsed_ms / 500).is_multiple_of(2);
+            let indicator = if blink { "█" } else { " " };
 
-        lines.push(Line::from(Span::styled(
-            indicator,
-            Style::default().fg(Color::Blue),
-        )));
+            lines.push(Line::from(Span::styled(
+                indicator,
+                Style::default().fg(Color::Blue),
+            )));
+        }
     }
 
     // 3. Calculate visible window (auto-scroll to bottom)
@@ -274,45 +274,31 @@ fn render_unified_content(
     // 5. Position cursor at end of current prompt line
     // The prompt is always the last line in visible_window
     let prompt_line_y = visible_window.len().saturating_sub(1) as u16;
-    let cursor_x = area.x + (prompt.len() + state.input.cursor_position()) as u16;
+
+    // Use Unicode-aware width calculation for proper cursor positioning
+    // with emoji and wide characters
+    let prompt_width = prompt.width();
+
+    // Calculate visual width of input text up to cursor position
+    // cursor_position() returns character index, but we need visual width
+    // Example: "😀中a" at cursor position 2 = visual width 4 (emoji=2, CJK=2)
+    let char_idx = state.input.cursor_position();
+    let text_before_cursor = state.input
+        .text()
+        .chars()
+        .take(char_idx)
+        .collect::<String>();
+    let input_width = text_before_cursor.width();
+
+    let total_width = prompt_width + input_width;
+
+    // Ensure cursor stays within terminal bounds
+    let max_x = area.width.saturating_sub(1) as usize;
+    let safe_x = total_width.min(max_x);
+    let cursor_x = area.x.saturating_add(safe_x as u16);
     let cursor_y = area.y + prompt_line_y;
+
     frame.set_cursor_position((cursor_x, cursor_y));
-}
-
-/// Format prompt - DYNAMIC with real hostname, user, and path
-fn format_prompt() -> String {
-    // Get current user
-    let user = std::env::var("USER").unwrap_or_else(|_| "user".to_string());
-
-    // Get system hostname
-    let hostname = hostname::get()
-        .ok()
-        .and_then(|h| h.into_string().ok())
-        .unwrap_or_else(|| "hostname".to_string());
-
-    // Get current working directory with ~ abbreviation for home
-    let cwd = std::env::current_dir()
-        .ok()
-        .map(|p| {
-            // Try to abbreviate home directory with ~
-            if let Ok(home) = std::env::var("HOME") {
-                if let Ok(stripped) = p.strip_prefix(&home) {
-                    let stripped_str = stripped.display().to_string();
-                    return if stripped_str.is_empty() {
-                        "~".to_string()
-                    } else {
-                        format!("~/{}", stripped_str)
-                    };
-                }
-            }
-            p.display().to_string()
-        })
-        .unwrap_or_else(|| "~".to_string());
-
-    // Root vs user prompt symbol
-    let prompt_char = if user == "root" { "#" } else { "$" };
-
-    format!("|~| {}@{}:{}{} ", user, hostname, cwd, prompt_char)
 }
 
 /// Get prompt color based on terminal mode
