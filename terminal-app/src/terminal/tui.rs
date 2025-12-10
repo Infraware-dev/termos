@@ -3,26 +3,18 @@ use crossterm::{
     execute,
     terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
 };
-/// TUI rendering logic using ratatui
+/// NEW TUI rendering logic using ratatui - Unified inline terminal design
 use ratatui::{
     backend::CrosstermBackend,
-    layout::{Constraint, Direction, Layout, Margin, Rect},
+    layout::{Alignment, Constraint, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState, Wrap},
+    widgets::Paragraph,
     Frame, Terminal,
 };
 use std::io;
 
 use super::state::{TerminalMode, TerminalState};
-
-// Layout constants for terminal areas
-/// Height of the status bar (1 line)
-const STATUS_BAR_HEIGHT: u16 = 1;
-/// Height of the input area (3 lines including borders)
-const INPUT_AREA_HEIGHT: u16 = 3;
-/// Height of output area borders (top + bottom)
-const OUTPUT_BORDER_HEIGHT: u16 = 2;
 
 /// TUI wrapper for the terminal
 pub struct TerminalUI {
@@ -55,12 +47,9 @@ impl TerminalUI {
         // Calculate visible lines from terminal size before rendering
         let size = self.terminal.size()?;
 
-        // Output area height = total - status bar - input area
-        let output_height = size
-            .height
-            .saturating_sub(STATUS_BAR_HEIGHT + INPUT_AREA_HEIGHT);
-        // Visible content lines = output area minus borders
-        let visible_lines = output_height.saturating_sub(OUTPUT_BORDER_HEIGHT) as usize;
+        // Header height = 1 line
+        // Visible content lines = total height - header
+        let visible_lines = size.height.saturating_sub(1) as usize;
         state.set_visible_lines(visible_lines);
 
         self.terminal.draw(|frame| {
@@ -135,170 +124,149 @@ impl Drop for TerminalUI {
     }
 }
 
-/// Render a single frame
+/// Render a single frame - NEW DESIGN: 2 sections (Header + Unified Content)
 fn render_frame(frame: &mut Frame, state: &TerminalState) {
     let size = frame.area();
 
-    // Create layout: output area + status bar + input area
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Min(1),    // Output area
-            Constraint::Length(1), // Status bar
-            Constraint::Length(3), // Input area
-        ])
-        .split(size);
+    // Create layout: header bar + unified content area
+    let chunks = Layout::vertical([
+        Constraint::Length(1),  // Header bar
+        Constraint::Min(1),     // Unified content (output + prompt inline)
+    ])
+    .split(size);
 
-    // Render output area
-    render_output(frame, chunks[0], state);
+    // Render header bar
+    render_header_bar(frame, chunks[0]);
 
-    // Render status bar
-    render_status_bar(frame, chunks[1], state);
-
-    // Render input area
-    render_input(frame, chunks[2], state);
+    // Render unified content (output + prompt inline)
+    render_unified_content(frame, chunks[1], state);
 }
 
-/// Render the output buffer with scrollbar
-fn render_output(frame: &mut Frame, area: Rect, state: &TerminalState) {
-    let total_lines = state.output.lines().len();
-    // Use pre-calculated visible_lines from state (set in render())
-    let visible_lines = state.visible_lines();
+/// Render header bar with logo and icons
+fn render_header_bar(frame: &mut Frame, area: ratatui::layout::Rect) {
+    let layout = Layout::horizontal([
+        Constraint::Length(4),  // "~ +"
+        Constraint::Min(1),     // Spacer
+        Constraint::Length(9),  // "⚙ − □ ×"
+    ])
+    .split(area);
 
-    // Calculate scroll position once for both content and scrollbar
-    let scroll_pos = state.output.scroll_position();
-    let max_scroll = total_lines.saturating_sub(visible_lines);
-    let effective_scroll = scroll_pos.min(max_scroll);
+    // Logo and "+" button (decorative for now)
+    let logo = Paragraph::new("~ +")
+        .style(Style::default().fg(Color::White).bg(Color::Black));
 
-    let output_text = if total_lines == 0 {
-        vec![Line::from(Span::styled(
-            "Infraware Terminal - Type a command or ask a question",
-            Style::default().fg(Color::Gray),
-        ))]
-    } else {
-        // Calculate start and end indices for visible window
-        let start = effective_scroll;
-        let end = (start + visible_lines).min(total_lines);
+    // Icons on the right (decorative for now)
+    let icons = Paragraph::new("⚙ − □ ×")
+        .style(Style::default().fg(Color::White).bg(Color::Black))
+        .alignment(Alignment::Right);
 
-        state.output.lines()[start..end]
-            .iter()
-            .map(|line| {
-                // Parse ANSI codes and convert to ratatui spans with proper styling
-                use ansi_to_tui::IntoText;
-                match line.into_text() {
-                    Ok(text) => text
-                        .lines
-                        .into_iter()
-                        .next()
-                        .unwrap_or_else(|| Line::from(line.clone())),
-                    Err(_) => Line::from(line.clone()),
-                }
-            })
-            .collect()
-    };
+    frame.render_widget(logo, layout[0]);
+    frame.render_widget(icons, layout[2]);
+}
 
-    let output_widget = Paragraph::new(output_text)
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title(" Output ")
-                .title_style(Style::default().fg(Color::Cyan)),
-        )
-        .wrap(Wrap { trim: false });
+/// Render unified content area with inline prompt
+fn render_unified_content(
+    frame: &mut Frame,
+    area: ratatui::layout::Rect,
+    state: &TerminalState,
+) {
+    let mut lines = Vec::new();
 
-    frame.render_widget(output_widget, area);
-
-    // Render scrollbar only if content exceeds visible area
-    if total_lines > visible_lines {
-        let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
-            .begin_symbol(Some("▲"))
-            .end_symbol(Some("▼"))
-            .track_symbol(Some("│"))
-            .thumb_symbol("█");
-
-        let mut scrollbar_state = ScrollbarState::new(max_scroll).position(effective_scroll);
-
-        // Render scrollbar in the inner area (inside the border)
-        let inner_area = area.inner(Margin {
-            horizontal: 0,
-            vertical: 1,
-        });
-        frame.render_stateful_widget(scrollbar, inner_area, &mut scrollbar_state);
+    // 1. Add historical output from OutputBuffer
+    for line in state.output.lines() {
+        // Parse ANSI codes and convert to ratatui Line with proper styling
+        use ansi_to_tui::IntoText;
+        match line.into_text() {
+            Ok(text) => {
+                // Get the first line from parsed text, or fallback to raw
+                let parsed_line = text
+                    .lines
+                    .into_iter()
+                    .next()
+                    .unwrap_or_else(|| Line::from(line.clone()));
+                lines.push(parsed_line);
+            }
+            Err(_) => lines.push(Line::from(line.clone())),
+        }
     }
+
+    // 2. Add current prompt + input inline (with mode-based color)
+    let prompt = format_prompt();
+    let input = state.input.text();
+    let prompt_color = get_prompt_color(&state.mode);
+    let current_line = Line::from(vec![
+        Span::styled(
+            prompt.clone(),
+            Style::default()
+                .fg(prompt_color)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(input),
+    ]);
+    lines.push(current_line);
+
+    // 3. Calculate visible window (auto-scroll to bottom)
+    let visible_lines = area.height as usize;
+    let start = lines.len().saturating_sub(visible_lines);
+    let visible_window: Vec<Line> = lines[start..].to_vec();
+
+    // 4. Render paragraph WITHOUT borders
+    let paragraph = Paragraph::new(visible_window.clone());
+    frame.render_widget(paragraph, area);
+
+    // 5. Position cursor at end of current prompt line
+    // The prompt is always the last line in visible_window
+    let prompt_line_y = visible_window.len().saturating_sub(1) as u16;
+    let cursor_x = area.x + (prompt.len() + state.input.cursor_position()) as u16;
+    let cursor_y = area.y + prompt_line_y;
+    frame.set_cursor_position((cursor_x, cursor_y));
 }
 
-/// Render the status bar
-fn render_status_bar(frame: &mut Frame, area: Rect, state: &TerminalState) {
-    let mode_text = match state.mode {
-        TerminalMode::Normal => "READY",
-        TerminalMode::ExecutingCommand => "EXECUTING...",
-        TerminalMode::WaitingLLM => "WAITING FOR LLM...",
-        TerminalMode::PromptingInstall => "INSTALL PROMPT",
-        TerminalMode::AwaitingCommandApproval => "APPROVE? [y/n]",
-        TerminalMode::AwaitingAnswer => "ANSWER?",
-        TerminalMode::AwaitingMoreInput(_) => "MULTILINE...",
-    };
+/// Format prompt - DYNAMIC with real hostname, user, and path
+fn format_prompt() -> String {
+    // Get current user
+    let user = std::env::var("USER").unwrap_or_else(|_| "user".to_string());
 
-    let mode_color = match state.mode {
+    // Get system hostname
+    let hostname = hostname::get()
+        .ok()
+        .and_then(|h| h.into_string().ok())
+        .unwrap_or_else(|| "hostname".to_string());
+
+    // Get current working directory with ~ abbreviation for home
+    let cwd = std::env::current_dir()
+        .ok()
+        .map(|p| {
+            // Try to abbreviate home directory with ~
+            if let Ok(home) = std::env::var("HOME") {
+                if let Ok(stripped) = p.strip_prefix(&home) {
+                    let stripped_str = stripped.display().to_string();
+                    return if stripped_str.is_empty() {
+                        "~".to_string()
+                    } else {
+                        format!("~/{}", stripped_str)
+                    };
+                }
+            }
+            p.display().to_string()
+        })
+        .unwrap_or_else(|| "~".to_string());
+
+    // Root vs user prompt symbol
+    let prompt_char = if user == "root" { "#" } else { "$" };
+
+    format!("|~| {}@{}:{}{} ", user, hostname, cwd, prompt_char)
+}
+
+/// Get prompt color based on terminal mode
+fn get_prompt_color(mode: &TerminalMode) -> Color {
+    match mode {
         TerminalMode::Normal => Color::Green,
         TerminalMode::ExecutingCommand => Color::Yellow,
         TerminalMode::WaitingLLM => Color::Blue,
         TerminalMode::PromptingInstall => Color::Magenta,
         TerminalMode::AwaitingCommandApproval => Color::Cyan,
-        TerminalMode::AwaitingAnswer => Color::Yellow,
+        TerminalMode::AwaitingAnswer => Color::Cyan,
         TerminalMode::AwaitingMoreInput(_) => Color::Magenta,
-    };
-
-    let status_text = Line::from(vec![
-        Span::styled(
-            format!(" {mode_text} "),
-            Style::default()
-                .fg(Color::Black)
-                .bg(mode_color)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(" | "),
-        Span::styled(
-            format!("History: {} ", state.history.all().len()),
-            Style::default().fg(Color::Gray),
-        ),
-    ]);
-
-    let status_widget = Paragraph::new(status_text);
-    frame.render_widget(status_widget, area);
-}
-
-/// Render the input area
-fn render_input(frame: &mut Frame, area: Rect, state: &TerminalState) {
-    // Show continuation prompt "> " when in multiline mode, normal prompt "❯ " otherwise
-    let prompt = if state.is_in_multiline_mode() {
-        "> "
-    } else {
-        "❯ "
-    };
-
-    let input_text = Line::from(vec![
-        Span::styled(
-            prompt,
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(state.input.text()),
-    ]);
-
-    let input_widget = Paragraph::new(input_text).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(" Input ")
-            .title_style(Style::default().fg(Color::Cyan)),
-    );
-
-    frame.render_widget(input_widget, area);
-
-    // Set cursor position (2 accounts for "❯ " prefix and border)
-    frame.set_cursor_position((
-        area.x + state.input.cursor_position() as u16 + 3,
-        area.y + 1,
-    ));
+    }
 }
