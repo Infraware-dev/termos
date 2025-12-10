@@ -4,7 +4,7 @@
 
 ## Overview
 
-SCAN is the core input classification system for Infraware Terminal. It uses **alias expansion** and **history expansion** followed by a **Chain of Responsibility** pattern with 10 optimized handlers to distinguish between shell commands and natural language queries in <100μs.
+SCAN is the core input classification system for Infraware Terminal. It uses **alias expansion** and **history expansion** followed by a **Chain of Responsibility** pattern with 11 optimized handlers to distinguish between shell commands and natural language queries in <100μs.
 
 ### Architecture Diagram
 
@@ -27,7 +27,7 @@ SCAN is the core input classification system for Infraware Terminal. It uses **a
                               ↓
               ╔═══════════════════════════════╗
               ║  Chain of Responsibility      ║
-              ║  (10 Handlers in strict order)║
+              ║  (11 Handlers in strict order)║
               ╚═══════════════════════════════╝
                               ↓
     ┌────────────────────────┼────────────────────────┐
@@ -167,7 +167,7 @@ reload-aliases    # Reloads all system and user aliases from config files
 
 ---
 
-## Handler Chain (10 Handlers)
+## Handler Chain (11 Handlers)
 
 ### Order Matters!
 
@@ -177,15 +177,16 @@ Handlers are executed in strict order. Each returns:
 
 ```rust
 1. EmptyInputHandler              // <1μs    - Fast path for empty input
-2. HistoryExpansionHandler        // ~1-5μs  - Bash-style history expansion (!!,  !$, !^, !*)
-3. ApplicationBuiltinHandler      // <1μs    - App-specific commands (clear, reload-aliases, reload-commands)
+2. HistoryExpansionHandler        // ~5μs    - Bash-style history expansion (!!,  !$, !^, !*)
+3. ApplicationBuiltinHandler      // <1μs    - App-specific commands (clear, jobs, history, reload-aliases, reload-commands, auth-status)
 4. ShellBuiltinHandler            // <1μs    - Shell builtins (., :, [, [[, source, export, etc.)
 5. PathCommandHandler             // ~10μs   - Executable paths (./script.sh)
 6. KnownCommandHandler            // <1μs    - Whitelist + PATH verification (cached)
-7. CommandSyntaxHandler           // ~10μs   - Flags, pipes, redirects
-8. TypoDetectionHandler           // ~100μs  - Levenshtein distance ≤2
-9. NaturalLanguageHandler         // ~0.5μs  - Language-agnostic heuristics (universal patterns)
-10. DefaultHandler                // <1μs    - Fallback to LLM
+7. PathDiscoveryHandler           // ~1-5ms  - Auto-discover newly installed commands
+8. CommandSyntaxHandler           // ~10μs   - Flags, pipes, redirects, glob patterns
+9. TypoDetectionHandler           // ~100μs  - Levenshtein distance ≤2 (disabled by default)
+10. NaturalLanguageHandler        // ~5μs    - Language-agnostic heuristics (universal patterns)
+11. DefaultHandler                // <1μs    - Fallback to LLM
 ```
 
 ---
@@ -280,10 +281,15 @@ Input: "echo !$" (history: ["pwd", "echo !$"])
 
 **Location**: `src/input/application_builtins.rs`
 
-**Recognizes** (3 commands):
+**Recognizes** (8 commands):
 - `clear` - Clear terminal output buffer
+- `exit` - Exit the application
+- `jobs` - List background jobs
+- `history` - Show command history (all or last N)
 - `reload-aliases` - Reload aliases from system/user config files
 - `reload-commands` - Clear command cache (use after installing new commands)
+- `auth-status` - Check backend authentication status
+- `cd` - Change working directory
 
 **Logic**:
 1. Is first word an application builtin? → Yes
@@ -296,13 +302,17 @@ Input: "clear"
 ├─ "clear" in app builtins? YES
 └─ Output: Command("clear", [])
 
+Input: "history 10"
+├─ "history" in app builtins? YES
+└─ Output: Command("history", ["10"])
+
+Input: "jobs"
+├─ "jobs" in app builtins? YES
+└─ Output: Command("jobs", [])
+
 Input: "reload-aliases"
 ├─ "reload-aliases" in app builtins? YES
 └─ Output: Command("reload-aliases", [])
-
-Input: "reload-commands"
-├─ "reload-commands" in app builtins? YES
-└─ Output: Command("reload-commands", [])
 ```
 
 **Performance**: <1μs (hash lookup in builtin list)
