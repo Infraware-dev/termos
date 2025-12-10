@@ -190,8 +190,49 @@ fn render_unified_content(
         }
     }
 
-    // 2. Add current prompt + input inline (with mode-based color)
-    let prompt = format_prompt();
+    // 2. Add approval flow inline if pending
+    if let Some(interaction) = &state.pending_interaction {
+        match interaction {
+            crate::terminal::PendingInteraction::CommandApproval { command, message } => {
+                // Show message if present
+                if !message.is_empty() {
+                    lines.push(Line::from(message.clone()));
+                }
+                // Show command to execute
+                lines.push(Line::from(Span::styled(
+                    format!("command: {}", command),
+                    Style::default().fg(Color::Yellow),
+                )));
+            }
+            crate::terminal::PendingInteraction::Question { question, options } => {
+                // Show question
+                lines.push(Line::from(question.clone()));
+                // Show options if present
+                if let Some(opts) = options {
+                    for opt in opts {
+                        lines.push(Line::from(format!("  - {}", opt)));
+                    }
+                }
+            }
+        }
+    }
+
+    // 2b. Add current prompt + input inline (with mode-based color)
+    let prompt = if state.pending_interaction.is_some() {
+        // Use simple approval prompt when pending interaction
+        match state.mode {
+            TerminalMode::AwaitingCommandApproval => "Do you want to execute this command (y/n)? ".to_string(),
+            TerminalMode::AwaitingAnswer => "Answer: ".to_string(),
+            _ => format_prompt(),
+        }
+    } else if matches!(state.mode, TerminalMode::AwaitingMoreInput(_)) {
+        // Use continuation prompt for multiline input
+        "> ".to_string()
+    } else {
+        // Normal prompt
+        format_prompt()
+    };
+
     let input = state.input.text();
     let prompt_color = get_prompt_color(&state.mode);
     let current_line = Line::from(vec![
@@ -204,6 +245,22 @@ fn render_unified_content(
         Span::raw(input),
     ]);
     lines.push(current_line);
+
+    // 2b. Add loading indicator if waiting for LLM (animated cursor)
+    if matches!(state.mode, TerminalMode::WaitingLLM) {
+        // Animate cursor: alternate between █ and space every 500ms
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis();
+        let blink = (now / 500) % 2 == 0;
+        let indicator = if blink { "█" } else { " " };
+
+        lines.push(Line::from(Span::styled(
+            indicator,
+            Style::default().fg(Color::Blue),
+        )));
+    }
 
     // 3. Calculate visible window (auto-scroll to bottom)
     let visible_lines = area.height as usize;
