@@ -126,9 +126,11 @@ impl NaturalLanguageOrchestrator {
                 state.add_output("Type 'y' to approve, 'n' to reject:".to_string());
 
                 // Save pending interaction and change mode
+                // confirmation_type is None for LLM-originated approvals
                 state.pending_interaction = Some(PendingInteraction::CommandApproval {
                     command: command.clone(),
                     message,
+                    confirmation_type: None,
                 });
                 state.mode = TerminalMode::AwaitingCommandApproval;
 

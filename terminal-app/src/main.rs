@@ -336,23 +336,6 @@ impl InfrawareTerminal {
             log::error!("Alias loading task panicked: {}", e);
         }
 
-        // Display welcome message
-        self.state.add_output(MessageFormatter::banner_line(
-            "╔══════════════════════════════════════════════════════════════╗",
-        ));
-        self.state.add_output(MessageFormatter::banner_line(
-            "║   Infraware Terminal - AI-Assisted DevOps Shell              ║",
-        ));
-        self.state.add_output(MessageFormatter::banner_line(
-            "╚══════════════════════════════════════════════════════════════╝",
-        ));
-        self.state.add_output(String::new());
-        self.state.add_output(
-            "Type a command to execute or ask a question in natural language.".to_string(),
-        );
-        self.state
-            .add_output(MessageFormatter::banner_hint("Type 'exit' to quit"));
-
         // Show LLM client status
         if self.using_mock_llm {
             self.state.add_output(MessageFormatter::info(
@@ -363,6 +346,10 @@ impl InfrawareTerminal {
                 .add_output(MessageFormatter::success("LLM: Connected to backend"));
         }
         self.state.add_output(String::new());
+
+        // Set initial window title
+        let title = self.state.get_window_title();
+        let _ = self.ui.set_window_title(&title);
 
         // Initial render
         self.ui.render(&mut self.state)?;
@@ -553,7 +540,16 @@ impl InfrawareTerminal {
             let approved = HitlOrchestrator::parse_approval(&input);
             self.state.add_output(MessageFormatter::command(&input));
 
-            // Delegate to orchestrator for approval handling
+            // Check if this is a shell confirmation (rm on write-protected files, etc.)
+            if CommandOrchestrator::is_shell_confirmation(&self.state) {
+                // Delegate to command orchestrator for shell confirmations
+                self.command_orchestrator
+                    .handle_shell_confirmation(approved, &mut self.state)
+                    .await?;
+                return Ok(true);
+            }
+
+            // Delegate to NL orchestrator for LLM approval handling
             self.nl_orchestrator
                 .handle_approval(approved, &mut self.state, &mut self.ui)
                 .await?;
@@ -563,6 +559,26 @@ impl InfrawareTerminal {
 
         // Handle human-in-the-loop answer mode (free-form text)
         if self.state.mode == TerminalMode::AwaitingAnswer {
+            // Check if this is a sudo password prompt
+            if CommandOrchestrator::is_waiting_for_sudo_password(&self.state) {
+                // Don't echo the password!
+                self.state.add_output("Verifying...".to_string());
+
+                // Clear pending interaction
+                self.state.pending_interaction = None;
+                self.state.mode = TerminalMode::Normal;
+
+                // Force render to show "Verifying..." before blocking on sudo
+                self.ui.render(&mut self.state)?;
+
+                // Validate password (sudo has ~2s delay on wrong password for security)
+                self.command_orchestrator
+                    .validate_sudo_password(input, &mut self.state)
+                    .await?;
+
+                return Ok(true);
+            }
+
             self.state.add_output(MessageFormatter::command(&input));
 
             // Delegate to orchestrator for answer handling
@@ -639,11 +655,20 @@ impl InfrawareTerminal {
                 args,
                 original_input,
             } => {
-                // Handle exit builtin - exit immediately
+                // Handle exit builtin
                 if command == "exit" {
-                    self.state.add_output(MessageFormatter::info("Goodbye!"));
-                    self.cancellation_token_tx.borrow().cancel(); // Signal any async operations
-                    return Ok(false);
+                    if self.state.is_root_mode() {
+                        // In root mode, exit returns to normal user
+                        self.state.exit_root_mode();
+                        self.state
+                            .add_output(MessageFormatter::success("Exited root mode."));
+                        return Ok(true);
+                    } else {
+                        // In normal mode, exit quits the terminal
+                        self.state.add_output(MessageFormatter::info("Goodbye!"));
+                        self.cancellation_token_tx.borrow().cancel(); // Signal any async operations
+                        return Ok(false);
+                    }
                 }
 
                 // Handle cd builtin - must be handled by parent process
@@ -690,8 +715,6 @@ impl InfrawareTerminal {
             }
             InputType::Empty => {}
         }
-
-        self.state.add_output(String::new()); // Empty line for spacing
 
         // Only reset to Normal if not in a HITL waiting state
         // (handle_query_result may have set AwaitingCommandApproval or AwaitingAnswer)
@@ -762,6 +785,10 @@ impl InfrawareTerminal {
                     self.state
                         .add_output(MessageFormatter::success(cwd.display().to_string()));
                 }
+                // Update prompt cache and window title
+                self.state.refresh_prompt();
+                let title = self.state.get_window_title();
+                let _ = self.ui.set_window_title(&title);
             }
             Err(e) => {
                 self.state.add_output(MessageFormatter::error(format!(

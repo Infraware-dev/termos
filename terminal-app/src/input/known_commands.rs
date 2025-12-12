@@ -96,6 +96,7 @@ pub fn default_devops_commands() -> Vec<String> {
         "du",
         // Privilege escalation
         "sudo",
+        "su",
         // Docker
         "docker",
         "docker-compose",

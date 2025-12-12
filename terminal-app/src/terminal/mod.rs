@@ -6,5 +6,5 @@ pub mod tui;
 
 pub use events::EventHandler;
 pub use splash::SplashScreen;
-pub use state::{PendingInteraction, TerminalMode, TerminalState};
+pub use state::{ConfirmationType, PendingInteraction, TerminalMode, TerminalState};
 pub use tui::TerminalUI;

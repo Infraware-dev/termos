@@ -47,9 +47,9 @@ const REQUIRES_INTERACTIVE: &[&str] = &[
     "less", "more", "most", "man", "info", // File managers
     "mc", "ranger", "nnn", "lf", "vifm",  // Watchers
     "watch", // System monitors (non-root)
-    "top", "htop", "btop", "atop", // Privilege escalation (needs password input)
-    "sudo", // CLI tools with interactive features
+    "top", "htop", "btop", "atop", // CLI tools with interactive features
     "gh",
+    // Note: "sudo" removed - now handled via root mode in orchestrator
 ];
 
 /// Commands that are interactive but NOT supported (blocked entirely)
@@ -271,6 +271,36 @@ impl CommandExecutor {
     /// - **Windows**: Returns true but execution will fail with error message
     pub fn requires_interactive(cmd: &str) -> bool {
         REQUIRES_INTERACTIVE_SET.contains(cmd)
+    }
+
+    /// Check if a command triggers root mode entry (sudo su, su, sudo -i, etc.)
+    ///
+    /// These commands would normally open a new shell with root privileges.
+    /// Instead, we enter "root mode" where all subsequent commands are
+    /// executed with sudo, without leaving Infraware Terminal.
+    pub fn is_enter_root_command(cmd: &str, args: &[String]) -> bool {
+        match cmd {
+            // Plain "su" or "su -" or "su root" enters root mode
+            "su" => {
+                args.is_empty()
+                    || args
+                        .first()
+                        .map(|a| a == "-" || a == "-l" || a == "--login" || a == "root")
+                        .unwrap_or(false)
+            }
+            // "sudo su", "sudo -i", "sudo -s", "sudo bash", etc.
+            "sudo" => {
+                if let Some(first_arg) = args.first() {
+                    matches!(
+                        first_arg.as_str(),
+                        "su" | "-i" | "-s" | "bash" | "zsh" | "sh" | "-" | "--login"
+                    )
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
     }
 
     /// Check if a command is a shell builtin that must be executed through a shell
@@ -967,8 +997,8 @@ mod tests {
         assert!(!CommandExecutor::requires_interactive("dnf"));
         assert!(!CommandExecutor::requires_interactive("pacman"));
 
-        // Privilege escalation requires interactive (password prompt)
-        assert!(CommandExecutor::requires_interactive("sudo"));
+        // sudo is handled via root mode wrapper, not as interactive command
+        assert!(!CommandExecutor::requires_interactive("sudo"));
 
         // Test that blocked commands return false
         assert!(!CommandExecutor::requires_interactive("ssh"));
@@ -984,7 +1014,8 @@ mod tests {
         assert!(CommandExecutor::is_interactive_command("nano"));
         assert!(CommandExecutor::is_interactive_command("htop"));
         assert!(CommandExecutor::is_interactive_command("less"));
-        assert!(CommandExecutor::is_interactive_command("sudo"));
+        // sudo is handled via root mode wrapper, not as interactive command
+        assert!(!CommandExecutor::is_interactive_command("sudo"));
 
         // Blocked interactive
         assert!(CommandExecutor::is_interactive_command("ssh"));

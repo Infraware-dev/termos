@@ -1,12 +1,13 @@
 use anyhow::{Context, Result};
 use crossterm::{
     execute,
-    terminal::{disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen},
+    terminal::{
+        disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen, SetTitle,
+    },
 };
 /// NEW TUI rendering logic using ratatui - Unified inline terminal design
 use ratatui::{
     backend::CrosstermBackend,
-    layout::{Alignment, Constraint, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span},
     widgets::Paragraph,
@@ -48,9 +49,8 @@ impl TerminalUI {
         // Calculate visible lines from terminal size before rendering
         let size = self.terminal.size()?;
 
-        // Header height = 1 line
-        // Visible content lines = total height - header
-        let visible_lines = size.height.saturating_sub(1) as usize;
+        // Full screen for content (no header bar)
+        let visible_lines = size.height as usize;
         state.set_visible_lines(visible_lines);
 
         self.terminal.draw(|frame| {
@@ -75,6 +75,12 @@ impl TerminalUI {
         disable_raw_mode()?;
         execute!(self.terminal.backend_mut(), LeaveAlternateScreen)?;
         self.terminal.show_cursor()?;
+        Ok(())
+    }
+
+    /// Set the terminal window title
+    pub fn set_window_title(&mut self, title: &str) -> Result<()> {
+        execute!(self.terminal.backend_mut(), SetTitle(title))?;
         Ok(())
     }
 
@@ -129,40 +135,8 @@ impl Drop for TerminalUI {
 fn render_frame(frame: &mut Frame, state: &mut TerminalState) {
     let size = frame.area();
 
-    // Create layout: header bar + unified content area
-    let chunks = Layout::vertical([
-        Constraint::Length(1),  // Header bar
-        Constraint::Min(1),     // Unified content (output + prompt inline)
-    ])
-    .split(size);
-
-    // Render header bar
-    render_header_bar(frame, chunks[0]);
-
-    // Render unified content (output + prompt inline)
-    render_unified_content(frame, chunks[1], state);
-}
-
-/// Render header bar with logo and icons
-fn render_header_bar(frame: &mut Frame, area: ratatui::layout::Rect) {
-    let layout = Layout::horizontal([
-        Constraint::Length(4),  // "~ +"
-        Constraint::Min(1),     // Spacer
-        Constraint::Length(9),  // "⚙ − □ ×"
-    ])
-    .split(area);
-
-    // Logo and "+" button (decorative for now)
-    let logo = Paragraph::new("~ +")
-        .style(Style::default().fg(Color::White).bg(Color::Black));
-
-    // Icons on the right (decorative for now)
-    let icons = Paragraph::new("⚙ − □ ×")
-        .style(Style::default().fg(Color::White).bg(Color::Black))
-        .alignment(Alignment::Right);
-
-    frame.render_widget(logo, layout[0]);
-    frame.render_widget(icons, layout[2]);
+    // Render unified content (output + prompt inline) - full screen
+    render_unified_content(frame, size, state);
 }
 
 /// Render unified content area with inline prompt
@@ -194,7 +168,9 @@ fn render_unified_content(
     // 2. Add approval flow inline if pending
     if let Some(interaction) = &state.pending_interaction {
         match interaction {
-            crate::terminal::PendingInteraction::CommandApproval { command, message } => {
+            crate::terminal::PendingInteraction::CommandApproval {
+                command, message, ..
+            } => {
                 // Show message if present
                 if !message.is_empty() {
                     lines.push(Line::from(message.clone()));
@@ -206,24 +182,45 @@ fn render_unified_content(
                 )));
             }
             crate::terminal::PendingInteraction::Question { question, options } => {
-                // Show question
-                lines.push(Line::from(question.clone()));
-                // Show options if present
-                if let Some(opts) = options {
-                    for opt in opts {
-                        lines.push(Line::from(format!("  - {}", opt)));
+                // Don't show question text for password prompts (it's in the input prompt)
+                if !question.contains("[sudo] password") {
+                    // Show question
+                    lines.push(Line::from(question.clone()));
+                    // Show options if present
+                    if let Some(opts) = options {
+                        for opt in opts {
+                            lines.push(Line::from(format!("  - {}", opt)));
+                        }
                     }
                 }
             }
         }
     }
 
+    // Check if we're in password input mode (sudo password prompt)
+    let is_password_mode =
+        if let Some(crate::terminal::PendingInteraction::Question { question, .. }) =
+            &state.pending_interaction
+        {
+            question.contains("[sudo] password")
+        } else {
+            false
+        };
+
     // 2b. Add current prompt + input inline (with mode-based color)
     let prompt = if state.pending_interaction.is_some() {
         // Use simple approval prompt when pending interaction
         match state.mode {
-            TerminalMode::AwaitingCommandApproval => "Do you want to execute this command (y/n)? ".to_string(),
-            TerminalMode::AwaitingAnswer => "Answer: ".to_string(),
+            TerminalMode::AwaitingCommandApproval => {
+                "Do you want to execute this command (y/n)? ".to_string()
+            }
+            TerminalMode::AwaitingAnswer => {
+                if is_password_mode {
+                    "[sudo] password: ".to_string()
+                } else {
+                    "Answer: ".to_string()
+                }
+            }
             _ => state.get_prompt(),
         }
     } else if matches!(state.mode, TerminalMode::AwaitingMoreInput(_)) {
@@ -234,7 +231,13 @@ fn render_unified_content(
         state.get_prompt()
     };
 
-    let input = state.input.text();
+    // Hide input if in password mode, show asterisks instead
+    let input = if is_password_mode {
+        "*".repeat(state.input.text().len())
+    } else {
+        state.input.text().to_string()
+    };
+
     let prompt_color = get_prompt_color(&state.mode);
     let current_line = Line::from(vec![
         Span::styled(
@@ -243,7 +246,7 @@ fn render_unified_content(
                 .fg(prompt_color)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::raw(input),
+        Span::raw(input.clone()),
     ]);
     lines.push(current_line);
 
@@ -282,13 +285,20 @@ fn render_unified_content(
     // Calculate visual width of input text up to cursor position
     // cursor_position() returns character index, but we need visual width
     // Example: "😀中a" at cursor position 2 = visual width 4 (emoji=2, CJK=2)
+    // In password mode, each character is displayed as '*' (width 1)
     let char_idx = state.input.cursor_position();
-    let text_before_cursor = state.input
-        .text()
-        .chars()
-        .take(char_idx)
-        .collect::<String>();
-    let input_width = text_before_cursor.width();
+    let input_width = if is_password_mode {
+        // In password mode, each char is shown as '*' which has width 1
+        char_idx
+    } else {
+        let text_before_cursor = state
+            .input
+            .text()
+            .chars()
+            .take(char_idx)
+            .collect::<String>();
+        text_before_cursor.width()
+    };
 
     let total_width = prompt_width + input_width;
 

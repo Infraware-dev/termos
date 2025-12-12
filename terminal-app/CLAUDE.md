@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 **Infraware Terminal** is a hybrid command interpreter with AI assistance for DevOps operations. It routes user input to either shell execution or an LLM backend.
 
 **Tech Stack**: Rust + TUI (ratatui/crossterm)
-**Status**: M1 Complete + Backend Integration in Progress (0 clippy warnings, Microsoft Pragmatic Rust Guidelines compliant)
+**Status**: M1 Complete (0 clippy warnings, Microsoft Pragmatic Rust Guidelines compliant)
 
 **Prerequisites** (Linux): `sudo apt install -y pkg-config libssl-dev`
 
@@ -17,60 +17,52 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 # Build and Run
-cargo build                          # Debug build
-cargo build --release                # Release build
-cargo run                            # Run application
-cargo check                          # Fast type check (no codegen)
+cargo build --release && cargo run   # Production build
+cargo check                          # Fast type check
 
 # Testing
 cargo test                           # All tests
 cargo test --test classifier_tests   # SCAN algorithm tests
-cargo test --test executor_tests     # Executor tests
-cargo test --test integration_tests  # Integration tests
-cargo test test_name                 # Single test by name
-cargo test -- --nocapture            # Show output during tests
-cargo test -- --show-output          # Show println! for passing tests
+cargo test test_name                 # Single test
+cargo test -- --nocapture            # With output
+cargo test -- --test-threads=1       # For tests with shared state
 
-# Benchmarking (benches/scan_benchmark.rs)
-cargo bench                          # All benchmarks
-cargo bench scan_                    # SCAN benchmarks only
-cargo bench scan_individual_handlers # Individual handler isolation benchmarks
-cargo bench scan_full_classification # Full pipeline benchmarks
+# Benchmarking
+cargo bench scan_individual_handlers # Handler isolation
+cargo bench scan_full_classification # Full pipeline
 
 # Pre-commit (required)
-cargo fmt && cargo clippy            # Format + lint (CI enforces both)
+cargo fmt && cargo clippy            # CI enforces both
 
-# Coverage (requires: cargo install cargo-llvm-cov)
+# Coverage
 cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info
 ```
 
 ## Architecture
 
 ```
-User Input → Alias Expansion → InputClassifier → [Command Path | Natural Language Path]
-              (if matches)    (11-handler chain)     ↓                    ↓
-                           incl. History Expansion  CommandExecutor      LLMClient
-                                                         ↓                    ↓
-                                                    Shell Output      ResponseRenderer
+User Input → Alias Expansion → InputClassifier → [Command | NaturalLanguage]
+                              (11-handler chain)      ↓            ↓
+                                               CommandExecutor  LLMClient
 ```
 
 ### SCAN Algorithm (Shell-Command And Natural-language)
 
-Chain of Responsibility with 11 handlers executing in strict order (<100μs average):
+Chain of Responsibility with 11 handlers. **Order enforced by `HandlerPosition` enum** - do not reorder without understanding performance implications (fast paths first).
 
-| # | Handler | Purpose |
-|---|---------|---------|
-| 1 | EmptyInputHandler | Fast path for empty/whitespace |
-| 2 | HistoryExpansionHandler | `!!`, `!$`, `!^`, `!*` expansion |
-| 3 | ApplicationBuiltinHandler | App builtins (clear, exit, jobs, reload-aliases, reload-commands, auth-status, history) |
-| 4 | ShellBuiltinHandler | 45+ builtins (., :, [, [[, export, eval, exec) |
-| 5 | PathCommandHandler | ./script.sh, /usr/bin/cmd, background suffix detection |
-| 6 | KnownCommandHandler | 60+ DevOps commands + PATH cache |
-| 7 | PathDiscoveryHandler | Auto-discover newly installed commands |
-| 8 | CommandSyntaxHandler | Language-agnostic: flags, pipes, redirects, glob patterns |
-| 9 | TypoDetectionHandler | Levenshtein ≤2 ("dokcer" → "docker"), disabled by default |
-| 10 | NaturalLanguageHandler | Language-agnostic heuristics (universal patterns) |
-| 11 | DefaultHandler | Fallback to LLM |
+| Position | Handler | Target Time |
+|----------|---------|-------------|
+| 1 | EmptyInputHandler | <1μs |
+| 2 | HistoryExpansionHandler (`!!`, `!$`, `!^`, `!*`) | ~5μs |
+| 3 | ApplicationBuiltinHandler (cd, clear, exit, jobs, history) | <1μs |
+| 4 | ShellBuiltinHandler (45+ builtins) | <1μs |
+| 5 | PathCommandHandler (./script, /usr/bin/cmd, `&` suffix) | ~10μs |
+| 6 | KnownCommandHandler (60+ DevOps commands + cache) | <1μs hit |
+| 7 | PathDiscoveryHandler (newly installed commands) | 1-5ms |
+| 8 | CommandSyntaxHandler (flags, pipes, redirects) | ~10μs |
+| 9 | TypoDetectionHandler (Levenshtein ≤2, disabled) | ~100μs |
+| 10 | NaturalLanguageHandler (universal patterns) | <5μs |
+| 11 | DefaultHandler (LLM fallback) | <1μs |
 
 ### Quick Reference: Where to Find X
 
@@ -92,7 +84,7 @@ Chain of Responsibility with 11 handlers executing in strict order (<100μs aver
 |-----------|---------|
 | `terminal/` | TUI: `tui.rs` (suspend/resume), `buffers.rs` (SRP), `events.rs` (keyboard) |
 | `input/` | SCAN: `classifier.rs` (coordinator), `handler.rs` (chain), `patterns.rs` (regex) |
-| `executor/` | Execution: `command.rs` (async), `job_manager.rs` (background `&`) |
+| `executor/` | Execution: `command.rs` (async batch), `job_manager.rs` (background `&`) |
 | `orchestrators/` | Workflows: `command.rs`, `natural_language.rs`, `tab_completion.rs` |
 | `llm/` | LLM: `client.rs` (Mock/HTTP with HITL), `renderer.rs` (syntax highlighting) |
 | `auth/` | Auth: `authenticator.rs`, `config.rs`, `models.rs` |
@@ -122,13 +114,10 @@ Use `#[serial_test::serial]` for tests modifying `CommandCache` or aliases to pr
 System files loaded first, then user files (`~/.bashrc`, `~/.bash_aliases`, `~/.zshrc`). Single-level expansion, O(1) lookup. `is_safe_alias()` rejects dangerous patterns. Runtime reload: `reload-aliases`.
 
 ### Interactive Commands
-28 commands suspend TUI (vim, nano, less, etc.), 30 blocked with suggestions (ssh, tmux, python REPL, yes). Cloud CLI auth commands (gcloud auth, az login, aws sso, gh auth, etc.) blocked as they open browsers. Implementation: `TerminalUI::suspend()` → run → `resume()` with RAII `TuiGuard` for panic safety. Unix only.
+28 commands suspend TUI (vim, nano, less, etc.), 31 blocked with suggestions (ssh, tmux, python REPL). Implementation: `TerminalUI::suspend()` → run → `resume()` with RAII `TuiGuard` for panic safety. Unix only.
 
 ### Background Processes
 `&` suffix → `JobManager` with `Arc<RwLock>`. 250ms polling interval. Lock poisoning triggers fail-fast per Microsoft guidelines.
-
-### Glob Pattern Expansion
-Commands with glob patterns (`*`, `?`, `[...]`, `{...}`) execute through shell for proper expansion. Detected via `has_glob_patterns()` helper in command arguments. Examples: `rm -rf file*`, `ls *.txt`, `echo file{1..3}`. Execution uses `sh -c` to ensure proper shell expansion of wildcards and brace patterns.
 
 ### LLM Integration (HITL)
 `HttpLLMClient` with SSE streaming. `LLMQueryResult` enum: `Complete`, `CommandApproval`, `Question`. Resume via `resume_run()` or `resume_with_answer()`.
@@ -168,13 +157,10 @@ See `.claude/skills/microsoft-rust-guidelines.md` for full details.
 
 `config/language.toml` contains language-specific patterns. Priority: `./config/language.toml` → `~/.config/infraware-terminal/language.toml` → English defaults. Add languages via `[languages.xx]` sections.
 
-### M1 Scope Limitations (Deferred to M2/M3)
-- Auto-install: Framework prompts but doesn't execute
-- Tab completion: Basic only, no bash/zsh integration
-- History: Session-only, not persisted to disk (accessible via `history` command)
-- Markdown: Basic rendering only, no tables/images
-- Cache TTL: No automatic invalidation (use `reload-commands` after installing new commands)
-- Interactive subcommands: Cloud CLI auth commands that open browsers are blocked (gcloud auth, az login, aws sso, gh auth, firebase login, heroku login, netlify login, vercel login)
+### M1 Limitations (Deferred)
+- Auto-install prompts only, no execution
+- Session-only history (not persisted)
+- No cache TTL (use `reload-commands` after installing)
 
 ## Common Patterns
 
@@ -195,13 +181,10 @@ Provides `Arc<RwLock<CommandCache>>`, `Arc<CompiledPatterns>`, and language patt
 |-----------|--------|
 | Average classification | <100μs |
 | Known command (cache hit) | <1μs |
-| Typo detection | <100μs (disabled by default) |
-| Natural language | <5μs |
 | PATH lookup (cache miss) | 1-5ms |
-| Background job check (read path) | <1μs (no jobs) |
-| Job polling interval | 250ms (balances responsiveness vs lock contention) |
+| Job polling interval | 250ms |
 
-Run `cargo bench scan_` to verify. Use `cargo bench scan_individual_handlers` to measure each handler in isolation and identify bottlenecks.
+Run `cargo bench scan_` to verify.
 
 ## Claude Code Agents
 

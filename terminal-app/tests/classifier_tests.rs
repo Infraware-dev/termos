@@ -914,3 +914,35 @@ fn test_classify_command_with_original_input() {
         ),
     }
 }
+
+#[test]
+fn test_classify_sudo_su() {
+    let classifier = InputClassifier::new();
+
+    // sudo su should be classified as a Command
+    match classifier.classify("sudo su").unwrap() {
+        InputType::Command { command, args, .. } => {
+            assert_eq!(command, "sudo");
+            assert_eq!(args, vec!["su"]);
+        }
+        other => panic!("Expected Command, got: {:?}", other),
+    }
+
+    // su alone should also be a Command
+    match classifier.classify("su").unwrap() {
+        InputType::Command { command, args, .. } => {
+            assert_eq!(command, "su");
+            assert!(args.is_empty());
+        }
+        other => panic!("Expected Command, got: {:?}", other),
+    }
+
+    // sudo -i should also be a Command
+    match classifier.classify("sudo -i").unwrap() {
+        InputType::Command { command, args, .. } => {
+            assert_eq!(command, "sudo");
+            assert_eq!(args, vec!["-i"]);
+        }
+        other => panic!("Expected Command, got: {:?}", other),
+    }
+}

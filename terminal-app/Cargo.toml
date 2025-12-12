@@ -55,6 +55,7 @@ log = "0.4"  # Logging facade
 log4rs = { version = "1.3", features = ["gzip"] }  # Size-based log rotation with gzip compression
 dotenvy = "0.15"  # .env file loading
 tokio-util = "0.7.17"
+libc = "0.2.178"
 
 [dev-dependencies]
 tokio-test = "0.4"

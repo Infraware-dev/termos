@@ -86,7 +86,8 @@ fn test_requires_interactive_file_managers() {
 
 #[test]
 fn test_requires_interactive_sudo() {
-    assert!(CommandExecutor::requires_interactive("sudo"));
+    // sudo is handled via root mode wrapper, not as interactive command
+    assert!(!CommandExecutor::requires_interactive("sudo"));
 }
 
 #[test]
