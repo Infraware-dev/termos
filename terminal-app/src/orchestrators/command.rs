@@ -233,14 +233,16 @@ impl CommandOrchestrator {
         job_manager: &SharedJobManager,
     ) -> Result<()> {
         let jobs: Vec<JobInfo> = {
+            // Per Microsoft Rust Guidelines M-PANIC-IS-STOP: Lock poisoning indicates
+            // a previous panic violated invariants. Fail fast rather than continue
+            // with potentially corrupted state.
             let mgr = match job_manager.read() {
                 Ok(guard) => guard,
-                Err(poisoned) => {
-                    log::error!(
+                Err(_poisoned) => {
+                    anyhow::bail!(
                         "JobManager lock poisoned during handle_jobs_command. \
-                         Recovering but state may be inconsistent."
+                         Cannot safely list jobs due to potential state corruption."
                     );
-                    poisoned.into_inner()
                 }
             };
             mgr.list_jobs()
@@ -593,42 +595,73 @@ impl CommandOrchestrator {
 
     // ==================== Flag Detection Helpers ====================
 
+    /// Generic flag detection helper
+    ///
+    /// Checks if args contain a flag with:
+    /// - Exact short form match (e.g., "-f")
+    /// - Combined short flags containing the character (e.g., "-rf" contains 'f')
+    /// - Optional long form match (e.g., "--force")
+    /// - Optional exclusion character (e.g., 'i' but not 'I')
+    fn has_flag(args: &[String], short: char, long: Option<&str>, exclude: Option<char>) -> bool {
+        args.iter().any(|a| {
+            // Long form match
+            if let Some(l) = long {
+                if a == l {
+                    return true;
+                }
+            }
+            // Short form: -X or combined flags containing X
+            if a.starts_with('-') && !a.starts_with("--") && a.contains(short) {
+                // Check exclusion (e.g., 'i' but not if 'I' present)
+                if let Some(exc) = exclude {
+                    return !a.contains(exc);
+                }
+                return true;
+            }
+            false
+        })
+    }
+
     /// Check for -i flag (handles -iv, -ri, etc. but NOT -I)
     fn has_interactive_flag(args: &[String]) -> bool {
-        args.iter().any(|a| {
-            a == "-i"
-                || (a.starts_with('-')
-                    && !a.starts_with("--")
-                    && a.contains('i')
-                    && !a.contains('I'))
-        })
+        Self::has_flag(args, 'i', None, Some('I'))
     }
 
     /// Check for -I flag (bulk interactive)
     fn has_bulk_interactive_flag(args: &[String]) -> bool {
-        args.iter()
-            .any(|a| a == "-I" || (a.starts_with('-') && !a.starts_with("--") && a.contains('I')))
+        Self::has_flag(args, 'I', None, None)
     }
 
     /// Check for -f flag (force - disables confirmation)
     fn has_force_flag(args: &[String]) -> bool {
-        args.iter().any(|a| {
-            a == "-f"
-                || a == "--force"
-                || (a.starts_with('-') && !a.starts_with("--") && a.contains('f'))
-        })
+        Self::has_flag(args, 'f', Some("--force"), None)
     }
 
     /// Check for recursive flags (-r, -R, --recursive)
     fn has_recursive_flag(args: &[String]) -> bool {
-        args.iter().any(|a| {
-            a == "-r"
-                || a == "-R"
-                || a == "--recursive"
-                || (a.starts_with('-')
-                    && !a.starts_with("--")
-                    && (a.contains('r') || a.contains('R')))
+        Self::has_flag(args, 'r', Some("--recursive"), None)
+            || Self::has_flag(args, 'R', None, None)
+    }
+
+    /// Extract file/path arguments from args (filters out flags)
+    fn get_file_args(args: &[String]) -> Vec<&String> {
+        args.iter().filter(|a| !a.starts_with('-')).collect()
+    }
+
+    /// Build command string from original input or reconstruct from parts
+    fn build_command_string(original_input: Option<&str>, cmd: &str, args: &[String]) -> String {
+        original_input.map(|s| s.to_string()).unwrap_or_else(|| {
+            if args.is_empty() {
+                cmd.to_string()
+            } else {
+                format!("{} {}", cmd, args.join(" "))
+            }
         })
+    }
+
+    /// Add -f (force) flag to a command string
+    fn add_force_flag(command: &str, cmd_name: &str) -> String {
+        command.replacen(&format!("{} ", cmd_name), &format!("{} -f ", cmd_name), 1)
     }
 
     // ==================== Detection Functions ====================
@@ -640,11 +673,7 @@ impl CommandOrchestrator {
             return None;
         }
 
-        let files: Vec<String> = args
-            .iter()
-            .filter(|a| !a.starts_with('-'))
-            .cloned()
-            .collect();
+        let files: Vec<String> = Self::get_file_args(args).into_iter().cloned().collect();
 
         if files.is_empty() {
             None
@@ -660,7 +689,7 @@ impl CommandOrchestrator {
             return None;
         }
 
-        let file_count = args.iter().filter(|a| !a.starts_with('-')).count();
+        let file_count = Self::get_file_args(args).len();
         let is_recursive = Self::has_recursive_flag(args);
 
         // Only prompt if >3 files or recursive
@@ -678,7 +707,7 @@ impl CommandOrchestrator {
             return None;
         }
 
-        let paths: Vec<&String> = args.iter().filter(|a| !a.starts_with('-')).collect();
+        let paths = Self::get_file_args(args);
 
         if paths.len() >= 2 {
             let dest = paths.last()?;
@@ -713,7 +742,7 @@ impl CommandOrchestrator {
             return None;
         }
 
-        let paths: Vec<&String> = args.iter().filter(|a| !a.starts_with('-')).collect();
+        let paths = Self::get_file_args(args);
 
         if paths.len() >= 2 {
             let dest = paths.last()?;
@@ -727,34 +756,61 @@ impl CommandOrchestrator {
 
     // ==================== Write-Protected Detection ====================
 
+    /// Check if user can write to a file (Unix: uses access() syscall)
+    ///
+    /// This checks the effective permissions for the current user, which is
+    /// exactly what `rm` does to decide whether to prompt for confirmation.
+    #[cfg(unix)]
+    fn user_can_write_file(path: &std::path::Path) -> bool {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+
+        if let Ok(c_path) = CString::new(path.as_os_str().as_bytes()) {
+            // SAFETY: FFI to libc::access (M-UNSAFE: FFI and platform interactions)
+            // Preconditions satisfied:
+            // - c_path is a valid null-terminated C string (guaranteed by CString::new Ok)
+            // - libc::W_OK is a valid constant defined by libc (value 2 on Unix)
+            // - access() is thread-safe and only reads filesystem metadata
+            // This call cannot cause UB as c_path remains valid for the duration of the call.
+            unsafe { libc::access(c_path.as_ptr(), libc::W_OK) == 0 }
+        } else {
+            // If path conversion fails (contains null bytes), assume writable (don't block)
+            true
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn user_can_write_file(path: &std::path::Path) -> bool {
+        // On Windows, fall back to readonly check
+        std::fs::metadata(path)
+            .map(|m| !m.permissions().readonly())
+            .unwrap_or(true)
+    }
+
     /// Check if rm command needs confirmation for write-protected files
     ///
     /// Returns Some(list of protected files) if confirmation is needed,
     /// None if the command can proceed without confirmation.
     ///
-    /// Note: Linux rm only asks for confirmation on write-protected (readonly) files,
-    /// NOT based on file ownership. This matches standard Linux behavior.
+    /// A file is considered "write-protected" if the current user cannot write to it.
+    /// This matches `rm` behavior which checks effective permissions, not just the
+    /// readonly bit.
     fn needs_rm_confirmation(args: &[String]) -> Option<Vec<String>> {
         // Skip if -f flag is present (user explicitly wants force)
-        if args
-            .iter()
-            .any(|a| a == "-f" || (a.starts_with('-') && !a.starts_with("--") && a.contains('f')))
-        {
+        if Self::has_force_flag(args) {
             return None;
         }
 
         // Get file paths from args (skip flags)
-        let files: Vec<&String> = args.iter().filter(|a| !a.starts_with('-')).collect();
+        let files = Self::get_file_args(args);
 
-        // Check which files are write-protected (readonly)
+        // Check which files the user cannot write to
         let mut protected_files = Vec::new();
         for file in files {
-            if let Ok(metadata) = std::fs::metadata(file) {
-                // Only check if file is readonly (write-protected)
-                // This matches Linux rm behavior - owner doesn't matter
-                if metadata.permissions().readonly() {
-                    protected_files.push(file.clone());
-                }
+            let path = std::path::Path::new(file);
+            // Only check existing files - rm will handle non-existent files
+            if path.exists() && !Self::user_can_write_file(path) {
+                protected_files.push(file.clone());
             }
         }
 
@@ -774,9 +830,7 @@ impl CommandOrchestrator {
         state: &mut TerminalState,
     ) -> Result<()> {
         let files_list = protected_files.join(", ");
-        let command = original_input
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| format!("rm {}", args.join(" ")));
+        let command = Self::build_command_string(original_input, "rm", args);
 
         state.pending_interaction = Some(crate::terminal::PendingInteraction::CommandApproval {
             command,
@@ -818,10 +872,13 @@ impl CommandOrchestrator {
             return Ok(());
         }
 
-        let first_file = files.first().cloned().unwrap_or_default();
-        let command = original_input
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| format!("rm {}", args.join(" ")));
+        // SAFETY: files.is_empty() check above guarantees first() returns Some.
+        // Using expect() instead of unwrap_or_default() for clearer intent.
+        let first_file = files
+            .first()
+            .cloned()
+            .expect("files vec verified non-empty above");
+        let command = Self::build_command_string(original_input, "rm", args);
 
         // Linux rm format: "rm: remove regular file 'X'?"
         let file_type = Self::get_file_type_description(&first_file);
@@ -850,9 +907,7 @@ impl CommandOrchestrator {
         args: &[String],
         state: &mut TerminalState,
     ) -> Result<()> {
-        let command = original_input
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| format!("rm {}", args.join(" ")));
+        let command = Self::build_command_string(original_input, "rm", args);
 
         // Linux rm -I format: "rm: remove N arguments?" or "rm: remove N arguments recursively?"
         let message = if is_recursive {
@@ -882,9 +937,7 @@ impl CommandOrchestrator {
         args: &[String],
         state: &mut TerminalState,
     ) -> Result<()> {
-        let command = original_input
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| format!("cp {}", args.join(" ")));
+        let command = Self::build_command_string(original_input, "cp", args);
 
         // Linux cp format: "cp: overwrite 'X'?"
         let message = format!("cp: overwrite '{}'?", destination);
@@ -909,9 +962,7 @@ impl CommandOrchestrator {
         args: &[String],
         state: &mut TerminalState,
     ) -> Result<()> {
-        let command = original_input
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| format!("mv {}", args.join(" ")));
+        let command = Self::build_command_string(original_input, "mv", args);
 
         // Linux mv format: "mv: overwrite 'X'?"
         let message = format!("mv: overwrite '{}'?", destination);
@@ -936,9 +987,7 @@ impl CommandOrchestrator {
         args: &[String],
         state: &mut TerminalState,
     ) -> Result<()> {
-        let command = original_input
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| format!("ln {}", args.join(" ")));
+        let command = Self::build_command_string(original_input, "ln", args);
 
         // Linux ln format: "ln: replace 'X'?"
         let message = format!("ln: replace '{}'?", destination);
@@ -1028,7 +1077,11 @@ impl CommandOrchestrator {
                 // Skip this file, move to next
                 if current_index + 1 < files.len() {
                     let next_index = current_index + 1;
-                    let next_file = files.get(next_index).cloned().unwrap_or_default();
+                    // SAFETY: bounds check above guarantees get() returns Some
+                    let next_file = files
+                        .get(next_index)
+                        .cloned()
+                        .expect("next_index verified in bounds above");
                     let file_type = Self::get_file_type_description(&next_file);
                     let message = format!("rm: remove {} '{}'?", file_type, next_file);
 
@@ -1066,7 +1119,7 @@ impl CommandOrchestrator {
             match confirm_type {
                 crate::terminal::ConfirmationType::RmWriteProtected => {
                     // Execute rm -f to force removal of write-protected files
-                    let forced_cmd = command.replacen("rm ", "rm -f ", 1);
+                    let forced_cmd = Self::add_force_flag(&command, "rm");
                     self.execute_shell_command(&forced_cmd, state).await?;
                 }
 
@@ -1084,7 +1137,11 @@ impl CommandOrchestrator {
                     // If more files remain, prompt for next
                     if current_index + 1 < files.len() {
                         let next_index = current_index + 1;
-                        let next_file = files.get(next_index).cloned().unwrap_or_default();
+                        // SAFETY: bounds check above guarantees get() returns Some
+                        let next_file = files
+                            .get(next_index)
+                            .cloned()
+                            .expect("next_index verified in bounds above");
                         let file_type = Self::get_file_type_description(&next_file);
                         let message = format!("rm: remove {} '{}'?", file_type, next_file);
 
@@ -1112,19 +1169,19 @@ impl CommandOrchestrator {
 
                 crate::terminal::ConfirmationType::CpInteractive { .. } => {
                     // Execute cp with -f flag to force overwrite
-                    let exec_cmd = command.replacen("cp ", "cp -f ", 1);
+                    let exec_cmd = Self::add_force_flag(&command, "cp");
                     self.execute_shell_command(&exec_cmd, state).await?;
                 }
 
                 crate::terminal::ConfirmationType::MvInteractive { .. } => {
                     // Execute mv with -f flag to force overwrite
-                    let exec_cmd = command.replacen("mv ", "mv -f ", 1);
+                    let exec_cmd = Self::add_force_flag(&command, "mv");
                     self.execute_shell_command(&exec_cmd, state).await?;
                 }
 
                 crate::terminal::ConfirmationType::LnInteractive { .. } => {
                     // Execute ln with -f flag to force (removes existing destination)
-                    let exec_cmd = command.replacen("ln ", "ln -f ", 1);
+                    let exec_cmd = Self::add_force_flag(&command, "ln");
                     self.execute_shell_command(&exec_cmd, state).await?;
                 }
             }

@@ -6,6 +6,17 @@ use tokio::process::Command as TokioCommand;
 use tokio::time::{timeout, Duration};
 
 use super::job_manager::SharedJobManager;
+
+/// Command execution timeout in seconds (5 minutes).
+///
+/// Rationale: Long enough for package installations and large builds,
+/// short enough to prevent hung processes from blocking the terminal indefinitely.
+/// Based on typical CI/CD timeout values.
+///
+/// Side effects of changing:
+/// - Too low: Package managers (`apt install`, `cargo build`) may timeout prematurely
+/// - Too high: Hung processes won't be killed promptly, blocking user interaction
+const COMMAND_TIMEOUT_SECS: u64 = 300;
 use crate::input::shell_builtins::ShellBuiltinHandler;
 
 /// Output from a command execution
@@ -235,7 +246,7 @@ impl CommandExecutor {
         cmd: &str,
         args: &[String],
     ) -> Option<(&'static str, &'static str)> {
-        let first_arg = args.first().map(|s| s.as_str()).unwrap_or("");
+        let first_arg = args.first().map_or("", |s| s.as_str());
 
         INTERACTIVE_SUBCOMMANDS
             .iter()
@@ -322,6 +333,30 @@ impl CommandExecutor {
         {
             ("bash", "-c")
         }
+    }
+
+    /// Execute a command via shell with 5-minute timeout
+    ///
+    /// Helper function to reduce code duplication across shell execution paths.
+    async fn execute_via_shell(command: &str) -> Result<CommandOutput> {
+        let (shell, shell_flag) = Self::get_platform_shell();
+        let execution = TokioCommand::new(shell)
+            .arg(shell_flag)
+            .arg(command)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .output();
+
+        let output = timeout(Duration::from_secs(COMMAND_TIMEOUT_SECS), execution)
+            .await
+            .context("Command execution timed out after 5 minutes")??;
+
+        Ok(CommandOutput {
+            stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+            exit_code: output.status.code().unwrap_or(-1),
+        })
     }
 
     /// Execute a command asynchronously with a 5-minute timeout
@@ -460,24 +495,7 @@ impl CommandExecutor {
                 });
             }
 
-            let (shell, shell_flag) = Self::get_platform_shell();
-            let execution = TokioCommand::new(shell)
-                .arg(shell_flag)
-                .arg(&full_command)
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .output();
-
-            let output = timeout(Duration::from_secs(300), execution)
-                .await
-                .context("Command execution timed out after 5 minutes")??;
-
-            return Ok(CommandOutput {
-                stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-                stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-                exit_code: output.status.code().unwrap_or(-1),
-            });
+            return Self::execute_via_shell(&full_command).await;
         }
 
         // If original_input is provided, use platform shell for shell operator interpretation
@@ -520,24 +538,7 @@ impl CommandExecutor {
                 });
             }
 
-            let (shell, shell_flag) = Self::get_platform_shell();
-            let execution = TokioCommand::new(shell)
-                .arg(shell_flag)
-                .arg(shell_input)
-                .stdin(Stdio::null()) // Prevent interactive programs from blocking
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .output();
-
-            let output = timeout(Duration::from_secs(300), execution)
-                .await
-                .context("Command execution timed out after 5 minutes")??;
-
-            return Ok(CommandOutput {
-                stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-                stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-                exit_code: output.status.code().unwrap_or(-1),
-            });
+            return Self::execute_via_shell(shell_input).await;
         }
 
         // Check if arguments contain glob patterns (*, ?, [...], {...})
@@ -555,24 +556,7 @@ impl CommandExecutor {
                 format!("{} {}", cmd, args.join(" "))
             };
 
-            let (shell, shell_flag) = Self::get_platform_shell();
-            let execution = TokioCommand::new(shell)
-                .arg(shell_flag)
-                .arg(&full_command)
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .output();
-
-            let output = timeout(Duration::from_secs(300), execution)
-                .await
-                .context("Command execution timed out after 5 minutes")??;
-
-            return Ok(CommandOutput {
-                stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-                stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-                exit_code: output.status.code().unwrap_or(-1),
-            });
+            return Self::execute_via_shell(&full_command).await;
         }
 
         // Direct execution (no shell operators, no glob patterns)
@@ -590,7 +574,7 @@ impl CommandExecutor {
             .stderr(Stdio::piped())
             .output();
 
-        let output = timeout(Duration::from_secs(300), execution)
+        let output = timeout(Duration::from_secs(COMMAND_TIMEOUT_SECS), execution)
             .await
             .context("Command execution timed out after 5 minutes")??;
 
