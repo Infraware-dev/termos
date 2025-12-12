@@ -752,6 +752,9 @@ impl InfrawareTerminal {
             return self.handle_auth_status_command().await;
         }
 
+        // Clone current cancellation token for this command execution
+        let cancel_token = self.cancellation_token_tx.borrow().clone();
+
         self.command_orchestrator
             .handle_command(
                 cmd,
@@ -760,6 +763,7 @@ impl InfrawareTerminal {
                 &mut self.state,
                 &mut self.ui,
                 &self.job_manager,
+                cancel_token,
             )
             .await
     }
@@ -932,6 +936,9 @@ impl InfrawareTerminal {
         use crate::input::parser::CommandParser;
         match CommandParser::parse(&corrected_input) {
             Ok((command, args)) => {
+                // Clone current cancellation token for this command execution
+                let cancel_token = self.cancellation_token_tx.borrow().clone();
+
                 self.command_orchestrator
                     .handle_command(
                         &command,
@@ -940,6 +947,7 @@ impl InfrawareTerminal {
                         &mut self.state,
                         &mut self.ui,
                         &self.job_manager,
+                        cancel_token,
                     )
                     .await
             }

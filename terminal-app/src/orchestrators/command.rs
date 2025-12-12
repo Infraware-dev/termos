@@ -40,6 +40,8 @@ impl CommandOrchestrator {
     /// * `state` - Terminal state
     /// * `ui` - Terminal UI
     /// * `job_manager` - Shared job manager for background processes
+    /// * `cancel_token` - Cancellation token for Ctrl+C handling
+    #[expect(clippy::too_many_arguments, reason = "orchestrator needs all context")]
     pub async fn handle_command(
         &self,
         cmd: &str,
@@ -48,6 +50,7 @@ impl CommandOrchestrator {
         state: &mut TerminalState,
         ui: &mut TerminalUI,
         job_manager: &SharedJobManager,
+        cancel_token: CancellationToken,
     ) -> Result<()> {
         // Handle "enter root mode" commands (sudo su, su, sudo -i, etc.)
         log::debug!(
@@ -162,7 +165,7 @@ impl CommandOrchestrator {
         }
 
         // Execute the command with real-time streaming output
-        self.execute_and_display(cmd, args, original_input, state, ui)
+        self.execute_and_display(cmd, args, original_input, state, ui, cancel_token)
             .await
     }
 
@@ -397,6 +400,7 @@ impl CommandOrchestrator {
         original_input: Option<&str>,
         state: &mut TerminalState,
         ui: &mut TerminalUI,
+        cancel_token: CancellationToken,
     ) -> Result<()> {
         // Build the actual command to execute
         let (exec_cmd, exec_args, exec_input): (String, Vec<String>, Option<String>) =
@@ -422,9 +426,7 @@ impl CommandOrchestrator {
                 )
             };
 
-        // Start streaming execution
-        // Create cancellation token (TODO: wire up to Ctrl+C in main event loop)
-        let cancel_token = CancellationToken::new();
+        // Start streaming execution with cancellation support (Ctrl+C)
         let (mut rx, handle) =
             CommandExecutor::execute_streaming(&exec_cmd, &exec_args, exec_input.as_deref(), cancel_token);
 

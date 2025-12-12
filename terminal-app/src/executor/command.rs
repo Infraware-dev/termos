@@ -249,6 +249,28 @@ fn shell_command_has_infinite_device(shell_input: &str) -> bool {
     has_infinite_device && !has_output_limit
 }
 
+/// Send SIGINT to a child process (Unix only).
+///
+/// This sends the interrupt signal (Ctrl+C equivalent) to allow the process
+/// to handle it gracefully (e.g., ping prints statistics before exiting).
+#[cfg(unix)]
+fn send_sigint(child: &Child) {
+    if let Some(pid) = child.id() {
+        // Safety: We're sending a standard signal to a process we own
+        unsafe {
+            libc::kill(pid as libc::pid_t, libc::SIGINT);
+        }
+    }
+}
+
+/// Send termination signal to a child process (Windows fallback).
+///
+/// On Windows, there's no SIGINT equivalent, so we just mark for later kill.
+#[cfg(not(unix))]
+fn send_sigint(_child: &Child) {
+    // On Windows, we can't send SIGINT. The process will be killed later.
+}
+
 /// Execute a child process with output line limiting, cancellation, and optional streaming.
 ///
 /// Reads stdout/stderr incrementally and terminates the process if it exceeds
@@ -282,28 +304,44 @@ async fn execute_with_limit(
         let reader = BufReader::new(out);
         let mut lines = reader.lines();
 
+        // Track if we've already sent SIGINT (to avoid sending multiple times)
+        let mut sigint_sent = false;
+
         loop {
             // Check for cancellation before reading next line
-            if let Some(ref token) = cancel_token {
-                if token.is_cancelled() {
-                    cancelled = true;
-                    child.kill().await.ok();
-                    break;
+            // Send SIGINT once, then continue reading to capture final output (e.g., ping stats)
+            if !sigint_sent {
+                if let Some(ref token) = cancel_token {
+                    if token.is_cancelled() {
+                        cancelled = true;
+                        // Send SIGINT to allow graceful shutdown (e.g., ping prints stats)
+                        send_sigint(&child);
+                        sigint_sent = true;
+                        // Don't break - continue reading to capture final output
+                    }
                 }
             }
 
             // Use select to check both line reading and cancellation
-            let line_result = if let Some(ref token) = cancel_token {
-                tokio::select! {
-                    biased;
-                    _ = token.cancelled() => {
-                        cancelled = true;
-                        child.kill().await.ok();
-                        break;
+            let line_result = if !sigint_sent {
+                if let Some(ref token) = cancel_token {
+                    tokio::select! {
+                        biased;
+                        _ = token.cancelled() => {
+                            cancelled = true;
+                            // Send SIGINT to allow graceful shutdown (e.g., ping prints stats)
+                            send_sigint(&child);
+                            sigint_sent = true;
+                            // Continue reading to capture final output
+                            continue;
+                        }
+                        result = lines.next_line() => result,
                     }
-                    result = lines.next_line() => result,
+                } else {
+                    lines.next_line().await
                 }
             } else {
+                // After SIGINT, just read remaining output without cancellation check
                 lines.next_line().await
             };
 
@@ -332,23 +370,21 @@ async fn execute_with_limit(
     }
 
     // Read stderr (always with reasonable limit to catch errors)
-    // Skip if cancelled to return quickly
-    if !cancelled {
-        if let Some(err) = stderr {
-            let reader = BufReader::new(err);
-            let mut lines = reader.lines();
+    // Read even after cancellation to capture final error output
+    if let Some(err) = stderr {
+        let reader = BufReader::new(err);
+        let mut lines = reader.lines();
 
-            while let Ok(Some(line)) = lines.next_line().await {
-                // Stream stderr lines too (prefixed to distinguish)
-                if let Some(ref tx) = line_tx {
-                    let _ = tx.send(format!("[stderr] {}", line));
-                }
+        while let Ok(Some(line)) = lines.next_line().await {
+            // Stream stderr lines too (prefixed to distinguish)
+            if let Some(ref tx) = line_tx {
+                let _ = tx.send(format!("[stderr] {}", line));
+            }
 
-                stderr_lines.push(line);
-                // Limit stderr too to prevent memory issues
-                if stderr_lines.len() > MAX_OUTPUT_LINES {
-                    break;
-                }
+            stderr_lines.push(line);
+            // Limit stderr too to prevent memory issues
+            if stderr_lines.len() > MAX_OUTPUT_LINES {
+                break;
             }
         }
     }
