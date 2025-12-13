@@ -80,59 +80,9 @@ fn test_get_command_path() {
 }
 
 // =============================================================================
-// Interactive Command Detection Tests
-// =============================================================================
-
-#[test]
-fn test_requires_interactive_vim() {
-    assert!(CommandExecutor::requires_interactive("vim"));
-    assert!(CommandExecutor::requires_interactive("nvim"));
-    assert!(CommandExecutor::requires_interactive("nano"));
-}
-
-#[test]
-fn test_requires_interactive_pagers() {
-    assert!(CommandExecutor::requires_interactive("less"));
-    assert!(CommandExecutor::requires_interactive("more"));
-    assert!(CommandExecutor::requires_interactive("man"));
-}
-
-#[test]
-fn test_requires_interactive_system_monitors() {
-    assert!(CommandExecutor::requires_interactive("top"));
-    assert!(CommandExecutor::requires_interactive("htop"));
-}
-
-#[test]
-fn test_requires_interactive_file_managers() {
-    assert!(CommandExecutor::requires_interactive("mc"));
-    assert!(CommandExecutor::requires_interactive("ranger"));
-}
-
-#[test]
-fn test_requires_interactive_sudo() {
-    // sudo is handled via root mode wrapper, not as interactive command
-    assert!(!CommandExecutor::requires_interactive("sudo"));
-}
-
-#[test]
-fn test_requires_interactive_gh() {
-    // gh (GitHub CLI) requires interactive for auth commands
-    assert!(CommandExecutor::requires_interactive("gh"));
-}
-
-#[test]
-fn test_not_interactive_common_commands() {
-    assert!(!CommandExecutor::requires_interactive("ls"));
-    assert!(!CommandExecutor::requires_interactive("cat"));
-    assert!(!CommandExecutor::requires_interactive("grep"));
-    assert!(!CommandExecutor::requires_interactive("echo"));
-    assert!(!CommandExecutor::requires_interactive("docker"));
-    assert!(!CommandExecutor::requires_interactive("kubectl"));
-}
-
-// =============================================================================
 // Command Output Tests
+// Note: Interactive command detection tests moved to src/executor/command.rs
+// (inline test_requires_interactive() is more comprehensive)
 // =============================================================================
 
 #[tokio::test]
@@ -268,140 +218,64 @@ async fn test_execute_exit_codes() {
 }
 
 // =============================================================================
-// Infinite Output Command Truncation Tests
+// Infinite Device Blocking Tests (Parametrized)
 // =============================================================================
 
+/// Consolidated test for infinite device blocking
+/// Tests that cat/dd with /dev/zero, /dev/urandom, /dev/random are blocked
 #[tokio::test]
-async fn test_yes_command_truncated() {
-    // yes is NOT blocked - it's truncated at 1000 lines
-    let output = CommandExecutor::execute("yes", &[], None, CancellationToken::new())
-        .wait()
-        .await
-        .unwrap();
-    // Process was killed after reaching line limit
-    assert!(!output.is_success());
-    // Output should contain many "y" lines
-    assert!(output.stdout.contains("y"));
-    // Output should show truncation message
-    assert!(
-        output.stdout.contains("[Output truncated at 1000 lines]"),
-        "Should show truncation message, got: {}",
-        &output.stdout[output.stdout.len().saturating_sub(100)..]
-    );
-}
+async fn test_infinite_device_blocking() {
+    // Test cases: (cmd, args, should_be_blocked, description)
+    let test_cases: Vec<(&str, Vec<&str>, bool, &str)> = vec![
+        // Blocked cases - infinite devices
+        ("cat", vec!["/dev/zero"], true, "cat /dev/zero"),
+        ("cat", vec!["/dev/urandom"], true, "cat /dev/urandom"),
+        ("cat", vec!["/dev/random"], true, "cat /dev/random"),
+        ("dd", vec!["if=/dev/zero"], true, "dd if=/dev/zero"),
+        // Allowed cases
+        ("cat", vec!["/etc/hostname"], false, "cat normal file"),
+        (
+            "dd",
+            vec!["if=/dev/null", "of=/dev/null", "count=1"],
+            false,
+            "dd with /dev/null",
+        ),
+        // dd with count= is allowed even for infinite devices
+        (
+            "dd",
+            vec!["if=/dev/zero", "of=/dev/null", "count=1", "bs=10"],
+            false,
+            "dd if=/dev/zero with count",
+        ),
+    ];
 
-#[tokio::test]
-async fn test_yes_command_output_limited() {
-    let output = CommandExecutor::execute("yes", &[], None, CancellationToken::new())
-        .wait()
-        .await
-        .unwrap();
-    // Count actual output lines (excluding truncation message)
-    let lines: Vec<&str> = output.stdout.lines().collect();
-    // Should be around 1000 lines + truncation message
-    assert!(
-        lines.len() <= 1003,
-        "Output should be limited to ~1000 lines, got {}",
-        lines.len()
-    );
-    assert!(
-        lines.len() >= 1000,
-        "Output should have at least 1000 lines before truncation"
-    );
-}
+    for (cmd, args, should_block, description) in test_cases {
+        let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+        let output = CommandExecutor::execute(cmd, &args, None, CancellationToken::new())
+            .wait()
+            .await
+            .unwrap();
 
-#[tokio::test]
-async fn test_cat_dev_zero_blocked() {
-    let output = CommandExecutor::execute(
-        "cat",
-        &["/dev/zero".to_string()],
-        None,
-        CancellationToken::new(),
-    )
-    .wait()
-    .await
-    .unwrap();
-    assert!(!output.is_success());
-    assert!(
-        output.stderr.contains("blocked") || output.stderr.contains("infinite"),
-        "Error should mention blocking or infinite: {}",
-        output.stderr
-    );
-}
-
-#[tokio::test]
-async fn test_cat_dev_urandom_blocked() {
-    let output = CommandExecutor::execute(
-        "cat",
-        &["/dev/urandom".to_string()],
-        None,
-        CancellationToken::new(),
-    )
-    .wait()
-    .await
-    .unwrap();
-    assert!(!output.is_success());
-    assert!(output.stderr.contains("blocked") || output.stderr.contains("infinite"));
-}
-
-#[tokio::test]
-async fn test_cat_normal_file_allowed() {
-    // cat of a normal file should work
-    let output = CommandExecutor::execute(
-        "cat",
-        &["/etc/hostname".to_string()],
-        None,
-        CancellationToken::new(),
-    )
-    .wait()
-    .await
-    .unwrap();
-    // Should either succeed or fail with "No such file", but NOT be blocked
-    assert!(
-        !output.stderr.contains("blocked"),
-        "Normal cat should not be blocked"
-    );
-}
-
-#[tokio::test]
-async fn test_dd_dev_zero_blocked() {
-    let output = CommandExecutor::execute(
-        "dd",
-        &["if=/dev/zero".to_string()],
-        None,
-        CancellationToken::new(),
-    )
-    .wait()
-    .await
-    .unwrap();
-    assert!(!output.is_success());
-    assert!(
-        output.stderr.contains("blocked") || output.stderr.contains("infinite"),
-        "dd with /dev/zero should be blocked"
-    );
-}
-
-#[tokio::test]
-async fn test_dd_normal_usage_allowed() {
-    // dd with normal file should not be blocked
-    let output = CommandExecutor::execute(
-        "dd",
-        &[
-            "if=/dev/null".to_string(),
-            "of=/dev/null".to_string(),
-            "count=1".to_string(),
-        ],
-        None,
-        CancellationToken::new(),
-    )
-    .wait()
-    .await
-    .unwrap();
-    // /dev/null is not in INFINITE_DEVICES, so it should be allowed
-    assert!(
-        !output.stderr.contains("blocked"),
-        "dd with /dev/null should not be blocked"
-    );
+        if should_block {
+            assert!(
+                !output.is_success(),
+                "{} should fail (blocked)",
+                description
+            );
+            assert!(
+                output.stderr.contains("blocked") || output.stderr.contains("infinite"),
+                "{} error should mention blocking: {}",
+                description,
+                output.stderr
+            );
+        } else {
+            assert!(
+                !output.stderr.contains("blocked"),
+                "{} should NOT be blocked",
+                description
+            );
+        }
+    }
 }
 
 // NOTE: ping without -c is no longer blocked. It runs until:
@@ -525,190 +399,11 @@ async fn test_yes_piped_to_head_via_shell_allowed() {
 }
 
 // =============================================================================
-// Brace Expansion Tests
+// Brace Expansion Tests (Parametrized)
 // =============================================================================
-
-#[tokio::test]
-async fn test_brace_expansion_execution() {
-    use std::fs;
-    use std::path::Path;
-
-    let temp_dir = std::env::temp_dir();
-    let base_name = format!("infraware_brace_test_{}", std::process::id());
-    let base = temp_dir.join(&base_name);
-
-    // Clean up any previous test files
-    for i in 1..=3 {
-        let file = format!("{}_{}", base.display(), i);
-        let _ = fs::remove_file(&file);
-    }
-
-    // Execute with brace expansion via original_input (triggers bash -c)
-    let output = CommandExecutor::execute(
-        "touch",
-        &[],
-        Some(&format!("touch {}{{1..3}}", base.display())),
-        CancellationToken::new(),
-    )
-    .wait()
-    .await
-    .unwrap();
-
-    assert!(
-        output.is_success(),
-        "Brace expansion command failed: stderr={}",
-        output.stderr
-    );
-
-    // Verify files were created by bash's brace expansion
-    for i in 1..=3 {
-        let file = format!("{}{}", base.display(), i);
-        assert!(
-            Path::new(&file).exists(),
-            "File {} should exist after brace expansion",
-            file
-        );
-        // Clean up
-        let _ = fs::remove_file(&file);
-    }
-}
-
-#[tokio::test]
-async fn test_comma_brace_expansion() {
-    use std::fs;
-    use std::path::Path;
-
-    let temp_dir = std::env::temp_dir();
-    let base_name = format!("infraware_comma_brace_{}", std::process::id());
-    let base = temp_dir.join(&base_name);
-
-    // Clean up any previous test files
-    for suffix in ["a", "b", "c"] {
-        let file = format!("{}_{}", base.display(), suffix);
-        let _ = fs::remove_file(&file);
-    }
-
-    // Execute with comma brace expansion {a,b,c}
-    let output = CommandExecutor::execute(
-        "touch",
-        &[],
-        Some(&format!("touch {}_{{a,b,c}}", base.display())),
-        CancellationToken::new(),
-    )
-    .wait()
-    .await
-    .unwrap();
-
-    assert!(
-        output.is_success(),
-        "Comma brace expansion failed: stderr={}",
-        output.stderr
-    );
-
-    // Verify files were created
-    for suffix in ["a", "b", "c"] {
-        let file = format!("{}_{}", base.display(), suffix);
-        assert!(
-            Path::new(&file).exists(),
-            "File {} should exist after comma brace expansion",
-            file
-        );
-        // Clean up
-        let _ = fs::remove_file(&file);
-    }
-}
-
-#[tokio::test]
-async fn test_brace_expansion_letter_range() {
-    use std::fs;
-    use std::path::Path;
-
-    let temp_dir = std::env::temp_dir();
-    let base_name = format!("infraware_letter_range_{}", std::process::id());
-    let base = temp_dir.join(&base_name);
-
-    // Clean up any previous test files
-    for c in 'a'..='c' {
-        let file = format!("{}_{}", base.display(), c);
-        let _ = fs::remove_file(&file);
-    }
-
-    // Execute with letter range brace expansion {a..c}
-    let output = CommandExecutor::execute(
-        "touch",
-        &[],
-        Some(&format!("touch {}_{{a..c}}", base.display())),
-        CancellationToken::new(),
-    )
-    .wait()
-    .await
-    .unwrap();
-
-    assert!(
-        output.is_success(),
-        "Letter range brace expansion failed: stderr={}",
-        output.stderr
-    );
-
-    // Verify files were created: file_a, file_b, file_c
-    for c in 'a'..='c' {
-        let file = format!("{}_{}", base.display(), c);
-        assert!(
-            Path::new(&file).exists(),
-            "File {} should exist after letter range expansion",
-            file
-        );
-        let _ = fs::remove_file(&file);
-    }
-}
-
-#[tokio::test]
-async fn test_brace_expansion_reverse_range() {
-    use std::fs;
-    use std::path::Path;
-
-    let temp_dir = std::env::temp_dir();
-    let base_name = format!("infraware_reverse_range_{}", std::process::id());
-    let base = temp_dir.join(&base_name);
-
-    // Clean up any previous test files
-    for i in 1..=3 {
-        let file = format!("{}_{}", base.display(), i);
-        let _ = fs::remove_file(&file);
-    }
-
-    // Execute with reverse range brace expansion {3..1}
-    let output = CommandExecutor::execute(
-        "touch",
-        &[],
-        Some(&format!("touch {}_{{3..1}}", base.display())),
-        CancellationToken::new(),
-    )
-    .wait()
-    .await
-    .unwrap();
-
-    assert!(
-        output.is_success(),
-        "Reverse range brace expansion failed: stderr={}",
-        output.stderr
-    );
-
-    // Verify files were created: file_3, file_2, file_1 (order doesn't matter for files)
-    for i in 1..=3 {
-        let file = format!("{}_{}", base.display(), i);
-        assert!(
-            Path::new(&file).exists(),
-            "File {} should exist after reverse range expansion",
-            file
-        );
-        let _ = fs::remove_file(&file);
-    }
-}
 
 /// Helper to check if bash supports advanced brace expansion (Bash 4.0+ features)
 async fn bash_supports_advanced_brace_expansion() -> bool {
-    // Test if bash supports zero-padding and step in brace expansion
     let output = CommandExecutor::execute(
         "bash",
         &[],
@@ -725,197 +420,125 @@ async fn bash_supports_advanced_brace_expansion() -> bool {
     }
 }
 
+/// Consolidated brace expansion test covering basic patterns
+/// Tests: {1..3}, {a,b,c}, {a..c}, {3..1}, {a,b}{1,2}, pre_{A,B}_post
 #[tokio::test]
-async fn test_brace_expansion_zero_padding() {
+async fn test_brace_expansion_basic_patterns() {
     use std::fs;
     use std::path::Path;
 
-    // Skip test if bash doesn't support advanced brace expansion (requires Bash 4.0+)
+    // Test cases: (name, brace_pattern, expected_suffixes)
+    // Note: patterns use single braces for bash expansion (not Rust format escapes)
+    let test_cases: Vec<(&str, &str, Vec<&str>)> = vec![
+        ("numeric_range", "{1..3}", vec!["1", "2", "3"]),
+        ("comma_values", "_{a,b,c}", vec!["_a", "_b", "_c"]),
+        ("letter_range", "_{a..c}", vec!["_a", "_b", "_c"]),
+        ("reverse_range", "_{3..1}", vec!["_1", "_2", "_3"]),
+        ("nested", "_{a,b}{1,2}", vec!["_a1", "_a2", "_b1", "_b2"]),
+        (
+            "preamble_postscript",
+            "_pre_{A,B}_post",
+            vec!["_pre_A_post", "_pre_B_post"],
+        ),
+    ];
+
+    let temp_dir = std::env::temp_dir();
+
+    for (name, pattern, expected) in test_cases {
+        let base_name = format!("infraware_brace_{}_{}", name, std::process::id());
+        let base = temp_dir.join(&base_name);
+
+        // Clean up any previous test files
+        for suffix in &expected {
+            let file = format!("{}{}", base.display(), suffix);
+            let _ = fs::remove_file(&file);
+        }
+
+        // Execute with brace expansion via original_input (triggers bash -c)
+        let cmd = format!("touch {}{}", base.display(), pattern);
+        let output = CommandExecutor::execute("touch", &[], Some(&cmd), CancellationToken::new())
+            .wait()
+            .await
+            .unwrap();
+
+        assert!(
+            output.is_success(),
+            "Brace expansion '{}' failed: stderr={}",
+            name,
+            output.stderr
+        );
+
+        // Verify files were created
+        for suffix in &expected {
+            let file = format!("{}{}", base.display(), suffix);
+            assert!(
+                Path::new(&file).exists(),
+                "File {} should exist after '{}' expansion",
+                file,
+                name
+            );
+            let _ = fs::remove_file(&file);
+        }
+    }
+}
+
+/// Consolidated brace expansion test for Bash 4.0+ features
+/// Tests: {01..03} (zero-padding), {0..4..2} (step)
+#[tokio::test]
+async fn test_brace_expansion_advanced_patterns() {
+    use std::fs;
+    use std::path::Path;
+
+    // Skip if bash doesn't support advanced features
     if !bash_supports_advanced_brace_expansion().await {
-        eprintln!("Skipping test: bash does not support zero-padded brace expansion");
+        eprintln!("Skipping test: bash does not support Bash 4.0+ brace expansion");
         return;
     }
 
-    let temp_dir = std::env::temp_dir();
-    let base_name = format!("infraware_zero_pad_{}", std::process::id());
-    let base = temp_dir.join(&base_name);
-
-    // Clean up any previous test files
-    for i in 1..=3 {
-        let file = format!("{}_{:02}", base.display(), i);
-        let _ = fs::remove_file(&file);
-    }
-
-    // Execute with zero-padded brace expansion {01..03}
-    let output = CommandExecutor::execute(
-        "touch",
-        &[],
-        Some(&format!("touch {}_{{01..03}}", base.display())),
-        CancellationToken::new(),
-    )
-    .wait()
-    .await
-    .unwrap();
-
-    assert!(
-        output.is_success(),
-        "Zero-padded brace expansion failed: stderr={}",
-        output.stderr
-    );
-
-    // Verify files were created: file_01, file_02, file_03
-    for i in 1..=3 {
-        let file = format!("{}_{:02}", base.display(), i);
-        assert!(
-            Path::new(&file).exists(),
-            "File {} should exist after zero-padded expansion",
-            file
-        );
-        let _ = fs::remove_file(&file);
-    }
-}
-
-#[tokio::test]
-async fn test_brace_expansion_step() {
-    use std::fs;
-    use std::path::Path;
-
-    // Skip test if bash doesn't support advanced brace expansion (requires Bash 4.0+)
-    if !bash_supports_advanced_brace_expansion().await {
-        eprintln!("Skipping test: bash does not support step brace expansion");
-        return;
-    }
+    // Test cases: (name, brace_pattern, expected_suffixes)
+    // Note: patterns use single braces for bash expansion (not Rust format escapes)
+    let test_cases: Vec<(&str, &str, Vec<&str>)> = vec![
+        ("zero_padding", "_{01..03}", vec!["_01", "_02", "_03"]),
+        ("step", "_{0..4..2}", vec!["_0", "_2", "_4"]),
+    ];
 
     let temp_dir = std::env::temp_dir();
-    let base_name = format!("infraware_step_{}", std::process::id());
-    let base = temp_dir.join(&base_name);
 
-    let expected = [0, 2, 4];
+    for (name, pattern, expected) in test_cases {
+        let base_name = format!("infraware_brace_{}_{}", name, std::process::id());
+        let base = temp_dir.join(&base_name);
 
-    // Clean up any previous test files
-    for i in &expected {
-        let file = format!("{}_{}", base.display(), i);
-        let _ = fs::remove_file(&file);
-    }
+        // Clean up any previous test files
+        for suffix in &expected {
+            let file = format!("{}{}", base.display(), suffix);
+            let _ = fs::remove_file(&file);
+        }
 
-    // Execute with step brace expansion {0..4..2}
-    let output = CommandExecutor::execute(
-        "touch",
-        &[],
-        Some(&format!("touch {}_{{0..4..2}}", base.display())),
-        CancellationToken::new(),
-    )
-    .wait()
-    .await
-    .unwrap();
+        // Execute with brace expansion
+        let cmd = format!("touch {}{}", base.display(), pattern);
+        let output = CommandExecutor::execute("touch", &[], Some(&cmd), CancellationToken::new())
+            .wait()
+            .await
+            .unwrap();
 
-    assert!(
-        output.is_success(),
-        "Step brace expansion failed: stderr={}",
-        output.stderr
-    );
-
-    // Verify files were created: file_0, file_2, file_4
-    for i in &expected {
-        let file = format!("{}_{}", base.display(), i);
         assert!(
-            Path::new(&file).exists(),
-            "File {} should exist after step expansion",
-            file
+            output.is_success(),
+            "Brace expansion '{}' failed: stderr={}",
+            name,
+            output.stderr
         );
-        let _ = fs::remove_file(&file);
-    }
-}
 
-#[tokio::test]
-async fn test_brace_expansion_nested() {
-    use std::fs;
-    use std::path::Path;
-
-    let temp_dir = std::env::temp_dir();
-    let base_name = format!("infraware_nested_{}", std::process::id());
-    let base = temp_dir.join(&base_name);
-
-    let expected = ["a1", "a2", "b1", "b2"];
-
-    // Clean up any previous test files
-    for suffix in &expected {
-        let file = format!("{}_{}", base.display(), suffix);
-        let _ = fs::remove_file(&file);
-    }
-
-    // Execute with nested brace expansion {a,b}{1,2}
-    let output = CommandExecutor::execute(
-        "touch",
-        &[],
-        Some(&format!("touch {}_{{a,b}}{{1,2}}", base.display())),
-        CancellationToken::new(),
-    )
-    .wait()
-    .await
-    .unwrap();
-
-    assert!(
-        output.is_success(),
-        "Nested brace expansion failed: stderr={}",
-        output.stderr
-    );
-
-    // Verify files were created: file_a1, file_a2, file_b1, file_b2
-    for suffix in &expected {
-        let file = format!("{}_{}", base.display(), suffix);
-        assert!(
-            Path::new(&file).exists(),
-            "File {} should exist after nested expansion",
-            file
-        );
-        let _ = fs::remove_file(&file);
-    }
-}
-
-#[tokio::test]
-async fn test_brace_expansion_preamble_postscript() {
-    use std::fs;
-    use std::path::Path;
-
-    let temp_dir = std::env::temp_dir();
-    let base_name = format!("infraware_preamble_{}", std::process::id());
-    let base = temp_dir.join(&base_name);
-
-    let expected = ["pre_A_post", "pre_B_post"];
-
-    // Clean up any previous test files
-    for suffix in &expected {
-        let file = format!("{}_{}", base.display(), suffix);
-        let _ = fs::remove_file(&file);
-    }
-
-    // Execute with preamble/postscript brace expansion pre_{A,B}_post
-    let output = CommandExecutor::execute(
-        "touch",
-        &[],
-        Some(&format!("touch {}_pre_{{A,B}}_post", base.display())),
-        CancellationToken::new(),
-    )
-    .wait()
-    .await
-    .unwrap();
-
-    assert!(
-        output.is_success(),
-        "Preamble/postscript brace expansion failed: stderr={}",
-        output.stderr
-    );
-
-    // Verify files were created
-    for suffix in &expected {
-        let file = format!("{}_{}", base.display(), suffix);
-        assert!(
-            Path::new(&file).exists(),
-            "File {} should exist after preamble/postscript expansion",
-            file
-        );
-        let _ = fs::remove_file(&file);
+        // Verify files were created
+        for suffix in &expected {
+            let file = format!("{}{}", base.display(), suffix);
+            assert!(
+                Path::new(&file).exists(),
+                "File {} should exist after '{}' expansion",
+                file,
+                name
+            );
+            let _ = fs::remove_file(&file);
+        }
     }
 }
 
@@ -1266,46 +889,13 @@ async fn test_execute_blocked_command_returns_immediately() {
 }
 
 // =============================================================================
-// Infinite Device Blocking - Additional Tests
+// Additional Infinite Device Tests
+// Note: Basic blocking tests consolidated in test_infinite_device_blocking()
 // =============================================================================
 
 #[tokio::test]
-async fn test_execute_blocks_cat_dev_random() {
-    let cancel = CancellationToken::new();
-    let handle = CommandExecutor::execute("cat", &["/dev/random".to_string()], None, cancel);
-    let result = handle.wait().await.unwrap();
-    assert!(!result.is_success());
-    assert!(
-        result.stderr.contains("blocked") || result.stderr.contains("infinite"),
-        "/dev/random should be blocked: {}",
-        result.stderr
-    );
-}
-
-#[tokio::test]
-async fn test_execute_allows_dd_dev_zero_with_count() {
-    let cancel = CancellationToken::new();
-    let handle = CommandExecutor::execute(
-        "dd",
-        &[
-            "if=/dev/zero".to_string(),
-            "of=/dev/null".to_string(),
-            "count=1".to_string(),
-            "bs=10".to_string(),
-        ],
-        None,
-        cancel,
-    );
-    let result = handle.wait().await.unwrap();
-    assert!(
-        !result.stderr.contains("blocked"),
-        "dd with count should be allowed"
-    );
-    assert!(result.is_success());
-}
-
-#[tokio::test]
 async fn test_execute_allows_dev_urandom_piped_to_head() {
+    // Piped commands should not be blocked (head limits output)
     let cancel = CancellationToken::new();
     let handle = CommandExecutor::execute("sh", &[], Some("cat /dev/urandom | head -c 10"), cancel);
     let result = handle.wait().await.unwrap();

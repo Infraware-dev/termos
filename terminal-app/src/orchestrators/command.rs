@@ -436,6 +436,7 @@ impl CommandOrchestrator {
         const RENDER_INTERVAL: std::time::Duration = std::time::Duration::from_millis(16);
 
         // Stream lines in real-time
+        // Throbber animation runs in a background thread, no need to tick here
         while let Some(line) = handle.lines().recv().await {
             // Skip stderr prefix for display (it's just for identification)
             let display_line = if line.starts_with("[stderr] ") {
@@ -804,7 +805,7 @@ impl CommandOrchestrator {
             // - libc::W_OK is a valid constant defined by libc (value 2 on Unix)
             // - access() is thread-safe and only reads filesystem metadata
             // This call cannot cause UB as c_path remains valid for the duration of the call.
-           unsafe { libc::access(c_path.as_ptr(), libc::W_OK) == 0 }
+            unsafe { libc::access(c_path.as_ptr(), libc::W_OK) == 0 }
         } else {
             // If path conversion fails (contains null bytes), assume writable (don't block)
             true
