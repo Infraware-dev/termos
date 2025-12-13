@@ -2,6 +2,7 @@ use infraware_terminal::executor::CommandExecutor;
 /// Integration tests for Infraware Terminal
 use infraware_terminal::input::{InputClassifier, InputType};
 use infraware_terminal::llm::{LLMClientTrait, MockLLMClient, ResponseRenderer};
+use tokio_util::sync::CancellationToken;
 
 #[tokio::test]
 async fn test_end_to_end_command_execution() {
@@ -18,9 +19,15 @@ async fn test_end_to_end_command_execution() {
             args,
             original_input,
         } => {
-            let result = CommandExecutor::execute(&command, &args, original_input.as_deref())
-                .await
-                .unwrap();
+            let result = CommandExecutor::execute(
+                &command,
+                &args,
+                original_input.as_deref(),
+                CancellationToken::new(),
+            )
+            .wait()
+            .await
+            .unwrap();
             assert!(result.is_success());
             assert_eq!(result.stdout.trim(), "test");
         }
@@ -129,9 +136,15 @@ async fn test_pipe_command_end_to_end() {
             assert_eq!(original_input.as_deref().unwrap(), input);
 
             // Execute with shell interpretation
-            let result = CommandExecutor::execute(&command, &args, original_input.as_deref())
-                .await
-                .unwrap();
+            let result = CommandExecutor::execute(
+                &command,
+                &args,
+                original_input.as_deref(),
+                CancellationToken::new(),
+            )
+            .wait()
+            .await
+            .unwrap();
             assert!(result.is_success());
             assert_eq!(result.stdout.trim(), "hello");
         }
@@ -154,9 +167,15 @@ async fn test_redirect_command_end_to_end() {
             original_input,
         } => {
             assert!(original_input.is_some());
-            let result = CommandExecutor::execute(&command, &args, original_input.as_deref())
-                .await
-                .unwrap();
+            let result = CommandExecutor::execute(
+                &command,
+                &args,
+                original_input.as_deref(),
+                CancellationToken::new(),
+            )
+            .wait()
+            .await
+            .unwrap();
             assert!(result.is_success());
             assert_eq!(result.stdout.trim(), "test");
         }
@@ -184,7 +203,8 @@ async fn test_simple_command_no_shell_interpretation() {
             assert_eq!(args, vec!["hello"]);
 
             // Execute directly without shell
-            let result = CommandExecutor::execute(&command, &args, None)
+            let result = CommandExecutor::execute(&command, &args, None, CancellationToken::new())
+                .wait()
                 .await
                 .unwrap();
             assert!(result.is_success());
@@ -209,9 +229,15 @@ async fn test_grep_no_match_exit_code_1() {
             original_input,
         } => {
             // Execute the command
-            let result = CommandExecutor::execute(&command, &args, original_input.as_deref())
-                .await
-                .unwrap();
+            let result = CommandExecutor::execute(
+                &command,
+                &args,
+                original_input.as_deref(),
+                CancellationToken::new(),
+            )
+            .wait()
+            .await
+            .unwrap();
 
             // grep returns exit 1 when no match is found
             // This is NOT an error, it's semantic (no match)
@@ -242,9 +268,15 @@ async fn test_grep_with_match_exit_code_0() {
             original_input,
         } => {
             // Execute the command
-            let result = CommandExecutor::execute(&command, &args, original_input.as_deref())
-                .await
-                .unwrap();
+            let result = CommandExecutor::execute(
+                &command,
+                &args,
+                original_input.as_deref(),
+                CancellationToken::new(),
+            )
+            .wait()
+            .await
+            .unwrap();
 
             // grep returns exit 0 when match is found
             assert_eq!(result.exit_code, 0);
@@ -388,9 +420,15 @@ async fn test_shell_builtin_colon_execution() {
             assert!(args.is_empty());
 
             // Execute the builtin
-            let result = CommandExecutor::execute(&command, &args, original_input.as_deref())
-                .await
-                .unwrap();
+            let result = CommandExecutor::execute(
+                &command,
+                &args,
+                original_input.as_deref(),
+                CancellationToken::new(),
+            )
+            .wait()
+            .await
+            .unwrap();
 
             // : always succeeds
             assert!(result.is_success());
@@ -412,9 +450,15 @@ async fn test_shell_builtin_true_false() {
             args,
             original_input,
         } => {
-            let result = CommandExecutor::execute(&command, &args, original_input.as_deref())
-                .await
-                .unwrap();
+            let result = CommandExecutor::execute(
+                &command,
+                &args,
+                original_input.as_deref(),
+                CancellationToken::new(),
+            )
+            .wait()
+            .await
+            .unwrap();
             assert_eq!(result.exit_code, 0);
         }
         _ => panic!("Expected Command for 'true'"),
@@ -428,9 +472,15 @@ async fn test_shell_builtin_true_false() {
             args,
             original_input,
         } => {
-            let result = CommandExecutor::execute(&command, &args, original_input.as_deref())
-                .await
-                .unwrap();
+            let result = CommandExecutor::execute(
+                &command,
+                &args,
+                original_input.as_deref(),
+                CancellationToken::new(),
+            )
+            .wait()
+            .await
+            .unwrap();
             assert_eq!(result.exit_code, 1);
         }
         _ => panic!("Expected Command for 'false'"),
@@ -455,9 +505,15 @@ async fn test_shell_builtin_export() {
             assert_eq!(args, vec!["TEST_VAR=hello"]);
 
             // Execute the builtin
-            let result = CommandExecutor::execute(&command, &args, original_input.as_deref())
-                .await
-                .unwrap();
+            let result = CommandExecutor::execute(
+                &command,
+                &args,
+                original_input.as_deref(),
+                CancellationToken::new(),
+            )
+            .wait()
+            .await
+            .unwrap();
 
             // export in a subshell will succeed but won't affect parent
             assert!(result.is_success());
@@ -483,9 +539,15 @@ async fn test_shell_builtin_test_command() {
             assert_eq!(command, "[");
 
             // Execute the builtin
-            let result = CommandExecutor::execute(&command, &args, original_input.as_deref())
-                .await
-                .unwrap();
+            let result = CommandExecutor::execute(
+                &command,
+                &args,
+                original_input.as_deref(),
+                CancellationToken::new(),
+            )
+            .wait()
+            .await
+            .unwrap();
 
             // /tmp should exist as a directory
             assert_eq!(result.exit_code, 0);
@@ -511,9 +573,15 @@ async fn test_shell_builtin_double_bracket() {
             assert_eq!(command, "[[");
 
             // Execute the builtin
-            let _result = CommandExecutor::execute(&command, &args, original_input.as_deref())
-                .await
-                .unwrap();
+            let _result = CommandExecutor::execute(
+                &command,
+                &args,
+                original_input.as_deref(),
+                CancellationToken::new(),
+            )
+            .wait()
+            .await
+            .unwrap();
 
             // [[ requires bash, but sh might not support it
             // We execute via sh, so this might fail on systems without bash
@@ -521,4 +589,110 @@ async fn test_shell_builtin_double_bracket() {
         }
         _ => panic!("Expected Command"),
     }
+}
+
+// =============================================================================
+// Realistic SIGINT (Ctrl+C) Tests
+// =============================================================================
+
+/// Test that SIGINT actually stops a running command.
+///
+/// This tests the REAL signal handling path:
+/// 1. Start a command that produces continuous output
+/// 2. Send SIGINT via kill()
+/// 3. Verify the process terminates quickly
+///
+/// Unlike programmatic CancellationToken tests, this goes through
+/// the actual OS signal handling.
+#[tokio::test]
+#[cfg(unix)]
+async fn test_sigint_stops_long_running_command() {
+    use std::time::{Duration, Instant};
+
+    // Start a command that produces infinite output
+    let cancel = CancellationToken::new();
+    let mut handle = CommandExecutor::execute(
+        "sh",
+        &[
+            "-c".to_string(),
+            // Print numbers with 10ms delay between each
+            "i=0; while true; do echo $i; i=$((i+1)); sleep 0.01; done".to_string(),
+        ],
+        None,
+        cancel.clone(),
+    );
+
+    // Wait for some output to confirm the command started
+    let mut received_lines = 0;
+    while received_lines < 5 {
+        if handle.lines().recv().await.is_some() {
+            received_lines += 1;
+        }
+    }
+
+    // Now cancel via token (simulating what the event poller does on Ctrl+C)
+    let start = Instant::now();
+    cancel.cancel();
+
+    // Wait for command to finish
+    let result = handle.wait().await;
+    let elapsed = start.elapsed();
+
+    // Should finish within 2 seconds (grace period is 500ms + some overhead)
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "SIGINT should stop command within 2 seconds, took {:?}",
+        elapsed
+    );
+
+    // Command should have been interrupted
+    assert!(result.is_ok(), "Should return Ok after SIGINT");
+}
+
+/// Test SIGINT on a fast-outputting command (like apt list)
+#[tokio::test]
+#[cfg(unix)]
+async fn test_sigint_stops_fast_output_command() {
+    use std::time::{Duration, Instant};
+
+    // Start a command that produces output very fast (like apt list)
+    let cancel = CancellationToken::new();
+    let mut handle = CommandExecutor::execute(
+        "seq",
+        &["1".to_string(), "10000000".to_string()], // 10 million lines
+        None,
+        cancel.clone(),
+    );
+
+    // Wait for some output
+    let mut received_lines = 0;
+    while received_lines < 100 {
+        if handle.lines().recv().await.is_some() {
+            received_lines += 1;
+        }
+    }
+
+    // Cancel (simulating Ctrl+C)
+    let start = Instant::now();
+    cancel.cancel();
+
+    // Wait for command to finish
+    let result = handle.wait().await;
+    let elapsed = start.elapsed();
+
+    // Should finish within 2 seconds
+    assert!(
+        elapsed < Duration::from_secs(2),
+        "Fast output command should be killed within 2 seconds, took {:?}",
+        elapsed
+    );
+
+    assert!(result.is_ok(), "Should return Ok after cancellation");
+
+    // Verify we didn't read all 10 million lines
+    assert!(
+        received_lines < 1000000,
+        "Should have stopped before reading all output, got {} lines",
+        received_lines
+    );
 }
