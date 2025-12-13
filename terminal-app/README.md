@@ -426,6 +426,7 @@ xdg-open target/criterion/report/index.html  # Linux
 - PATH lookup (cache miss): 1-5ms
 - Background job check (read path, no jobs): <1μs
 - Job polling interval: 250ms (balances responsiveness vs lock contention)
+- LLM query throbber animation: 10 FPS (100ms render interval for smooth visual feedback)
 
 ## 📝 Development Status
 

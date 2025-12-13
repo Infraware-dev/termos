@@ -11,7 +11,14 @@ use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 /// Render interval for throbber animation during LLM queries (~10 FPS)
-/// This controls how often the UI is refreshed while waiting for LLM response
+///
+/// Why 100ms:
+/// - Provides smooth visual feedback (10 FPS is fluid for simple loading animations)
+/// - Balances responsiveness vs CPU overhead during potentially long LLM queries
+/// - Consistent with `ANIMATION_INTERVAL_MS` in `throbber.rs`
+///
+/// Trade-offs: Higher values reduce CPU usage but make animation choppier.
+/// Lower values give smoother animation but increase render overhead.
 const RENDER_INTERVAL_MS: u64 = 100;
 
 use crate::llm::{LLMClientTrait, LLMQueryResult, ResponseRenderer};
@@ -57,7 +64,7 @@ impl NaturalLanguageOrchestrator {
     /// - Error handling
     /// - Cancellation support (via CancellationToken)
     ///
-    /// The render loop runs at ~60 FPS (16ms intervals) to show the throbber animation
+    /// The render loop runs at ~10 FPS (100ms intervals) to show the throbber animation
     /// while waiting for the LLM response.
     pub async fn handle_query(
         &self,
@@ -74,11 +81,11 @@ impl NaturalLanguageOrchestrator {
         log::info!("Calling LLM client...");
 
         // Pin the future so we can poll it multiple times in the render loop
-        let mut llm_future = std::pin::pin!(
-            self.llm_client.query_cancellable(query, cancel_token.clone())
-        );
+        let mut llm_future = std::pin::pin!(self
+            .llm_client
+            .query_cancellable(query, cancel_token.clone()));
 
-        // Render loop with 16ms timeout for ~60 FPS throbber animation
+        // Render loop with 100ms timeout for ~10 FPS throbber animation
         // This ensures the throbber is visible during LLM queries
         loop {
             tokio::select! {
@@ -119,6 +126,9 @@ impl NaturalLanguageOrchestrator {
                 }
             }
         }
+
+        // Final render to ensure UI reflects stopped throbber immediately
+        ui.render(state)?;
 
         Ok(())
     }

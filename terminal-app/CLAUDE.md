@@ -76,6 +76,8 @@ Chain of Responsibility with 11 handlers. **Order enforced by `HandlerPosition` 
 | Add keyboard shortcut | `src/terminal/events.rs` → `EventHandler::map_key_event()` |
 | Add terminal event | `src/terminal/events.rs` → `TerminalEvent` enum |
 | Modify TUI rendering | `src/terminal/tui.rs` |
+| Modify throbber animation | `src/terminal/throbber.rs` (change `ANIMATION_INTERVAL_MS` constant) |
+| Modify LLM render loop | `src/orchestrators/natural_language.rs` (change `RENDER_INTERVAL_MS` constant) |
 | Add package manager | `src/executor/package_manager.rs` |
 | Add shell confirmation | `src/orchestrators/command.rs` → `ConfirmationType` enum |
 | Language patterns | `config/language.toml` |
@@ -85,7 +87,7 @@ Chain of Responsibility with 11 handlers. **Order enforced by `HandlerPosition` 
 
 | Directory | Purpose |
 |-----------|---------|
-| `terminal/` | TUI: `tui.rs` (rendering/suspend/resume), `buffers.rs` (SRP), `events.rs` (keyboard), `state.rs` (modes/root/animation) |
+| `terminal/` | TUI: `tui.rs` (rendering/suspend/resume), `buffers.rs` (SRP), `events.rs` (keyboard), `state.rs` (modes/root), `throbber.rs` (animation thread) |
 | `input/` | SCAN: `classifier.rs` (coordinator), `handler.rs` (chain), `patterns.rs` (regex) |
 | `executor/` | Execution: `command.rs` (async batch), `job_manager.rs` (background `&`) |
 | `orchestrators/` | Workflows: `command.rs`, `natural_language.rs`, `tab_completion.rs` |
@@ -156,7 +158,12 @@ Terminal detects `sudo su`, `su`, `su -` commands and enters root mode:
 `&` suffix → `JobManager` with `Arc<RwLock>`. 250ms polling interval. Lock poisoning triggers fail-fast per Microsoft guidelines.
 
 ### LLM Integration (HITL)
-`HttpLLMClient` with SSE streaming. `LLMQueryResult` enum: `Complete`, `CommandApproval`, `Question`. Resume via `resume_run()` or `resume_with_answer()`. Animated blinking cursor (█) during LLM wait state via `animation_elapsed()` in `TerminalState`.
+`HttpLLMClient` with SSE streaming. `LLMQueryResult` enum: `Complete`, `CommandApproval`, `Question`. Resume via `resume_run()` or `resume_with_answer()`. Animated throbber during LLM wait state:
+- **Throbber Animation**: 10 FPS (100ms `ANIMATION_INTERVAL_MS` in `throbber.rs`)
+- **Render Loop**: `NaturalLanguageOrchestrator::handle_query()` renders at 10 FPS via `RENDER_INTERVAL_MS` (100ms)
+- **Visual States**: Animated braille symbols (⠘⠙⠚⠒) in `WaitingLLM` mode; static `|~|` in other modes
+- **Controls**: `start_throbber()` / `stop_throbber()` in `TerminalState`
+- **Prompt Prefix**: `get_prompt_prefix()` returns animated symbol only when `WaitingLLM` mode active
 
 ### Error Handling
 Use `anyhow::Result`. Display user-friendly messages, never crash.

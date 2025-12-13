@@ -675,7 +675,7 @@ fn test_prompt_prefix_static_in_normal_mode() {
     let state = TerminalState::new();
     // Even if throbber is running, Normal mode shows static tilde
     state.start_throbber();
-    std::thread::sleep(std::time::Duration::from_millis(30));
+    std::thread::sleep(std::time::Duration::from_millis(150));
 
     assert_eq!(state.get_prompt_prefix(), "|~|");
     state.stop_throbber();
@@ -686,7 +686,7 @@ fn test_prompt_prefix_static_in_executing_command_mode() {
     let mut state = TerminalState::new();
     state.mode = TerminalMode::ExecutingCommand;
     state.start_throbber();
-    std::thread::sleep(std::time::Duration::from_millis(30));
+    std::thread::sleep(std::time::Duration::from_millis(150));
 
     // ExecutingCommand mode should show static tilde
     assert_eq!(state.get_prompt_prefix(), "|~|");
@@ -698,7 +698,7 @@ fn test_prompt_prefix_animates_in_waiting_llm_mode() {
     let mut state = TerminalState::new();
     state.mode = TerminalMode::WaitingLLM;
     state.start_throbber();
-    std::thread::sleep(std::time::Duration::from_millis(30));
+    std::thread::sleep(std::time::Duration::from_millis(150));
 
     // WaitingLLM mode should show animated symbol
     let prefix = state.get_prompt_prefix();
@@ -724,7 +724,7 @@ fn test_animation_only_during_waiting_llm() {
 
     // Start throbber
     state.start_throbber();
-    std::thread::sleep(std::time::Duration::from_millis(30));
+    std::thread::sleep(std::time::Duration::from_millis(150));
 
     // Normal mode - static
     state.mode = TerminalMode::Normal;

@@ -59,7 +59,7 @@ impl ThrobberAnimator {
 
     /// Start the animation thread
     ///
-    /// Spawns a dedicated thread that increments the animation index every 16ms (~60 FPS).
+    /// Spawns a dedicated thread that increments the animation index every 100ms (~10 FPS).
     /// This method is idempotent - calling it multiple times has no effect if
     /// animation is already running.
     ///
@@ -98,7 +98,7 @@ impl ThrobberAnimator {
     /// Stop the animation thread
     ///
     /// Signals the animation thread to stop. The thread will exit on its
-    /// next iteration (within ~16ms).
+    /// next iteration (within ~100ms).
     ///
     /// # Thread Safety
     /// Safe to call from any thread. Idempotent.
@@ -169,8 +169,8 @@ mod tests {
         let animator = ThrobberAnimator::new();
         animator.start();
         animator.stop();
-        // Give thread time to stop (at 16ms interval, 50ms is plenty)
-        thread::sleep(Duration::from_millis(50));
+        // Give thread time to stop (at 100ms interval, 150ms is plenty)
+        thread::sleep(Duration::from_millis(150));
         assert!(!animator.is_running());
     }
 
@@ -182,7 +182,7 @@ mod tests {
         animator.start(); // Should be no-op
         animator.start(); // Should be no-op
                           // Index should continue, not reset
-        thread::sleep(Duration::from_millis(50));
+        thread::sleep(Duration::from_millis(150));
         assert!(animator.frame_index() >= idx1);
         animator.stop();
     }
