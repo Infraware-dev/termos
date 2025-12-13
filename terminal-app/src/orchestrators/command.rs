@@ -427,11 +427,16 @@ impl CommandOrchestrator {
             };
 
         // Start streaming execution with cancellation support (Ctrl+C)
-        let (mut rx, handle) =
-            CommandExecutor::execute_streaming(&exec_cmd, &exec_args, exec_input.as_deref(), cancel_token);
+        let mut handle =
+            CommandExecutor::execute(&exec_cmd, &exec_args, exec_input.as_deref(), cancel_token);
+
+        // Throttle rendering to 60fps (16ms) to avoid O(N²) performance issues
+        // Without throttling, each render re-parses ALL lines with ANSI codes
+        let mut last_render = std::time::Instant::now();
+        const RENDER_INTERVAL: std::time::Duration = std::time::Duration::from_millis(16);
 
         // Stream lines in real-time
-        while let Some(line) = rx.recv().await {
+        while let Some(line) = handle.lines().recv().await {
             // Skip stderr prefix for display (it's just for identification)
             let display_line = if line.starts_with("[stderr] ") {
                 line.strip_prefix("[stderr] ").unwrap_or(&line).to_string()
@@ -441,27 +446,33 @@ impl CommandOrchestrator {
 
             state.add_output(display_line);
 
-            // Re-render to show the new line immediately
-            if let Err(e) = ui.render(state) {
-                log::warn!("Failed to render during streaming: {}", e);
+            // Throttle renders to 60fps max to prevent UI lag on fast output
+            // This reduces renders from 5000 to ~300 for apt list
+            if last_render.elapsed() >= RENDER_INTERVAL {
+                if let Err(e) = ui.render(state) {
+                    log::warn!("Failed to render during streaming: {}", e);
+                }
+                last_render = std::time::Instant::now();
             }
         }
 
+        // Final render to show any remaining lines that weren't rendered
+        if let Err(e) = ui.render(state) {
+            log::warn!("Failed to render final output: {}", e);
+        }
+
         // Wait for the command to complete and get final result
-        match handle.await {
-            Ok(Ok(output)) => {
+        match handle.wait().await {
+            Ok(output) => {
                 // Only show "Command failed" for truly problematic exit codes
                 // Exit code 1 is often used semantically (grep no match, diff found differences)
                 if !output.is_success() && !self.is_benign_failure(&output) {
                     state.add_output(MessageFormatter::command_failed(output.exit_code));
                 }
             }
-            Ok(Err(e)) => {
-                state.add_output(MessageFormatter::execution_error(e.to_string()));
-            }
             Err(e) => {
                 state.add_output(MessageFormatter::execution_error(format!(
-                    "Command task failed: {}",
+                    "Command execution failed: {}",
                     e
                 )));
             }
@@ -1035,12 +1046,14 @@ impl CommandOrchestrator {
 
     /// Helper to execute a shell command and display output
     async fn execute_shell_command(&self, cmd: &str, state: &mut TerminalState) -> Result<()> {
-        let output = crate::executor::CommandExecutor::execute(
+        let cancel_token = tokio_util::sync::CancellationToken::new();
+        let handle = crate::executor::CommandExecutor::execute(
             "sh",
             &["-c".to_string(), cmd.to_string()],
             None,
-        )
-        .await;
+            cancel_token,
+        );
+        let output = handle.wait().await;
 
         match output {
             Ok(out) => {
@@ -1242,7 +1255,9 @@ mod tests {
     #[tokio::test]
     async fn test_execute_simple_command() {
         // Test via CommandExecutor directly (orchestrator just streams to UI)
-        let output = CommandExecutor::execute("echo", &["hello".to_string()], None)
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let output = CommandExecutor::execute("echo", &["hello".to_string()], None, cancel)
+            .wait()
             .await
             .unwrap();
 
@@ -1253,10 +1268,16 @@ mod tests {
     #[tokio::test]
     async fn test_execute_command_with_failure() {
         // Test via CommandExecutor directly
-        let output =
-            CommandExecutor::execute("sh", &["-c".to_string(), "exit 1".to_string()], None)
-                .await
-                .unwrap();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let output = CommandExecutor::execute(
+            "sh",
+            &["-c".to_string(), "exit 1".to_string()],
+            None,
+            cancel,
+        )
+        .wait()
+        .await
+        .unwrap();
 
         // Exit 1 is benign failure
         assert!(!output.is_success());
@@ -1266,11 +1287,14 @@ mod tests {
     #[tokio::test]
     async fn test_execute_command_with_stderr_success() {
         // Test via CommandExecutor directly
+        let cancel = tokio_util::sync::CancellationToken::new();
         let output = CommandExecutor::execute(
             "sh",
             &["-c".to_string(), "echo warning >&2".to_string()],
             None,
+            cancel,
         )
+        .wait()
         .await
         .unwrap();
 
@@ -1281,11 +1305,14 @@ mod tests {
     #[tokio::test]
     async fn test_execute_command_with_stderr_failure() {
         // Test via CommandExecutor directly
+        let cancel = tokio_util::sync::CancellationToken::new();
         let output = CommandExecutor::execute(
             "sh",
             &["-c".to_string(), "echo error >&2; exit 1".to_string()],
             None,
+            cancel,
         )
+        .wait()
         .await
         .unwrap();
 
@@ -1308,7 +1335,10 @@ mod tests {
     #[tokio::test]
     async fn test_execute_nonexistent_command() {
         // Test via CommandExecutor directly
-        let result = CommandExecutor::execute("nonexistentcmd123", &[], None).await;
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let result = CommandExecutor::execute("nonexistentcmd123", &[], None, cancel)
+            .wait()
+            .await;
 
         // Should fail (command not found)
         assert!(result.is_err());
@@ -1317,7 +1347,11 @@ mod tests {
     #[tokio::test]
     async fn test_execute_command_empty_output() {
         // Test via CommandExecutor directly
-        let output = CommandExecutor::execute("true", &[], None).await.unwrap();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let output = CommandExecutor::execute("true", &[], None, cancel)
+            .wait()
+            .await
+            .unwrap();
 
         // true command produces no output
         assert!(output.is_success());
@@ -1327,10 +1361,16 @@ mod tests {
     #[tokio::test]
     async fn test_grep_no_match_exit_1_benign() {
         // Test via CommandExecutor directly
-        let output =
-            CommandExecutor::execute("sh", &[], Some("echo 'hello world' | grep 'nonexistent'"))
-                .await
-                .unwrap();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let output = CommandExecutor::execute(
+            "sh",
+            &[],
+            Some("echo 'hello world' | grep 'nonexistent'"),
+            cancel,
+        )
+        .wait()
+        .await
+        .unwrap();
 
         // grep with no match returns exit 1 (benign, not an error)
         assert_eq!(output.exit_code, 1);
@@ -1342,10 +1382,16 @@ mod tests {
     #[tokio::test]
     async fn test_exit_code_2_shows_error() {
         // Test via CommandExecutor directly
-        let output =
-            CommandExecutor::execute("sh", &["-c".to_string(), "exit 2".to_string()], None)
-                .await
-                .unwrap();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let output = CommandExecutor::execute(
+            "sh",
+            &["-c".to_string(), "exit 2".to_string()],
+            None,
+            cancel,
+        )
+        .wait()
+        .await
+        .unwrap();
 
         // Exit code 2 is NOT benign
         assert_eq!(output.exit_code, 2);
