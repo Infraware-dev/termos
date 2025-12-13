@@ -341,8 +341,17 @@ async fn execute_with_limit(
                     lines.next_line().await
                 }
             } else {
-                // After SIGINT, just read remaining output without cancellation check
-                lines.next_line().await
+                // After SIGINT, read remaining output with timeout to avoid blocking forever
+                // Give the process 500ms to produce final output (e.g., ping statistics)
+                match tokio::time::timeout(Duration::from_millis(500), lines.next_line()).await {
+                    Ok(result) => result,
+                    Err(_) => {
+                        // Timeout - process didn't close stdout, force kill it
+                        log::debug!("Timeout waiting for output after SIGINT, killing process");
+                        child.kill().await.ok();
+                        break;
+                    }
+                }
             };
 
             match line_result {
