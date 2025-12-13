@@ -1591,4 +1591,371 @@ mod tests {
         let result = CommandOrchestrator::remove_flag_from_command(cmd, "-I");
         assert_eq!(result, "rm -r file1");
     }
+
+    // ==================== State Detection Tests ====================
+
+    #[test]
+    fn test_is_waiting_for_sudo_password() {
+        let mut state = TerminalState::new();
+
+        // Initially not waiting for sudo password
+        assert!(!CommandOrchestrator::is_waiting_for_sudo_password(&state));
+
+        // Set up sudo password prompt
+        state.pending_interaction = Some(crate::terminal::PendingInteraction::Question {
+            question: "[sudo] password: ".to_string(),
+            options: None,
+        });
+        assert!(CommandOrchestrator::is_waiting_for_sudo_password(&state));
+
+        // Different question should not match
+        state.pending_interaction = Some(crate::terminal::PendingInteraction::Question {
+            question: "What is your name?".to_string(),
+            options: None,
+        });
+        assert!(!CommandOrchestrator::is_waiting_for_sudo_password(&state));
+
+        // Command approval should not match
+        state.pending_interaction = Some(crate::terminal::PendingInteraction::CommandApproval {
+            command: "rm file".to_string(),
+            message: "Remove file?".to_string(),
+            confirmation_type: None,
+        });
+        assert!(!CommandOrchestrator::is_waiting_for_sudo_password(&state));
+
+        // None should not match
+        state.pending_interaction = None;
+        assert!(!CommandOrchestrator::is_waiting_for_sudo_password(&state));
+    }
+
+    #[test]
+    fn test_is_shell_confirmation() {
+        let mut state = TerminalState::new();
+
+        // Initially no shell confirmation
+        assert!(!CommandOrchestrator::is_shell_confirmation(&state));
+
+        // LLM approval (no confirmation_type) is NOT a shell confirmation
+        state.pending_interaction = Some(crate::terminal::PendingInteraction::CommandApproval {
+            command: "docker ps".to_string(),
+            message: "Run this command?".to_string(),
+            confirmation_type: None,
+        });
+        assert!(!CommandOrchestrator::is_shell_confirmation(&state));
+
+        // Shell confirmation with RmWriteProtected IS a shell confirmation
+        state.pending_interaction = Some(crate::terminal::PendingInteraction::CommandApproval {
+            command: "rm protected.txt".to_string(),
+            message: "rm: remove write-protected file(s): protected.txt?".to_string(),
+            confirmation_type: Some(crate::terminal::ConfirmationType::RmWriteProtected),
+        });
+        assert!(CommandOrchestrator::is_shell_confirmation(&state));
+
+        // Shell confirmation with RmInteractive IS a shell confirmation
+        state.pending_interaction = Some(crate::terminal::PendingInteraction::CommandApproval {
+            command: "rm -i file.txt".to_string(),
+            message: "rm: remove regular file 'file.txt'?".to_string(),
+            confirmation_type: Some(crate::terminal::ConfirmationType::RmInteractive {
+                files: vec!["file.txt".to_string()],
+                current_index: 0,
+                command: "rm -i file.txt".to_string(),
+            }),
+        });
+        assert!(CommandOrchestrator::is_shell_confirmation(&state));
+
+        // Question is NOT a shell confirmation
+        state.pending_interaction = Some(crate::terminal::PendingInteraction::Question {
+            question: "What do you want to do?".to_string(),
+            options: None,
+        });
+        assert!(!CommandOrchestrator::is_shell_confirmation(&state));
+    }
+
+    // ==================== Helper Function Tests ====================
+
+    #[test]
+    fn test_get_file_args() {
+        // Only flags
+        let args = vec!["-r".to_string(), "-f".to_string()];
+        assert!(CommandOrchestrator::get_file_args(&args).is_empty());
+
+        // Only files
+        let args = vec!["file1.txt".to_string(), "file2.txt".to_string()];
+        let result = CommandOrchestrator::get_file_args(&args);
+        assert_eq!(result.len(), 2);
+        assert_eq!(*result[0], "file1.txt");
+        assert_eq!(*result[1], "file2.txt");
+
+        // Mixed flags and files
+        let args = vec![
+            "-rf".to_string(),
+            "file1.txt".to_string(),
+            "--force".to_string(),
+            "file2.txt".to_string(),
+        ];
+        let result = CommandOrchestrator::get_file_args(&args);
+        assert_eq!(result.len(), 2);
+        assert_eq!(*result[0], "file1.txt");
+        assert_eq!(*result[1], "file2.txt");
+
+        // Empty args
+        let args: Vec<String> = vec![];
+        assert!(CommandOrchestrator::get_file_args(&args).is_empty());
+    }
+
+    #[test]
+    fn test_build_command_string() {
+        // With original_input
+        let result =
+            CommandOrchestrator::build_command_string(Some("ls -la | grep foo"), "ls", &[]);
+        assert_eq!(result, "ls -la | grep foo");
+
+        // Without original_input, no args
+        let result = CommandOrchestrator::build_command_string(None, "ls", &[]);
+        assert_eq!(result, "ls");
+
+        // Without original_input, with args
+        let result = CommandOrchestrator::build_command_string(
+            None,
+            "rm",
+            &["-rf".to_string(), "dir".to_string()],
+        );
+        assert_eq!(result, "rm -rf dir");
+    }
+
+    #[test]
+    fn test_add_force_flag() {
+        // Add to rm command
+        let result = CommandOrchestrator::add_force_flag("rm file.txt", "rm");
+        assert_eq!(result, "rm -f file.txt");
+
+        // Add to cp command
+        let result = CommandOrchestrator::add_force_flag("cp src dest", "cp");
+        assert_eq!(result, "cp -f src dest");
+
+        // Add to mv command with flags
+        let result = CommandOrchestrator::add_force_flag("mv -i src dest", "mv");
+        assert_eq!(result, "mv -f -i src dest");
+    }
+
+    #[test]
+    fn test_has_flag_with_long_form() {
+        // --force matches
+        assert!(CommandOrchestrator::has_flag(
+            &["--force".to_string()],
+            'f',
+            Some("--force"),
+            None
+        ));
+
+        // --recursive matches
+        assert!(CommandOrchestrator::has_flag(
+            &["--recursive".to_string()],
+            'r',
+            Some("--recursive"),
+            None
+        ));
+
+        // Wrong long form doesn't match
+        assert!(!CommandOrchestrator::has_flag(
+            &["--verbose".to_string()],
+            'f',
+            Some("--force"),
+            None
+        ));
+    }
+
+    #[test]
+    fn test_needs_cp_mv_confirmation_no_interactive() {
+        // Without -i flag
+        let args = vec!["src.txt".to_string(), "dest.txt".to_string()];
+        assert!(CommandOrchestrator::needs_cp_mv_confirmation(&args).is_none());
+    }
+
+    #[test]
+    fn test_needs_cp_mv_confirmation_with_force() {
+        // With both -i and -f, force wins
+        let args = vec![
+            "-if".to_string(),
+            "src.txt".to_string(),
+            "dest.txt".to_string(),
+        ];
+        assert!(CommandOrchestrator::needs_cp_mv_confirmation(&args).is_none());
+    }
+
+    #[test]
+    fn test_needs_cp_mv_confirmation_no_destination() {
+        // Only one file (no destination)
+        let args = vec!["-i".to_string(), "src.txt".to_string()];
+        assert!(CommandOrchestrator::needs_cp_mv_confirmation(&args).is_none());
+    }
+
+    #[test]
+    fn test_needs_ln_confirmation_no_interactive() {
+        // Without -i flag
+        let args = vec!["src.txt".to_string(), "link.txt".to_string()];
+        assert!(CommandOrchestrator::needs_ln_confirmation(&args).is_none());
+    }
+
+    #[test]
+    fn test_needs_ln_confirmation_with_force() {
+        // With both -i and -f
+        let args = vec![
+            "-if".to_string(),
+            "src.txt".to_string(),
+            "link.txt".to_string(),
+        ];
+        assert!(CommandOrchestrator::needs_ln_confirmation(&args).is_none());
+    }
+
+    #[test]
+    fn test_needs_ln_confirmation_nonexistent_dest() {
+        // Destination doesn't exist
+        let args = vec![
+            "-i".to_string(),
+            "/tmp".to_string(),
+            "/nonexistent/link/path".to_string(),
+        ];
+        assert!(CommandOrchestrator::needs_ln_confirmation(&args).is_none());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_user_can_write_file_writable() {
+        // /tmp is typically writable
+        use std::path::Path;
+        assert!(CommandOrchestrator::user_can_write_file(Path::new("/tmp")));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_user_can_write_file_readonly() {
+        // /etc is typically not writable by normal users
+        use std::path::Path;
+        // This test is only valid for non-root users
+        if unsafe { libc::getuid() } != 0 {
+            assert!(!CommandOrchestrator::user_can_write_file(Path::new(
+                "/etc/passwd"
+            )));
+        }
+    }
+
+    #[test]
+    fn test_needs_rm_confirmation_with_force() {
+        // -f flag skips confirmation
+        let args = vec!["-f".to_string(), "protected.txt".to_string()];
+        assert!(CommandOrchestrator::needs_rm_confirmation(&args).is_none());
+    }
+
+    #[test]
+    fn test_needs_rm_confirmation_nonexistent() {
+        // Non-existent files don't need confirmation
+        let args = vec!["/nonexistent/file/path/xyz.txt".to_string()];
+        assert!(CommandOrchestrator::needs_rm_confirmation(&args).is_none());
+    }
+
+    // ==================== Confirmation Type Tests ====================
+
+    #[test]
+    fn test_confirmation_type_debug() {
+        let rm_write = crate::terminal::ConfirmationType::RmWriteProtected;
+        let debug_str = format!("{:?}", rm_write);
+        assert!(debug_str.contains("RmWriteProtected"));
+
+        let rm_interactive = crate::terminal::ConfirmationType::RmInteractive {
+            files: vec!["a.txt".to_string()],
+            current_index: 0,
+            command: "rm -i a.txt".to_string(),
+        };
+        let debug_str = format!("{:?}", rm_interactive);
+        assert!(debug_str.contains("RmInteractive"));
+        assert!(debug_str.contains("a.txt"));
+
+        let rm_bulk = crate::terminal::ConfirmationType::RmInteractiveBulk {
+            file_count: 5,
+            is_recursive: true,
+        };
+        let debug_str = format!("{:?}", rm_bulk);
+        assert!(debug_str.contains("RmInteractiveBulk"));
+        assert!(debug_str.contains("5"));
+
+        let cp = crate::terminal::ConfirmationType::CpInteractive {
+            destination: "dest.txt".to_string(),
+        };
+        let debug_str = format!("{:?}", cp);
+        assert!(debug_str.contains("CpInteractive"));
+
+        let mv = crate::terminal::ConfirmationType::MvInteractive {
+            destination: "dest.txt".to_string(),
+        };
+        let debug_str = format!("{:?}", mv);
+        assert!(debug_str.contains("MvInteractive"));
+
+        let ln = crate::terminal::ConfirmationType::LnInteractive {
+            destination: "link.txt".to_string(),
+        };
+        let debug_str = format!("{:?}", ln);
+        assert!(debug_str.contains("LnInteractive"));
+    }
+
+    #[test]
+    fn test_confirmation_type_clone_eq() {
+        let rm_write1 = crate::terminal::ConfirmationType::RmWriteProtected;
+        let rm_write2 = rm_write1.clone();
+        assert_eq!(rm_write1, rm_write2);
+
+        let bulk1 = crate::terminal::ConfirmationType::RmInteractiveBulk {
+            file_count: 5,
+            is_recursive: true,
+        };
+        let bulk2 = bulk1.clone();
+        assert_eq!(bulk1, bulk2);
+
+        let bulk3 = crate::terminal::ConfirmationType::RmInteractiveBulk {
+            file_count: 3,
+            is_recursive: false,
+        };
+        assert_ne!(bulk1, bulk3);
+    }
+
+    // ==================== Pending Interaction Tests ====================
+
+    #[test]
+    fn test_pending_interaction_debug() {
+        let approval = crate::terminal::PendingInteraction::CommandApproval {
+            command: "rm -rf /".to_string(),
+            message: "Are you sure?".to_string(),
+            confirmation_type: None,
+        };
+        let debug_str = format!("{:?}", approval);
+        assert!(debug_str.contains("CommandApproval"));
+        assert!(debug_str.contains("rm -rf"));
+
+        let question = crate::terminal::PendingInteraction::Question {
+            question: "What is your name?".to_string(),
+            options: Some(vec!["Alice".to_string(), "Bob".to_string()]),
+        };
+        let debug_str = format!("{:?}", question);
+        assert!(debug_str.contains("Question"));
+        assert!(debug_str.contains("Alice"));
+    }
+
+    #[test]
+    fn test_pending_interaction_clone() {
+        let approval = crate::terminal::PendingInteraction::CommandApproval {
+            command: "ls".to_string(),
+            message: "List?".to_string(),
+            confirmation_type: Some(crate::terminal::ConfirmationType::RmWriteProtected),
+        };
+        let cloned = approval.clone();
+        match cloned {
+            crate::terminal::PendingInteraction::CommandApproval {
+                command, message, ..
+            } => {
+                assert_eq!(command, "ls");
+                assert_eq!(message, "List?");
+            }
+            _ => panic!("Expected CommandApproval"),
+        }
+    }
 }
