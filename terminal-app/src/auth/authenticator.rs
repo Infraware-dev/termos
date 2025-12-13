@@ -128,11 +128,12 @@ impl Authenticator for HttpAuthenticator {
 ///
 /// Always succeeds authentication without making network calls.
 #[derive(Debug, Default)]
+#[cfg_attr(not(test), allow(dead_code))]
 pub struct MockAuthenticator;
 
 impl MockAuthenticator {
     /// Create a new mock authenticator
-    #[expect(dead_code, reason = "Constructor for test mock")]
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn new() -> Self {
         Self
     }

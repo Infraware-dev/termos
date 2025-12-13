@@ -23,7 +23,7 @@ pub struct AuthResponse {
 pub struct AuthStatus {
     pub authenticated: bool,
     /// Whether the backend has an API key configured
-    #[expect(dead_code, reason = "Deserialized from API response, available for M2/M3")]
+    #[cfg_attr(not(test), allow(dead_code))]
     pub has_api_key: bool,
 }
 
