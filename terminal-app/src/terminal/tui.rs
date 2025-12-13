@@ -244,8 +244,15 @@ fn render_unified_content(
         // Use continuation prompt for multiline input
         "> ".to_string()
     } else {
-        // Normal prompt (cached for performance)
-        state.get_prompt()
+        // Normal prompt with dynamic throbber prefix for waiting states
+        let base_prompt = state.get_prompt();
+        let prefix = state.get_prompt_prefix();
+        // Replace static |~| with dynamic prefix (throbber when animating)
+        if base_prompt.starts_with("|~|") {
+            format!("{}{}", prefix, &base_prompt[5..]) // Skip "|~| " (5 chars including space)
+        } else {
+            base_prompt
+        }
     };
 
     // Hide input if in password mode, show asterisks instead
@@ -267,20 +274,8 @@ fn render_unified_content(
     ]);
     lines.push(current_line);
 
-    // 2b. Add loading indicator if waiting for LLM (animated cursor)
-    if matches!(state.mode, TerminalMode::WaitingLLM) {
-        // Animate cursor: alternate between █ and space every 500ms
-        // Uses monotonic Instant clock for reliable animation timing
-        if let Some(elapsed_ms) = state.animation_elapsed() {
-            let blink = (elapsed_ms / 500).is_multiple_of(2);
-            let indicator = if blink { "█" } else { " " };
-
-            lines.push(Line::from(Span::styled(
-                indicator,
-                Style::default().fg(Color::Blue),
-            )));
-        }
-    }
+    // Note: Loading animation is now shown via throbber in the prompt prefix
+    // (|~| becomes |⠘| etc. when throbber is active)
 
     // 3. Calculate visible window (auto-scroll to bottom)
     let visible_lines = area.height as usize;

@@ -1,7 +1,7 @@
 /// Terminal state management using separated buffer components
 use super::buffers::{CommandHistory, InputBuffer, OutputBuffer};
+use super::throbber::ThrobberAnimator;
 use crate::input::IncompleteReason;
-use std::time::Instant;
 
 /// Represents the current mode of the terminal
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -97,8 +97,8 @@ pub struct TerminalState {
     pub pending_heredoc: Option<String>,
     /// Cached prompt string (updated when cwd changes)
     cached_prompt: String,
-    /// Animation start time for loading indicators
-    animation_start: Option<Instant>,
+    /// Throbber animator for loading indicators (SOLID: dedicated responsibility)
+    throbber: ThrobberAnimator,
     /// Whether terminal is in elevated (root) mode via sudo su
     is_root_mode: bool,
 }
@@ -116,7 +116,7 @@ impl TerminalState {
             multiline_buffer: Vec::new(),
             pending_heredoc: None,
             cached_prompt: String::new(), // Will be set below
-            animation_start: None,
+            throbber: ThrobberAnimator::new(),
             is_root_mode: false,
         };
         state.cached_prompt = state.build_prompt();
@@ -205,21 +205,25 @@ impl TerminalState {
         self.is_root_mode
     }
 
-    /// Start animation timer (for loading indicators)
-    pub fn start_animation(&mut self) {
-        self.animation_start = Some(Instant::now());
+    /// Start throbber animation (delegates to ThrobberAnimator)
+    pub fn start_throbber(&self) {
+        self.throbber.start();
     }
 
-    /// Stop animation timer
-    pub fn stop_animation(&mut self) {
-        self.animation_start = None;
+    /// Stop throbber animation (delegates to ThrobberAnimator)
+    pub fn stop_throbber(&self) {
+        self.throbber.stop();
     }
 
-    /// Get elapsed time since animation started (in milliseconds)
-    /// Returns None if animation is not running
-    pub fn animation_elapsed(&self) -> Option<u64> {
-        self.animation_start
-            .map(|start| start.elapsed().as_millis() as u64)
+    /// Get prompt prefix with throbber or static ~
+    /// Returns animated "|⠘|" etc. ONLY when in WaitingLLM mode,
+    /// otherwise returns static "|~|"
+    pub fn get_prompt_prefix(&self) -> String {
+        if matches!(self.mode, TerminalMode::WaitingLLM) && self.throbber.is_running() {
+            format!("|{}|", self.throbber.symbol())
+        } else {
+            "|~|".to_string()
+        }
     }
 
     /// Get window title string (current directory in ~/path format)

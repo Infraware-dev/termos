@@ -428,13 +428,14 @@ impl InfrawareTerminal {
                         }
                     }
                 }
-                _ = tokio::time::sleep(Duration::from_millis(100)) => {
-                    // Timeout - check jobs periodically even without events
+                _ = tokio::time::sleep(Duration::from_millis(16)) => {
+                    // Timeout - render at ~60 FPS for smooth throbber animation
+                    // (throbber animation runs in background thread)
                     if last_job_check.elapsed() >= JOB_CHECK_INTERVAL {
                         self.check_completed_jobs();
                         last_job_check = Instant::now();
-                        self.ui.render(&mut self.state)?;
                     }
+                    self.ui.render(&mut self.state)?;
                     continue;
                 }
             };
@@ -451,7 +452,7 @@ impl InfrawareTerminal {
                 last_job_check = Instant::now();
             }
 
-            // Re-render after handling event
+            // Re-render (throbber animation runs in background thread)
             self.ui.render(&mut self.state)?;
         }
 
@@ -703,6 +704,7 @@ impl InfrawareTerminal {
                 // If mode is set inside handle_natural_language, Ctrl+C pressed immediately
                 // after Enter will see mode=Normal and clear input instead of cancelling
                 self.state.mode = TerminalMode::WaitingLLM;
+                self.state.start_throbber();
 
                 // Clone current token (cheap Arc increment) for this operation
                 let token = self.cancellation_token_tx.borrow().clone();
@@ -746,16 +748,20 @@ impl InfrawareTerminal {
         original_input: Option<&str>,
     ) -> Result<()> {
         self.state.mode = TerminalMode::ExecutingCommand;
+        // Note: throbber animation only runs during WaitingLLM mode (not ExecutingCommand)
 
         // Handle auth-status builtin command
         if cmd == "auth-status" {
-            return self.handle_auth_status_command().await;
+            let result = self.handle_auth_status_command().await;
+            self.state.stop_throbber();
+            return result;
         }
 
         // Clone current cancellation token for this command execution
         let cancel_token = self.cancellation_token_tx.borrow().clone();
 
-        self.command_orchestrator
+        let result = self
+            .command_orchestrator
             .handle_command(
                 cmd,
                 args,
@@ -765,7 +771,12 @@ impl InfrawareTerminal {
                 &self.job_manager,
                 cancel_token,
             )
-            .await
+            .await;
+
+        // Stop throbber animation when command completes
+        self.state.stop_throbber();
+
+        result
     }
 
     /// Handle the built-in "cd" command

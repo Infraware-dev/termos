@@ -7,7 +7,12 @@
 /// - Human-in-the-loop interactions (command approval and questions)
 use anyhow::Result;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio_util::sync::CancellationToken;
+
+/// Render interval for throbber animation during LLM queries (~10 FPS)
+/// This controls how often the UI is refreshed while waiting for LLM response
+const RENDER_INTERVAL_MS: u64 = 100;
 
 use crate::llm::{LLMClientTrait, LLMQueryResult, ResponseRenderer};
 use crate::terminal::{PendingInteraction, TerminalMode, TerminalState, TerminalUI};
@@ -45,12 +50,15 @@ impl NaturalLanguageOrchestrator {
     /// Handle natural language query with all the necessary logic
     ///
     /// This method encapsulates:
-    /// - Showing "waiting" state
+    /// - Showing "waiting" state with animated throbber
     /// - Querying the LLM
     /// - Rendering the response
     /// - Human-in-the-loop command approval flow
     /// - Error handling
     /// - Cancellation support (via CancellationToken)
+    ///
+    /// The render loop runs at ~60 FPS (16ms intervals) to show the throbber animation
+    /// while waiting for the LLM response.
     pub async fn handle_query(
         &self,
         query: &str,
@@ -60,41 +68,55 @@ impl NaturalLanguageOrchestrator {
     ) -> Result<()> {
         log::info!("Orchestrator handling query: {}", query);
 
-        // Show waiting message
-        state.add_output(MessageFormatter::info("Querying AI assistant..."));
-
-        // Render to show "waiting" state
+        // Initial render to show throbber animation in prompt
         ui.render(state)?;
 
         log::info!("Calling LLM client...");
 
-        // Query the LLM with cancellation support using tokio::select!
-        tokio::select! {
-            result = self.llm_client.query_cancellable(query, cancel_token.clone()) => {
-                match result {
-                    Ok(llm_result) => {
-                        log::debug!("LLM query completed successfully");
-                        self.handle_query_result(llm_result, state);
+        // Pin the future so we can poll it multiple times in the render loop
+        let mut llm_future = std::pin::pin!(
+            self.llm_client.query_cancellable(query, cancel_token.clone())
+        );
+
+        // Render loop with 16ms timeout for ~60 FPS throbber animation
+        // This ensures the throbber is visible during LLM queries
+        loop {
+            tokio::select! {
+                // Prioritize completion and cancellation over render timeout
+                biased;
+
+                result = &mut llm_future => {
+                    match result {
+                        Ok(llm_result) => {
+                            log::debug!("LLM query completed successfully");
+                            self.handle_query_result(llm_result, state);
+                            state.stop_throbber();
+                        }
+                        Err(e) if e.to_string().contains("cancelled") => {
+                            log::info!("LLM query cancelled by user");
+                            state.add_output(MessageFormatter::info("Query cancelled by user"));
+                            state.mode = TerminalMode::Normal;
+                            state.stop_throbber();
+                        }
+                        Err(e) => {
+                            log::error!("LLM query failed: {}", e);
+                            self.handle_error(e, state);
+                            state.stop_throbber();
+                        }
                     }
-                    Err(e) if e.to_string().contains("cancelled") => {
-                        log::info!("LLM query cancelled by user");
-                        // Remove waiting message
-                        state.output.pop();
-                        state.add_output(MessageFormatter::info("Query cancelled by user"));
-                        state.mode = TerminalMode::Normal;
-                    }
-                    Err(e) => {
-                        log::error!("LLM query failed: {}", e);
-                        self.handle_error(e, state);
-                    }
+                    break; // Exit loop after LLM completes
                 }
-            }
-            _ = cancel_token.cancelled() => {
-                log::info!("LLM query cancelled via token");
-                // Remove waiting message
-                state.output.pop();
-                state.add_output(MessageFormatter::info("Query cancelled by user"));
-                state.mode = TerminalMode::Normal;
+                _ = cancel_token.cancelled() => {
+                    log::info!("LLM query cancelled via token");
+                    state.add_output(MessageFormatter::info("Query cancelled by user"));
+                    state.mode = TerminalMode::Normal;
+                    state.stop_throbber();
+                    break; // Exit loop on cancellation
+                }
+                _ = tokio::time::sleep(Duration::from_millis(RENDER_INTERVAL_MS)) => {
+                    // Periodic render for throbber animation
+                    ui.render(state)?;
+                }
             }
         }
 
@@ -103,9 +125,6 @@ impl NaturalLanguageOrchestrator {
 
     /// Handle the result of an LLM query (complete, command approval, or question)
     fn handle_query_result(&self, result: LLMQueryResult, state: &mut TerminalState) {
-        // Remove the "Querying..." message
-        state.output.pop();
-
         match result {
             LLMQueryResult::Complete(response) => {
                 // Render the response with formatting
@@ -263,9 +282,6 @@ impl NaturalLanguageOrchestrator {
 
     /// Handle LLM query error
     fn handle_error(&self, error: anyhow::Error, state: &mut TerminalState) {
-        // Remove the "Querying..." message
-        state.output.pop();
-
         // Show error message
         state.add_output(MessageFormatter::error(format!(
             "Error querying LLM: {error}"
@@ -345,42 +361,40 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_handle_success_removes_waiting_message() {
+    async fn test_handle_success_adds_response() {
         let llm_client = Arc::new(MockLLMClient::new());
         let renderer = ResponseRenderer::new();
         let orchestrator = NaturalLanguageOrchestrator::new(llm_client, renderer);
 
         let mut state = TerminalState::new();
-        state.add_output("Querying AI assistant...".to_string());
 
         orchestrator.handle_success("Response".to_string(), &mut state);
 
-        // The "Querying..." message should be removed
-        assert!(!state
+        // Response should be in output
+        assert!(state
             .output
             .lines()
             .iter()
-            .any(|line| line.contains("Querying AI assistant")));
+            .any(|line| line.contains("Response")));
     }
 
     #[tokio::test]
-    async fn test_handle_error_removes_waiting_message() {
+    async fn test_handle_error_adds_error_message() {
         let llm_client = Arc::new(MockLLMClient::new());
         let renderer = ResponseRenderer::new();
         let orchestrator = NaturalLanguageOrchestrator::new(llm_client, renderer);
 
         let mut state = TerminalState::new();
-        state.add_output("Querying AI assistant...".to_string());
 
         let error = anyhow::anyhow!("Network error");
         orchestrator.handle_error(error, &mut state);
 
-        // The "Querying..." message should be removed
-        assert!(!state
+        // Error message should be in output
+        assert!(state
             .output
             .lines()
             .iter()
-            .any(|line| line.contains("Querying AI assistant") && !line.contains("Error")));
+            .any(|line| line.contains("Error") && line.contains("Network error")));
     }
 
     #[tokio::test]
@@ -404,17 +418,9 @@ mod tests {
         let orchestrator = NaturalLanguageOrchestrator::new(llm_client, renderer);
 
         let mut state = TerminalState::new();
-        state.add_output("Querying AI assistant...".to_string()); // Simulate waiting msg
 
         let result = LLMQueryResult::Complete("Test response from LLM".to_string());
         orchestrator.handle_query_result(result, &mut state);
-
-        // Waiting message should be removed
-        assert!(!state
-            .output
-            .lines()
-            .iter()
-            .any(|line| line.contains("Querying AI assistant")));
 
         // Response should be in output
         assert!(state
@@ -431,7 +437,6 @@ mod tests {
         let orchestrator = NaturalLanguageOrchestrator::new(llm_client, renderer);
 
         let mut state = TerminalState::new();
-        state.add_output("Querying AI assistant...".to_string());
 
         let result = LLMQueryResult::CommandApproval {
             command: "rm -rf /tmp/test".to_string(),
@@ -473,7 +478,6 @@ mod tests {
         let orchestrator = NaturalLanguageOrchestrator::new(llm_client, renderer);
 
         let mut state = TerminalState::new();
-        state.add_output("Querying AI assistant...".to_string());
 
         let result = LLMQueryResult::Question {
             question: "Which database would you prefer?".to_string(),
@@ -521,7 +525,6 @@ mod tests {
         let orchestrator = NaturalLanguageOrchestrator::new(llm_client, renderer);
 
         let mut state = TerminalState::new();
-        state.add_output("Querying AI assistant...".to_string());
 
         let result = LLMQueryResult::Question {
             question: "What is your project name?".to_string(),
