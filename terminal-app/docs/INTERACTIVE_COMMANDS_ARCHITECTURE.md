@@ -474,11 +474,11 @@ impl TerminalUI {
 The following PlantUML diagrams visualize different aspects of this architecture:
 
 1. **interactive_command_flow.puml** - Sequence diagram showing complete flow
-2. **command_executor.puml** - Class diagram of execution components
-3. **terminal_ui_architecture.puml** - TUI state and control flow
+2. **10-executor-module-with-background-support.puml** - Executor with background processes
+3. **terminal-module-overview.puml** - Terminal module components
 4. **command_execution_decision_tree.puml** - Decision flow in orchestrator
 5. **interactive_vs_noninteractive.puml** - Detailed comparison of both paths
-6. **orchestration_architecture.puml** - Complete orchestrator coordination
+6. **05-orchestrators.puml** - Complete orchestrator coordination
 
 ## Summary
 
