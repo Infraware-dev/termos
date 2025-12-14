@@ -70,6 +70,22 @@ fn is_infinite_output_command(cmd: &str) -> bool {
     INFINITE_OUTPUT_COMMANDS.contains(&cmd)
 }
 
+/// Execution path strategy for command execution.
+///
+/// Reduces cyclomatic complexity by encapsulating the decision logic
+/// for how a command should be executed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExecutionPath {
+    /// Execute through shell for shell builtins (cd, export, etc.)
+    ShellBuiltin,
+    /// Execute through shell when original input contains operators/pipes
+    ShellInput,
+    /// Execute through shell for glob pattern expansion
+    GlobExpansion,
+    /// Direct execution without shell
+    Direct,
+}
+
 use crate::input::shell_builtins::ShellBuiltinHandler;
 
 /// Output from a command execution
@@ -804,100 +820,133 @@ impl CommandExecutor {
             return Ok(blocked_output);
         }
 
-        // Step 2: Determine execution path and spawn child
-        let (child, unlimited) = if Self::is_shell_builtin(cmd) {
-            // Shell builtin path: execute through shell
-            let full_command = if args.is_empty() {
-                cmd.to_string()
-            } else {
-                format!("{} {}", cmd, args.join(" "))
-            };
-            let (shell, shell_flag) = Self::get_platform_shell();
-            let first_cmd = full_command.split_whitespace().next().unwrap_or("");
-            let unlimited = is_unlimited_output_command(first_cmd);
+        // Step 2: Select execution path and spawn child (Strategy pattern)
+        let path = Self::select_execution_path(cmd, args, original_input);
+        let (child, unlimited) = Self::spawn_by_path(path, cmd, args, original_input)?;
 
-            let child = TokioCommand::new(shell)
-                .arg(shell_flag)
-                .arg(&full_command)
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()
-                .context("Failed to spawn shell builtin command")?;
-
-            (child, unlimited)
-        } else if let Some(shell_input) = original_input {
-            // Shell input path: execute via shell for operator interpretation
-            let (shell, shell_flag) = Self::get_platform_shell();
-            let first_cmd = shell_input.split_whitespace().next().unwrap_or("");
-            let unlimited = is_unlimited_output_command(first_cmd);
-
-            let child = TokioCommand::new(shell)
-                .arg(shell_flag)
-                .arg(shell_input)
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()
-                .context("Failed to spawn shell command")?;
-
-            (child, unlimited)
-        } else if has_glob_patterns(args) {
-            // Glob pattern path: execute through shell for expansion
-            log::debug!(
-                "Command '{}' has glob patterns, executing through shell",
-                cmd
-            );
-            let full_command = if args.is_empty() {
-                cmd.to_string()
-            } else {
-                format!("{} {}", cmd, args.join(" "))
-            };
-            let (shell, shell_flag) = Self::get_platform_shell();
-            let unlimited = is_unlimited_output_command(cmd);
-
-            let child = TokioCommand::new(shell)
-                .arg(shell_flag)
-                .arg(&full_command)
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()
-                .context("Failed to spawn shell command for glob expansion")?;
-
-            (child, unlimited)
-        } else {
-            // Direct execution path
-            if !Self::command_exists(cmd) {
-                log::error!("Command not found: {}", cmd);
-                anyhow::bail!("Command '{cmd}' not found");
-            }
-
-            let unlimited = is_unlimited_output_command(cmd);
-
-            let child = TokioCommand::new(cmd)
-                .args(args)
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()
-                .context("Failed to spawn command")?;
-
-            (child, unlimited)
-        };
-
-        // Step 3: Execute with streaming and cancellation
-        let timeout_secs = if unlimited {
-            COMMAND_TIMEOUT_SECS
-        } else {
-            LIMITED_COMMAND_TIMEOUT_SECS
-        };
-
+        // Step 3: Execute with streaming, cancellation, and timeout
+        let timeout_secs = Self::calculate_timeout(unlimited);
         let execution = execute_with_limit(child, unlimited, Some(line_tx), Some(cancel_token));
 
         timeout(Duration::from_secs(timeout_secs), execution)
             .await
             .context(format!("Command timed out after {} seconds", timeout_secs))?
+    }
+
+    /// Select the appropriate execution path for a command.
+    ///
+    /// This encapsulates the decision logic that was previously inline in execute_internal(),
+    /// reducing cyclomatic complexity.
+    fn select_execution_path(cmd: &str, args: &[String], original_input: Option<&str>) -> ExecutionPath {
+        if Self::is_shell_builtin(cmd) {
+            ExecutionPath::ShellBuiltin
+        } else if original_input.is_some() {
+            ExecutionPath::ShellInput
+        } else if has_glob_patterns(args) {
+            ExecutionPath::GlobExpansion
+        } else {
+            ExecutionPath::Direct
+        }
+    }
+
+    /// Assemble command and arguments into a single shell command string.
+    fn assemble_command(cmd: &str, args: &[String]) -> String {
+        if args.is_empty() {
+            cmd.to_string()
+        } else {
+            format!("{} {}", cmd, args.join(" "))
+        }
+    }
+
+    /// Spawn a child process based on the execution path.
+    ///
+    /// Returns the child process and whether it has unlimited output.
+    fn spawn_by_path(
+        path: ExecutionPath,
+        cmd: &str,
+        args: &[String],
+        original_input: Option<&str>,
+    ) -> Result<(Child, bool)> {
+        match path {
+            ExecutionPath::ShellBuiltin => {
+                let full_command = Self::assemble_command(cmd, args);
+                let (shell, shell_flag) = Self::get_platform_shell();
+                let first_cmd = full_command.split_whitespace().next().unwrap_or("");
+                let unlimited = is_unlimited_output_command(first_cmd);
+
+                let child = TokioCommand::new(shell)
+                    .arg(shell_flag)
+                    .arg(&full_command)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .context("Failed to spawn shell builtin command")?;
+
+                Ok((child, unlimited))
+            }
+            ExecutionPath::ShellInput => {
+                let shell_input = original_input.expect("ShellInput requires original_input");
+                let (shell, shell_flag) = Self::get_platform_shell();
+                let first_cmd = shell_input.split_whitespace().next().unwrap_or("");
+                let unlimited = is_unlimited_output_command(first_cmd);
+
+                let child = TokioCommand::new(shell)
+                    .arg(shell_flag)
+                    .arg(shell_input)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .context("Failed to spawn shell command")?;
+
+                Ok((child, unlimited))
+            }
+            ExecutionPath::GlobExpansion => {
+                log::debug!("Command '{}' has glob patterns, executing through shell", cmd);
+                let full_command = Self::assemble_command(cmd, args);
+                let (shell, shell_flag) = Self::get_platform_shell();
+                let unlimited = is_unlimited_output_command(cmd);
+
+                let child = TokioCommand::new(shell)
+                    .arg(shell_flag)
+                    .arg(&full_command)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .context("Failed to spawn shell command for glob expansion")?;
+
+                Ok((child, unlimited))
+            }
+            ExecutionPath::Direct => {
+                if !Self::command_exists(cmd) {
+                    log::error!("Command not found: {}", cmd);
+                    anyhow::bail!("Command '{cmd}' not found");
+                }
+
+                let unlimited = is_unlimited_output_command(cmd);
+
+                let child = TokioCommand::new(cmd)
+                    .args(args)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .context("Failed to spawn command")?;
+
+                Ok((child, unlimited))
+            }
+        }
+    }
+
+    /// Calculate timeout based on whether the command has unlimited output.
+    const fn calculate_timeout(unlimited: bool) -> u64 {
+        if unlimited {
+            COMMAND_TIMEOUT_SECS
+        } else {
+            LIMITED_COMMAND_TIMEOUT_SECS
+        }
     }
 
     /// Execute a command and return an [`ExecutionHandle`] for flexible consumption.
