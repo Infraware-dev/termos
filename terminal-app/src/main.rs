@@ -429,6 +429,14 @@ impl InfrawareTerminal {
             }
 
             // === STEP 2: WAIT for events ===
+            // Dynamic timeout: fast (16ms/60 FPS) for throbber animation during LLM queries,
+            // slow (100ms/10 FPS) when idle to reduce CPU overhead and keypress lag
+            let render_timeout = if matches!(self.state.mode, TerminalMode::WaitingLLM) {
+                Duration::from_millis(16) // 60 FPS for smooth throbber animation
+            } else {
+                Duration::from_millis(100) // 10 FPS when idle (reduces overhead)
+            };
+
             // Note: We don't check cancellation_token here because it's used
             // to cancel async operations (LLM queries), not to exit the app.
             // App exit is handled by the Quit event handler returning Ok(false).
@@ -446,8 +454,8 @@ impl InfrawareTerminal {
                         }
                     }
                 }
-                _ = tokio::time::sleep(Duration::from_millis(16)) => {
-                    // Idle timeout - loop back to render for throbber animation (~60 FPS)
+                _ = tokio::time::sleep(render_timeout) => {
+                    // Idle timeout - loop back to render
                     continue;
                 }
             };
