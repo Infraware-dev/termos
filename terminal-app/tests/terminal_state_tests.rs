@@ -599,8 +599,8 @@ fn test_set_visible_lines() {
 #[test]
 fn test_visible_lines_default() {
     let state = TerminalState::new();
-    // Default is 20
-    assert_eq!(state.visible_lines(), 20);
+    // Default is 0 - set on first render from actual terminal height
+    assert_eq!(state.visible_lines(), 0);
 }
 
 // =============================================================================

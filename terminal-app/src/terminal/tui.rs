@@ -17,7 +17,7 @@ use ratatui::{
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::state::{ScrollbarInfo, TerminalMode, TerminalState};
 
@@ -260,10 +260,17 @@ fn render_unified_content(
     // Pre-calculate widths for cursor positioning (avoids cloning prompt/input)
     let prompt_width = prompt.width();
     let char_idx = state.input.cursor_position();
+    // Calculate input width WITHOUT allocating a String (O(N) iteration but no allocation)
     let input_width = if is_password_mode {
         char_idx
     } else {
-        input.chars().take(char_idx).collect::<String>().width()
+        state
+            .input
+            .text()
+            .chars()
+            .take(char_idx)
+            .map(|c| c.width().unwrap_or(0))
+            .sum()
     };
 
     // Prompt is the LAST line of all_lines (part of scrollable content)

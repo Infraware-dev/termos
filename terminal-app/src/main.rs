@@ -434,6 +434,10 @@ impl InfrawareTerminal {
             // to cancel async operations (LLM queries), not to exit the app.
             // App exit is handled by the Quit event handler returning Ok(false).
             let event = tokio::select! {
+                // biased: prioritize events over idle timeout to minimize keypress lag
+                // Without this, select! randomly picks a ready branch, causing up to 16ms delay
+                biased;
+
                 maybe_event = event_rx.recv() => {
                     match maybe_event {
                         Some(event) => event,

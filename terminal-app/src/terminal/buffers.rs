@@ -74,7 +74,7 @@ impl OutputBuffer {
             buffer: Vec::new(),
             parsed_buffer: Vec::new(),
             scroll_position: 0,
-            visible_lines: 20, // Default, updated by TUI
+            visible_lines: 0, // Initialized to 0, set on first render from actual terminal height
             extra_lines: 1,    // At least 1 for prompt line
         }
     }
@@ -148,6 +148,15 @@ impl OutputBuffer {
         self.parsed_buffer.len() + self.extra_lines
     }
 
+    /// Calculate maximum scroll position
+    /// Returns 0 if visible_lines is 0 (before first render)
+    fn max_scroll(&self) -> usize {
+        if self.visible_lines == 0 {
+            return 0; // No scroll before first render
+        }
+        self.total_content_lines().saturating_sub(self.visible_lines)
+    }
+
     /// Set extra lines count (prompt, interaction, etc.)
     /// Called by rendering to keep scroll calculations accurate
     pub fn set_extra_lines(&mut self, extra: usize) {
@@ -158,8 +167,7 @@ impl OutputBuffer {
     ///
     /// Used for smart auto-scroll: only auto-scroll when user was already at bottom.
     pub fn is_at_bottom(&self) -> bool {
-        let max_scroll = self.total_content_lines().saturating_sub(self.visible_lines);
-        self.scroll_position >= max_scroll
+        self.scroll_position >= self.max_scroll()
     }
 
     /// Get the current scroll position
@@ -176,8 +184,8 @@ impl OutputBuffer {
 
     /// Scroll down by one line (moves view window down)
     pub fn scroll_down(&mut self) {
-        let max_scroll = self.total_content_lines().saturating_sub(self.visible_lines);
-        if self.scroll_position < max_scroll {
+        let max = self.max_scroll();
+        if self.scroll_position < max {
             self.scroll_position += 1;
         }
     }
@@ -185,8 +193,7 @@ impl OutputBuffer {
     /// Set scroll position directly (for scrollbar drag)
     /// Clamps to valid range [0, max_scroll]
     pub fn set_scroll_position(&mut self, position: usize) {
-        let max_scroll = self.total_content_lines().saturating_sub(self.visible_lines);
-        self.scroll_position = position.min(max_scroll);
+        self.scroll_position = position.min(self.max_scroll());
     }
 
     /// Set scroll position without clamping (used by rendering after proper clamp)
@@ -197,8 +204,7 @@ impl OutputBuffer {
     /// Scroll to the end of content (where prompt is)
     /// Called when user types to bring prompt back into view
     pub fn scroll_to_end(&mut self) {
-        let max_scroll = self.total_content_lines().saturating_sub(self.visible_lines);
-        self.scroll_position = max_scroll;
+        self.scroll_position = self.max_scroll();
     }
 
     /// Set the number of visible lines for scroll calculations
@@ -210,14 +216,14 @@ impl OutputBuffer {
         self.visible_lines = visible_lines;
 
         // Calculate new max_scroll with updated visible_lines
-        let max_scroll = self.total_content_lines().saturating_sub(visible_lines);
+        let max = self.max_scroll();
 
         if was_at_bottom {
             // If we were at bottom, stay at bottom
-            self.scroll_position = max_scroll;
-        } else if self.scroll_position > max_scroll {
+            self.scroll_position = max;
+        } else if self.scroll_position > max {
             // Clamp scroll position to valid range
-            self.scroll_position = max_scroll;
+            self.scroll_position = max;
         }
     }
 
@@ -237,15 +243,19 @@ impl OutputBuffer {
     /// - If user is viewing old output (scrolled up), new output doesn't move the view
     /// - If user is at the bottom, new output auto-scrolls to stay at bottom
     fn auto_scroll_to_bottom(&mut self) {
+        // Skip auto-scroll if visible_lines not yet set (before first render)
+        if self.visible_lines == 0 {
+            return;
+        }
         let total = self.total_content_lines();
-        let max_scroll = total.saturating_sub(self.visible_lines);
+        let max = self.max_scroll();
         // Auto-scroll only if:
         // 1. Buffer is empty or just started (scroll_position == 0 and content fits)
         // 2. User was already at bottom (is_at_bottom() would be true before adding line)
         // Since we call this AFTER adding the line, we check if we're at or near max
-        let was_at_bottom = self.scroll_position + 1 >= max_scroll || total <= self.visible_lines;
+        let was_at_bottom = self.scroll_position + 1 >= max || total <= self.visible_lines;
         if was_at_bottom {
-            self.scroll_position = max_scroll;
+            self.scroll_position = max;
         }
     }
 
@@ -280,6 +290,7 @@ impl Default for OutputBuffer {
 pub struct InputBuffer {
     buffer: String,
     cursor_position: usize, // Character index, not byte index
+    char_count: usize,      // Cached character count for O(1) access
 }
 
 impl InputBuffer {
@@ -288,7 +299,13 @@ impl InputBuffer {
         Self {
             buffer: String::new(),
             cursor_position: 0,
+            char_count: 0,
         }
+    }
+
+    /// Get the cached character count (O(1) instead of O(N))
+    pub const fn char_count(&self) -> usize {
+        self.char_count
     }
 
     /// Get the current input text
@@ -311,21 +328,22 @@ impl InputBuffer {
 
     /// Insert a character at the cursor position
     pub fn insert_char(&mut self, c: char) {
-        let char_count = self.buffer.chars().count();
+        // Use cached char_count (O(1) instead of O(N))
         // Defensive: ensure cursor position is within valid range
         debug_assert!(
-            self.cursor_position <= char_count,
+            self.cursor_position <= self.char_count,
             "Cursor position {} exceeds character count {}",
             self.cursor_position,
-            char_count
+            self.char_count
         );
         // Clamp cursor position to prevent panic
-        self.cursor_position = self.cursor_position.min(char_count);
+        self.cursor_position = self.cursor_position.min(self.char_count);
 
         // Convert char position to byte index
         let byte_idx = self.char_to_byte_idx(self.cursor_position);
         self.buffer.insert(byte_idx, c);
         self.cursor_position += 1;
+        self.char_count += 1; // O(1) update
     }
 
     /// Delete character before cursor (backspace)
@@ -334,6 +352,7 @@ impl InputBuffer {
             let byte_idx = self.char_to_byte_idx(self.cursor_position - 1);
             self.buffer.remove(byte_idx);
             self.cursor_position -= 1;
+            self.char_count -= 1; // O(1) update
         }
     }
 
@@ -346,8 +365,8 @@ impl InputBuffer {
 
     /// Move cursor right
     pub fn move_cursor_right(&mut self) {
-        let char_count = self.buffer.chars().count();
-        if self.cursor_position < char_count {
+        // Use cached char_count (O(1) instead of O(N))
+        if self.cursor_position < self.char_count {
             self.cursor_position += 1;
         }
     }
@@ -356,17 +375,22 @@ impl InputBuffer {
     pub fn clear(&mut self) {
         self.buffer.clear();
         self.cursor_position = 0;
+        self.char_count = 0;
     }
 
     /// Set the input buffer to a specific text and position cursor at end
     pub fn set_text(&mut self, text: String) {
+        // Must compute char_count once when setting text (unavoidable O(N))
+        // but cached for all subsequent operations (O(1))
+        self.char_count = text.chars().count();
+        self.cursor_position = self.char_count;
         self.buffer = text;
-        self.cursor_position = self.buffer.chars().count();
     }
 
     /// Take the current input, leaving the buffer empty
     pub fn take(&mut self) -> String {
         self.cursor_position = 0;
+        self.char_count = 0;
         std::mem::take(&mut self.buffer)
     }
 }

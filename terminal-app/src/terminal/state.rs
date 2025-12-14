@@ -1,4 +1,6 @@
 /// Terminal state management using separated buffer components
+use std::borrow::Cow;
+
 use super::buffers::{CommandHistory, InputBuffer, OutputBuffer};
 use super::throbber::ThrobberAnimator;
 use crate::input::IncompleteReason;
@@ -163,7 +165,7 @@ impl TerminalState {
             history: CommandHistory::new(),
             mode: TerminalMode::Normal,
             pending_interaction: None,
-            visible_lines: 20, // Default, updated during render
+            visible_lines: 0, // Initialized to 0, set on first render from actual terminal height
             multiline_buffer: Vec::new(),
             pending_heredoc: None,
             cached_prompt: String::new(), // Will be set below
@@ -270,11 +272,13 @@ impl TerminalState {
     /// Get prompt prefix with throbber or static ~
     /// Returns animated "|⠘|" etc. ONLY when in WaitingLLM mode,
     /// otherwise returns static "|~|"
-    pub fn get_prompt_prefix(&self) -> String {
+    ///
+    /// Uses Cow to avoid allocation for the static case (99% of typing time)
+    pub fn get_prompt_prefix(&self) -> Cow<'static, str> {
         if matches!(self.mode, TerminalMode::WaitingLLM) && self.throbber.is_running() {
-            format!("|{}|", self.throbber.symbol())
+            Cow::Owned(format!("|{}|", self.throbber.symbol()))
         } else {
-            "|~|".to_string()
+            Cow::Borrowed("|~|")
         }
     }
 

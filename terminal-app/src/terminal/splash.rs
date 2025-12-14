@@ -597,7 +597,7 @@ mod tests {
         let splash = SplashScreen::new(100, 30);
         let progress = splash.get_assembly_progress();
         // Initial progress should be 0 (in scatter phase)
-        assert!(progress >= 0.0 && progress <= 1.0);
+        assert!((0.0..=1.0).contains(&progress));
     }
 
     #[test]
@@ -612,7 +612,7 @@ mod tests {
     #[test]
     fn test_animation_phase_clone() {
         let phase = AnimationPhase::Assembly;
-        let cloned = phase.clone();
+        let cloned = phase; // Copy, not clone (AnimationPhase is Copy)
         assert_eq!(phase, cloned);
     }
 
@@ -649,8 +649,8 @@ mod tests {
 
     #[test]
     fn test_logo_art_not_empty() {
-        assert!(!LOGO_ART.is_empty());
-        assert!(LOGO_ART.len() == ART_HEIGHT);
+        // LOGO_ART has exactly ART_HEIGHT lines (compile-time constant)
+        assert_eq!(LOGO_ART.len(), ART_HEIGHT);
     }
 
     #[test]
