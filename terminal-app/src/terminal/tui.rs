@@ -389,7 +389,8 @@ fn build_prompt_text(state: &TerminalState) -> String {
         let base_prompt = state.get_prompt();
         let prefix = state.get_prompt_prefix();
         if base_prompt.starts_with("|~|") {
-            format!("{}{}", prefix, &base_prompt[5..])
+            // Skip "|~| " (4 chars: pipe, tilde, pipe, space)
+            format!("{} {}", prefix, &base_prompt[4..])
         } else {
             base_prompt
         }
