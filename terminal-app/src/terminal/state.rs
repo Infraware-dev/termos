@@ -326,10 +326,13 @@ impl TerminalState {
         self.input.clear();
     }
 
-    /// Submit the current input and add to history
-    pub fn submit_input(&mut self) -> String {
+    /// Submit the current input, optionally adding to history.
+    /// Use `add_to_history: false` for sensitive input like passwords.
+    pub fn submit_input(&mut self, add_to_history: bool) -> String {
         let input = self.input.take();
-        self.history.add(input.clone());
+        if add_to_history {
+            self.history.add(input.clone());
+        }
         self.history.reset_position();
         input
     }

@@ -697,7 +697,9 @@ impl InfrawareTerminal {
     async fn handle_submit(&mut self) -> Result<bool> {
         use crate::input::multiline::{is_incomplete, is_multiline_complete, join_lines};
 
-        let input = self.state.submit_input();
+        // Check if we're in password mode BEFORE submitting (to avoid adding password to history)
+        let is_password_mode = CommandOrchestrator::is_waiting_for_sudo_password(&self.state);
+        let input = self.state.submit_input(!is_password_mode);
 
         // Handle human-in-the-loop command approval mode (y/n)
         if self.state.mode == TerminalMode::AwaitingCommandApproval {

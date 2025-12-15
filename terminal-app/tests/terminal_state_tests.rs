@@ -105,7 +105,7 @@ fn test_terminal_state_submit_input() {
     state.insert_char('l');
     state.insert_char('s');
 
-    let submitted = state.submit_input();
+    let submitted = state.submit_input(true);
 
     assert_eq!(submitted, "ls");
     assert!(state.input.text().is_empty()); // Input cleared after submit
@@ -118,16 +118,16 @@ fn test_terminal_state_history_navigation() {
     // Add some commands to history
     state.insert_char('l');
     state.insert_char('s');
-    state.submit_input();
+    state.submit_input(true);
 
     state.insert_char('p');
     state.insert_char('w');
     state.insert_char('d');
-    state.submit_input();
+    state.submit_input(true);
 
     state.insert_char('c');
     state.insert_char('d');
-    state.submit_input();
+    state.submit_input(true);
 
     // Now navigate history
     state.history_previous();
@@ -249,7 +249,7 @@ fn test_typical_user_workflow() {
     assert_eq!(state.input.text(), "docker ps");
 
     // User submits command
-    let cmd = state.submit_input();
+    let cmd = state.submit_input(true);
     assert_eq!(cmd, "docker ps");
     assert!(state.input.text().is_empty());
 
@@ -328,12 +328,12 @@ fn test_history_empty_commands_ignored() {
     let mut state = TerminalState::new();
 
     // Submit empty command (should not be added to history)
-    state.submit_input();
+    state.submit_input(true);
 
     // Add a real command
     state.insert_char('l');
     state.insert_char('s');
-    state.submit_input();
+    state.submit_input(true);
 
     // Navigate history - should only find "ls"
     state.history_previous();
