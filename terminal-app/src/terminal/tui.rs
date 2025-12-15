@@ -186,7 +186,17 @@ fn render_unified_content(
     // === PRE-CALCULATE SCROLL (before building lines) ===
     // Count interaction lines that will be added
     let interaction_line_count = count_interaction_lines(&state.pending_interaction);
-    let prompt_lines = 1; // Prompt is always 1 line
+
+    // Calculate prompt width for wrapped line calculation
+    let prompt_for_wrap = build_prompt_text(state);
+    let prompt_width_for_wrap = prompt_for_wrap.width();
+    let terminal_width = area.width as usize;
+
+    // Calculate how many visual lines the prompt+input will take when wrapped
+    let (prompt_lines, _, _) =
+        state
+            .input
+            .calculate_wrapped_cursor(prompt_width_for_wrap, terminal_width);
     let extra_lines = interaction_line_count + prompt_lines;
 
     // Update OutputBuffer with layout info for scroll calculations
@@ -250,32 +260,12 @@ fn render_unified_content(
             false
         };
 
-    // Build prompt text
-    let prompt = if state.pending_interaction.is_some() {
-        match state.mode {
-            TerminalMode::AwaitingCommandApproval => {
-                "Do you want to execute this command (y/n)? ".to_string()
-            }
-            TerminalMode::AwaitingAnswer => {
-                if is_password_mode {
-                    "[sudo] password: ".to_string()
-                } else {
-                    "Answer: ".to_string()
-                }
-            }
-            _ => state.get_prompt(),
-        }
-    } else if matches!(state.mode, TerminalMode::AwaitingMoreInput(_)) {
-        "> ".to_string()
-    } else {
-        let base_prompt = state.get_prompt();
-        let prefix = state.get_prompt_prefix();
-        if base_prompt.starts_with("|~|") {
-            format!("{}{}", prefix, &base_prompt[5..])
-        } else {
-            base_prompt
-        }
-    };
+    // Build prompt text (reuse the helper function)
+    let prompt = build_prompt_text(state);
+    let prompt_color = get_prompt_color(&state.mode);
+    let prompt_style = Style::default()
+        .fg(prompt_color)
+        .add_modifier(Modifier::BOLD);
 
     let input = if is_password_mode {
         "*".repeat(state.input.text().len())
@@ -283,35 +273,12 @@ fn render_unified_content(
         state.input.text().to_string()
     };
 
-    let prompt_color = get_prompt_color(&state.mode);
-
-    // Pre-calculate widths for cursor positioning (avoids cloning prompt/input)
+    // Pre-calculate prompt width for cursor positioning
     let prompt_width = prompt.width();
-    let char_idx = state.input.cursor_position();
-    // Calculate input width WITHOUT allocating a String (O(N) iteration but no allocation)
-    let input_width = if is_password_mode {
-        char_idx
-    } else {
-        state
-            .input
-            .text()
-            .chars()
-            .take(char_idx)
-            .map(|c| c.width().unwrap_or(0))
-            .sum()
-    };
 
-    // Prompt is the LAST line of all_lines (part of scrollable content)
-    let prompt_line = Line::from(vec![
-        Span::styled(
-            prompt,
-            Style::default()
-                .fg(prompt_color)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(input),
-    ]);
-    all_lines.push(prompt_line);
+    // Build wrapped lines for prompt + input
+    let wrapped_lines = build_wrapped_input_lines(&prompt, &input, terminal_width, prompt_style);
+    all_lines.extend(wrapped_lines);
 
     let needs_scrollbar = total_lines > visible_height;
 
@@ -352,25 +319,27 @@ fn render_unified_content(
     }
 
     // === POSITION CURSOR ===
-    // Cursor is on the prompt line (last line of visible content)
-    // With pre-slicing, prompt position is relative to all_lines (not total content)
+    // Calculate cursor position considering line wrapping
+    let (total_input_lines, cursor_row_in_input, cursor_col) =
+        state
+            .input
+            .calculate_wrapped_cursor(prompt_width, terminal_width);
 
-    // Prompt is visible only if it's within our visible slice
-    // Calculate where prompt would be in the full content
-    let prompt_position_in_total = total_lines.saturating_sub(1);
-    let prompt_is_visible = prompt_position_in_total >= effective_scroll
-        && prompt_position_in_total < effective_scroll + visible_height;
+    // Calculate where the first prompt line is in total content
+    let prompt_start_in_total = total_lines.saturating_sub(total_input_lines);
 
-    if prompt_is_visible {
-        // Prompt is the last line we rendered
-        let prompt_screen_row = prompt_position_in_total - effective_scroll;
+    // Calculate which line of the prompt the cursor is on
+    let cursor_line_in_total = prompt_start_in_total + cursor_row_in_input;
 
-        let total_width = prompt_width + input_width;
-        let max_x = area.width.saturating_sub(1) as usize;
-        let safe_x = total_width.min(max_x);
+    // Check if cursor line is visible
+    let cursor_is_visible = cursor_line_in_total >= effective_scroll
+        && cursor_line_in_total < effective_scroll + visible_height;
 
-        let cursor_x = area.x.saturating_add(safe_x as u16);
-        let cursor_y = area.y.saturating_add(prompt_screen_row as u16);
+    if cursor_is_visible {
+        let cursor_screen_row = cursor_line_in_total - effective_scroll;
+
+        let cursor_x = area.x.saturating_add(cursor_col as u16);
+        let cursor_y = area.y.saturating_add(cursor_screen_row as u16);
 
         frame.set_cursor_position((cursor_x, cursor_y));
     }
@@ -387,6 +356,95 @@ fn get_prompt_color(mode: &TerminalMode) -> Color {
         TerminalMode::AwaitingAnswer => Color::Cyan,
         TerminalMode::AwaitingMoreInput(_) => Color::Magenta,
     }
+}
+
+/// Build prompt text based on terminal state (extracted for reuse)
+fn build_prompt_text(state: &TerminalState) -> String {
+    let is_password_mode =
+        if let Some(crate::terminal::PendingInteraction::Question { question, .. }) =
+            &state.pending_interaction
+        {
+            question.contains("[sudo] password")
+        } else {
+            false
+        };
+
+    if state.pending_interaction.is_some() {
+        match state.mode {
+            TerminalMode::AwaitingCommandApproval => {
+                "Do you want to execute this command (y/n)? ".to_string()
+            }
+            TerminalMode::AwaitingAnswer => {
+                if is_password_mode {
+                    "[sudo] password: ".to_string()
+                } else {
+                    "Answer: ".to_string()
+                }
+            }
+            _ => state.get_prompt(),
+        }
+    } else if matches!(state.mode, TerminalMode::AwaitingMoreInput(_)) {
+        "> ".to_string()
+    } else {
+        let base_prompt = state.get_prompt();
+        let prefix = state.get_prompt_prefix();
+        if base_prompt.starts_with("|~|") {
+            format!("{}{}", prefix, &base_prompt[5..])
+        } else {
+            base_prompt
+        }
+    }
+}
+
+/// Build wrapped input lines for prompt + input that exceed terminal width
+fn build_wrapped_input_lines(
+    prompt: &str,
+    input: &str,
+    terminal_width: usize,
+    prompt_style: Style,
+) -> Vec<Line<'static>> {
+    let prompt_width = prompt.width();
+    let mut lines: Vec<Line<'static>> = Vec::new();
+    let mut current_spans: Vec<Span<'static>> = Vec::new();
+    let mut current_width: usize;
+
+    // Add prompt to first line
+    current_spans.push(Span::styled(prompt.to_string(), prompt_style));
+    current_width = prompt_width;
+
+    // Accumulate input characters, building spans
+    let mut current_text = String::new();
+
+    for c in input.chars() {
+        let char_width = c.width().unwrap_or(1);
+
+        // Check if we need to wrap
+        if current_width + char_width > terminal_width && terminal_width > 0 {
+            // Flush current text span if any
+            if !current_text.is_empty() {
+                current_spans.push(Span::raw(current_text.clone()));
+                current_text.clear();
+            }
+            // Push current line and start new one
+            lines.push(Line::from(std::mem::take(&mut current_spans)));
+            current_width = 0;
+        }
+
+        current_text.push(c);
+        current_width += char_width;
+    }
+
+    // Flush remaining text
+    if !current_text.is_empty() {
+        current_spans.push(Span::raw(current_text));
+    }
+
+    // Push final line (even if empty, to show cursor position)
+    if !current_spans.is_empty() || lines.is_empty() {
+        lines.push(Line::from(current_spans));
+    }
+
+    lines
 }
 
 /// Count how many lines the interaction display will take

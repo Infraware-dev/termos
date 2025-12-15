@@ -394,6 +394,56 @@ impl InputBuffer {
         self.char_count = 0;
         std::mem::take(&mut self.buffer)
     }
+
+    /// Calculate cursor position when input wraps across multiple lines.
+    /// Returns (total_visual_lines, cursor_row, cursor_col).
+    ///
+    /// - `prompt_width`: width of the prompt on the first line
+    /// - `terminal_width`: total width of the terminal
+    pub fn calculate_wrapped_cursor(
+        &self,
+        prompt_width: usize,
+        terminal_width: usize,
+    ) -> (usize, usize, usize) {
+        use unicode_width::UnicodeWidthChar;
+
+        // Edge case: zero-width terminal
+        if terminal_width == 0 {
+            return (1, 0, 0);
+        }
+
+        let text = self.text();
+        let cursor_pos = self.cursor_position;
+
+        let mut current_row = 0;
+        let mut current_col = prompt_width; // First line starts after prompt
+
+        for (i, c) in text.chars().enumerate() {
+            // Check if cursor is at this position
+            if i == cursor_pos {
+                return (current_row + 1, current_row, current_col);
+            }
+
+            let char_width = c.width().unwrap_or(1);
+
+            // Check if adding this char would exceed terminal width
+            if current_col + char_width > terminal_width {
+                // Wrap to next line
+                current_row += 1;
+                current_col = char_width;
+            } else {
+                current_col += char_width;
+            }
+        }
+
+        // Cursor is at the end of input
+        if current_col >= terminal_width {
+            // Cursor wraps to start of new line
+            (current_row + 2, current_row + 1, 0)
+        } else {
+            (current_row + 1, current_row, current_col)
+        }
+    }
 }
 
 impl Default for InputBuffer {
