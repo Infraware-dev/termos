@@ -527,95 +527,107 @@ impl NaturalLanguageHandler {
 
     /// Check if input is likely natural language using language-agnostic heuristics
     ///
-    /// Uses universal patterns instead of hardcoded words to support any language:
-    /// - Punctuation (?, !, commas, periods)
-    /// - Non-ASCII characters (accents, unicode, non-Latin scripts)
-    /// - Structural patterns (word count, spacing, capitalization)
-    /// - Statistical analysis (word/symbol ratios)
+    /// Uses universal patterns instead of hardcoded words to support any language.
+    /// Each heuristic is extracted to a separate method for testability and maintainability.
     fn is_likely_natural_language(&self, input: &str, ctx: &ClassifierContext) -> bool {
         let patterns = &ctx.patterns;
-
-        // 1. Universal punctuation patterns (question/exclamation marks, sentence boundaries)
-        if patterns.has_natural_language_indicators(input) {
-            return true;
-        }
-
-        // 2. Language-agnostic regex patterns (English-only fallback, maintained for compatibility)
-        if patterns.starts_with_question_word(input) || patterns.has_articles(input) {
-            return true;
-        }
-
-        // 3. Word count heuristic (universal across languages)
-        let word_count = input.split_whitespace().count();
-        if word_count > 5 && !patterns.has_shell_operators(input) {
-            return true;
-        }
-
-        // ===== LANGUAGE-AGNOSTIC HEURISTICS =====
-
-        // 4. Non-ASCII character detection (accents, unicode, non-Latin scripts)
-        // Most natural language contains non-ASCII, shell commands are ASCII
-        if !input.is_ascii() {
-            // Exclude common command patterns with unicode (e.g., docker --help with smart quotes)
-            let looks_like_command = patterns.has_command_syntax(input)
-                || patterns.has_shell_operators(input)
-                || input.starts_with('/')
-                || input.starts_with("./");
-
-            if !looks_like_command {
-                return true;
-            }
-        }
-
-        // 5. Repeated punctuation (e.g., "??", "!!", "...") indicates natural language
-        if input.contains("??") || input.contains("!!") || input.contains("...") {
-            return true;
-        }
-
-        // 6. Multiple short words (2-3 chars) with spaces - likely articles/prepositions
-        // Example: "a la", "de la", "in the", "per il"
         let words: Vec<&str> = input.split_whitespace().collect();
-        if words.len() >= 3 {
-            let short_word_count = words
-                .iter()
-                .filter(|w| w.len() >= 2 && w.len() <= 3)
-                .count();
-            let short_word_ratio = short_word_count as f64 / words.len() as f64;
 
-            // If >30% of words are 2-3 chars and no command syntax, likely NL
-            if short_word_ratio > 0.3 && !patterns.has_command_syntax(input) {
-                return true;
-            }
+        // Chain of heuristics - first match wins (short-circuit evaluation)
+        self.check_punctuation_indicators(input, patterns)
+            || self.check_question_words(input, patterns)
+            || self.check_word_count(input, &words, patterns)
+            || self.check_non_ascii(input, patterns)
+            || self.check_repeated_punctuation(input)
+            || self.check_short_word_ratio(&words, input, patterns)
+            || self.check_medium_phrase(&words, input, ctx)
+            || self.check_contractions(input)
+    }
+
+    // ===== HEURISTIC METHODS (each with low CCN) =====
+
+    /// Heuristic 1: Universal punctuation patterns (?, !, sentence boundaries)
+    fn check_punctuation_indicators(&self, input: &str, patterns: &CompiledPatterns) -> bool {
+        patterns.has_natural_language_indicators(input)
+    }
+
+    /// Heuristic 2: Question words and articles (English fallback)
+    fn check_question_words(&self, input: &str, patterns: &CompiledPatterns) -> bool {
+        patterns.starts_with_question_word(input) || patterns.has_articles(input)
+    }
+
+    /// Heuristic 3: Long input (>5 words) without shell operators
+    fn check_word_count(&self, input: &str, words: &[&str], patterns: &CompiledPatterns) -> bool {
+        words.len() > 5 && !patterns.has_shell_operators(input)
+    }
+
+    /// Heuristic 4: Non-ASCII characters (accents, unicode, non-Latin scripts)
+    fn check_non_ascii(&self, input: &str, patterns: &CompiledPatterns) -> bool {
+        if input.is_ascii() {
+            return false;
         }
+        // Exclude command patterns with unicode (e.g., smart quotes in --help)
+        let looks_like_command = patterns.has_command_syntax(input)
+            || patterns.has_shell_operators(input)
+            || input.starts_with('/')
+            || input.starts_with("./");
+        !looks_like_command
+    }
 
-        // 7. Medium-length phrases (3-5 words) without command indicators
-        // Commands are typically 1-2 words or have flags/operators
-        if (3..=5).contains(&word_count)
-            && !patterns.has_command_syntax(input)
-            && !patterns.has_shell_operators(input)
-            && !input.starts_with('/')
-            && !input.starts_with("./")
+    /// Heuristic 5: Repeated punctuation (??, !!, ...)
+    fn check_repeated_punctuation(&self, input: &str) -> bool {
+        input.contains("??") || input.contains("!!") || input.contains("...")
+    }
+
+    /// Heuristic 6: High ratio of short words (articles/prepositions)
+    fn check_short_word_ratio(
+        &self,
+        words: &[&str],
+        input: &str,
+        patterns: &CompiledPatterns,
+    ) -> bool {
+        if words.len() < 3 {
+            return false;
+        }
+        let short_word_count = words.iter().filter(|w| (2..=3).contains(&w.len())).count();
+        let short_word_ratio = short_word_count as f64 / words.len() as f64;
+        short_word_ratio > 0.3 && !patterns.has_command_syntax(input)
+    }
+
+    /// Heuristic 7: Medium-length phrases (3-5 words) without command indicators
+    fn check_medium_phrase(
+        &self,
+        words: &[&str],
+        input: &str,
+        ctx: &ClassifierContext,
+    ) -> bool {
+        let word_count = words.len();
+        if !(3..=5).contains(&word_count) {
+            return false;
+        }
+        let patterns = &ctx.patterns;
+        if patterns.has_command_syntax(input)
+            || patterns.has_shell_operators(input)
+            || input.starts_with('/')
+            || input.starts_with("./")
         {
-            // Additional check: no known command at start
-            // Use CommandCache for consistency with KnownCommandHandler (DRY principle)
-            let first_word = words.first().map(|w| w.to_lowercase()).unwrap_or_default();
-            let cache = ctx.cache.read().ok();
-            let is_command = cache
-                .and_then(|c| c.is_cached(&first_word))
-                .unwrap_or(false);
-            if !is_command {
-                return true;
-            }
+            return false;
         }
+        // Check if first word is a known command
+        let first_word = words.first().map(|w| w.to_lowercase()).unwrap_or_default();
+        let is_command = ctx
+            .cache
+            .read()
+            .ok()
+            .and_then(|c| c.is_cached(&first_word))
+            .unwrap_or(false);
+        !is_command
+    }
 
-        // 8. Contractions (e.g., "don't", "can't", "I'm") - universal NL indicator
-        // Check without trailing space to catch end-of-sentence and before-punctuation cases
-        let contractions = ["'t", "'re", "'ve", "'ll", "'s", "'m", "'d"];
-        if contractions.iter().any(|c| input.contains(c)) {
-            return true;
-        }
-
-        false
+    /// Heuristic 8: English contractions ('t, 're, 've, 'll, 's, 'm, 'd)
+    fn check_contractions(&self, input: &str) -> bool {
+        const CONTRACTIONS: [&str; 7] = ["'t", "'re", "'ve", "'ll", "'s", "'m", "'d"];
+        CONTRACTIONS.iter().any(|c| input.contains(c))
     }
 }
 
