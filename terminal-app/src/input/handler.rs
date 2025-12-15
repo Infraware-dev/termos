@@ -595,12 +595,7 @@ impl NaturalLanguageHandler {
     }
 
     /// Heuristic 7: Medium-length phrases (3-5 words) without command indicators
-    fn check_medium_phrase(
-        &self,
-        words: &[&str],
-        input: &str,
-        ctx: &ClassifierContext,
-    ) -> bool {
+    fn check_medium_phrase(&self, words: &[&str], input: &str, ctx: &ClassifierContext) -> bool {
         let word_count = words.len();
         if !(3..=5).contains(&word_count) {
             return false;

@@ -837,7 +837,11 @@ impl CommandExecutor {
     ///
     /// This encapsulates the decision logic that was previously inline in execute_internal(),
     /// reducing cyclomatic complexity.
-    fn select_execution_path(cmd: &str, args: &[String], original_input: Option<&str>) -> ExecutionPath {
+    fn select_execution_path(
+        cmd: &str,
+        args: &[String],
+        original_input: Option<&str>,
+    ) -> ExecutionPath {
         if Self::is_shell_builtin(cmd) {
             ExecutionPath::ShellBuiltin
         } else if original_input.is_some() {
@@ -903,7 +907,10 @@ impl CommandExecutor {
                 Ok((child, unlimited))
             }
             ExecutionPath::GlobExpansion => {
-                log::debug!("Command '{}' has glob patterns, executing through shell", cmd);
+                log::debug!(
+                    "Command '{}' has glob patterns, executing through shell",
+                    cmd
+                );
                 let full_command = Self::assemble_command(cmd, args);
                 let (shell, shell_flag) = Self::get_platform_shell();
                 let unlimited = is_unlimited_output_command(cmd);

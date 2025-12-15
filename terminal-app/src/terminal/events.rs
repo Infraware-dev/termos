@@ -1,6 +1,8 @@
 use anyhow::Result;
 /// Event handling for keyboard and mouse input
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind};
+use crossterm::event::{
+    self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,
+};
 use std::time::Duration;
 
 /// Event handler for terminal input
@@ -364,7 +366,10 @@ mod tests {
             modifiers: KeyModifiers::NONE,
         });
         let result = handler.map_event(event);
-        assert!(matches!(result, TerminalEvent::MouseDown { column: 10, row: 5 }));
+        assert!(matches!(
+            result,
+            TerminalEvent::MouseDown { column: 10, row: 5 }
+        ));
     }
 
     #[test]
@@ -377,7 +382,10 @@ mod tests {
             modifiers: KeyModifiers::NONE,
         });
         let result = handler.map_event(event);
-        assert!(matches!(result, TerminalEvent::MouseDrag { column: 15, row: 8 }));
+        assert!(matches!(
+            result,
+            TerminalEvent::MouseDrag { column: 15, row: 8 }
+        ));
     }
 
     #[test]

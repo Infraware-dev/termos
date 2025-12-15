@@ -211,9 +211,7 @@ fn render_unified_content(
     let output_end = (effective_scroll + visible_height).min(output_line_count);
 
     // Clone only the visible output lines (not the entire buffer!)
-    let mut all_lines: Vec<Line> = state.output.parsed_lines()
-        [output_start..output_end]
-        .to_vec();
+    let mut all_lines: Vec<Line> = state.output.parsed_lines()[output_start..output_end].to_vec();
 
     // Add approval flow lines if pending
     if let Some(interaction) = &state.pending_interaction {
@@ -397,11 +395,13 @@ fn count_interaction_lines(
 ) -> usize {
     match pending_interaction {
         None => 0,
-        Some(crate::terminal::PendingInteraction::CommandApproval {
-            message, ..
-        }) => {
+        Some(crate::terminal::PendingInteraction::CommandApproval { message, .. }) => {
             // message line (if not empty) + command line
-            if message.is_empty() { 1 } else { 2 }
+            if message.is_empty() {
+                1
+            } else {
+                2
+            }
         }
         Some(crate::terminal::PendingInteraction::Question { question, options }) => {
             // Skip display for password prompts

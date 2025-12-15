@@ -75,7 +75,7 @@ impl OutputBuffer {
             parsed_buffer: Vec::new(),
             scroll_position: 0,
             visible_lines: 0, // Initialized to 0, set on first render from actual terminal height
-            extra_lines: 1,    // At least 1 for prompt line
+            extra_lines: 1,   // At least 1 for prompt line
         }
     }
 
@@ -154,7 +154,8 @@ impl OutputBuffer {
         if self.visible_lines == 0 {
             return 0; // No scroll before first render
         }
-        self.total_content_lines().saturating_sub(self.visible_lines)
+        self.total_content_lines()
+            .saturating_sub(self.visible_lines)
     }
 
     /// Set extra lines count (prompt, interaction, etc.)
@@ -628,7 +629,7 @@ mod tests {
     fn test_output_buffer_pop_adjusts_scroll() {
         let mut buffer = OutputBuffer::new();
         buffer.set_extra_lines(0); // No prompt in unit test
-        // Set visible lines to 1 so we have scrollable content
+                                   // Set visible lines to 1 so we have scrollable content
         buffer.set_visible_lines(1);
 
         buffer.add_line("line 1".to_string());

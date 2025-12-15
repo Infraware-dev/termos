@@ -314,10 +314,11 @@ impl InfrawareTerminal {
         self.using_mock_llm = using_mock;
     }
 
-    /// Run the main event loop
-    async fn run(&mut self) -> Result<()> {
-        // Load aliases at startup (blocking to ensure they're available before first command)
-        // Use spawn_blocking for file I/O to avoid blocking the executor
+    /// Load system and user aliases at startup.
+    ///
+    /// Uses spawn_blocking for file I/O to avoid blocking the executor.
+    /// Errors are logged but not propagated (fail-soft for aliases).
+    async fn load_aliases_at_startup() {
         let alias_load_result = tokio::task::spawn_blocking(|| {
             use input::discovery::CommandCache;
 
@@ -335,8 +336,10 @@ impl InfrawareTerminal {
         if let Err(e) = alias_load_result {
             log::error!("Alias loading task panicked: {}", e);
         }
+    }
 
-        // Show LLM client status
+    /// Display LLM client connection status at startup.
+    fn display_llm_status(&mut self) {
         if self.using_mock_llm {
             self.state.add_output(MessageFormatter::info(
                 "LLM: Mock mode (backend not available)",
@@ -346,6 +349,168 @@ impl InfrawareTerminal {
                 .add_output(MessageFormatter::success("LLM: Connected to backend"));
         }
         self.state.add_output(String::new());
+    }
+
+    /// Calculate render timeout based on current terminal mode.
+    ///
+    /// Returns 16ms (60 FPS) during LLM wait for smooth throbber animation,
+    /// 100ms (10 FPS) otherwise to reduce CPU overhead.
+    fn calculate_render_timeout(&self) -> Duration {
+        if matches!(self.state.mode, TerminalMode::WaitingLLM) {
+            Duration::from_millis(16) // 60 FPS for smooth throbber animation
+        } else {
+            Duration::from_millis(100) // 10 FPS when idle (reduces overhead)
+        }
+    }
+
+    /// Check for completed background jobs if enough time has passed.
+    ///
+    /// Uses periodic checking (250ms interval) to reduce lock contention
+    /// on the job manager.
+    fn check_background_jobs(&mut self, last_job_check: &mut Instant) {
+        if last_job_check.elapsed() >= JOB_CHECK_INTERVAL {
+            self.check_completed_jobs();
+            *last_job_check = Instant::now();
+        }
+    }
+
+    /// Poll for one event and send it to the main loop.
+    ///
+    /// # Returns
+    /// `true` to continue polling, `false` to stop.
+    fn poll_and_send_event(
+        event_handler: &EventHandler,
+        event_tx: &tokio::sync::mpsc::Sender<TerminalEvent>,
+        cancel_token_rx: &watch::Receiver<CancellationToken>,
+    ) -> bool {
+        match event_handler.poll_event(Duration::from_millis(1)) {
+            Ok(Some(event)) => {
+                // For CtrlC, cancel the current token immediately
+                if matches!(event, TerminalEvent::CtrlC) {
+                    log::info!("Event poller: CtrlC detected, cancelling current token");
+                    cancel_token_rx.borrow().cancel();
+                }
+                // Send event to main loop (exit if channel closed)
+                event_tx.blocking_send(event).is_ok()
+            }
+            Ok(None) => true, // No event, continue polling
+            Err(e) => {
+                log::error!("Event polling error: {}", e);
+                false
+            }
+        }
+    }
+
+    /// Inner event polling loop (runs in spawn_blocking context).
+    fn event_polling_loop(
+        event_tx: tokio::sync::mpsc::Sender<TerminalEvent>,
+        cancel_token_rx: watch::Receiver<CancellationToken>,
+        pause_polling_flag: Arc<std::sync::atomic::AtomicBool>,
+    ) {
+        use std::sync::atomic::Ordering;
+        let event_handler = EventHandler::new();
+
+        loop {
+            // Check if main loop has exited (receiver dropped)
+            if event_tx.is_closed() {
+                log::info!("Event poller: channel closed, stopping");
+                break;
+            }
+
+            // Check if polling is paused (during interactive commands like vim)
+            if pause_polling_flag.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(50));
+                continue;
+            }
+
+            // Poll and send event
+            if !Self::poll_and_send_event(&event_handler, &event_tx, &cancel_token_rx) {
+                break;
+            }
+        }
+    }
+
+    /// Spawn background task for event polling.
+    ///
+    /// This task runs independently and polls for terminal events.
+    /// It can cancel async operations on Ctrl+C via the cancellation token.
+    fn spawn_event_polling_task(
+        event_tx: tokio::sync::mpsc::Sender<TerminalEvent>,
+        cancel_token_rx: watch::Receiver<CancellationToken>,
+        pause_polling_flag: Arc<std::sync::atomic::AtomicBool>,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::task::spawn_blocking(move || {
+            InfrawareTerminal::event_polling_loop(event_tx, cancel_token_rx, pause_polling_flag);
+        })
+    }
+
+    /// Wait for next event or timeout.
+    ///
+    /// Uses biased select to prioritize events over idle timeout,
+    /// minimizing keypress lag.
+    ///
+    /// # Returns
+    /// - `None` - Channel closed (caller should exit)
+    /// - `Some(None)` - Timeout (caller should continue)
+    /// - `Some(Some(event))` - Event received
+    async fn wait_for_next_event(
+        event_rx: &mut tokio::sync::mpsc::Receiver<TerminalEvent>,
+        render_timeout: Duration,
+    ) -> Option<Option<TerminalEvent>> {
+        tokio::select! {
+            biased;
+
+            maybe_event = event_rx.recv() => {
+                match maybe_event {
+                    Some(event) => Some(Some(event)),
+                    None => {
+                        log::info!("Event channel closed");
+                        None // Signal to break main loop
+                    }
+                }
+            }
+            _ = tokio::time::sleep(render_timeout) => {
+                Some(None) // Timeout - continue to next iteration
+            }
+        }
+    }
+
+    /// Drain all pending events from the channel (non-blocking).
+    ///
+    /// Processes events in batches, yielding every 10 events to avoid
+    /// starving the tokio executor (follows Alice Ryhl's async best practices).
+    ///
+    /// # Returns
+    /// - `Ok(true)` - Continue main loop
+    /// - `Ok(false)` - Quit requested
+    async fn drain_pending_events(
+        &mut self,
+        event_rx: &mut tokio::sync::mpsc::Receiver<TerminalEvent>,
+    ) -> Result<bool> {
+        let mut event_count = 1usize;
+
+        while let Ok(event) = event_rx.try_recv() {
+            if !self.handle_event(event).await? {
+                return Ok(false); // Quit requested
+            }
+            event_count += 1;
+
+            // Yield every 10 events to not starve the tokio executor
+            if event_count.is_multiple_of(10) {
+                tokio::task::yield_now().await;
+            }
+        }
+
+        Ok(true)
+    }
+
+    /// Run the main event loop
+    async fn run(&mut self) -> Result<()> {
+        // Load aliases at startup
+        Self::load_aliases_at_startup().await;
+
+        // Show LLM client status
+        self.display_llm_status();
 
         // Set initial window title
         let title = self.state.get_window_title();
@@ -358,56 +523,14 @@ impl InfrawareTerminal {
         let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<TerminalEvent>(32);
 
         // Subscribe to cancellation token via watch channel
-        // This allows poller to always see the current token (even after resets)
         let cancel_token_rx = self.cancellation_token_tx.subscribe();
 
         // Get pause flag for event polling (used during interactive commands like vim)
         let pause_polling_flag = self.ui.event_polling_pause_flag();
 
         // Spawn background task for event polling
-        // This task runs independently and can cancel async operations on Ctrl+C
-        let poll_handle = tokio::task::spawn_blocking(move || {
-            use std::sync::atomic::Ordering;
-            let event_handler = EventHandler::new();
-            loop {
-                // Check if main loop has exited (receiver dropped)
-                if event_tx.is_closed() {
-                    log::info!("Event poller: channel closed, stopping");
-                    break;
-                }
-
-                // Check if polling is paused (during interactive commands like vim)
-                // When paused, sleep instead of polling to avoid stealing keyboard input
-                if pause_polling_flag.load(Ordering::SeqCst) {
-                    std::thread::sleep(Duration::from_millis(50));
-                    continue;
-                }
-
-                // Poll with minimal timeout for responsive typing (1ms)
-                match event_handler.poll_event(Duration::from_millis(1)) {
-                    Ok(Some(event)) => {
-                        // For CtrlC, cancel the current token immediately
-                        // This interrupts any ongoing async operation (e.g., LLM query)
-                        // The main loop will handle the event and clear input after
-                        if matches!(event, TerminalEvent::CtrlC) {
-                            log::info!("Event poller: CtrlC detected, cancelling current token");
-                            cancel_token_rx.borrow().cancel();
-                        }
-                        // Send event to main loop (exit if channel closed)
-                        if event_tx.blocking_send(event).is_err() {
-                            break;
-                        }
-                    }
-                    Ok(None) => {
-                        // No event, continue polling
-                    }
-                    Err(e) => {
-                        log::error!("Event polling error: {}", e);
-                        break;
-                    }
-                }
-            }
-        });
+        let poll_handle =
+            Self::spawn_event_polling_task(event_tx, cancel_token_rx, pause_polling_flag);
 
         // Track last job check time for periodic checking (reduces lock contention)
         let mut last_job_check = Instant::now();
@@ -419,69 +542,28 @@ impl InfrawareTerminal {
         // 4. Loop back to render
         loop {
             // === STEP 1: RENDER current state (Elm pattern: view first) ===
-            // TUI render is fast enough (<1ms) to not need block_in_place
             self.ui.render(&mut self.state)?;
 
             // Check for completed background jobs periodically
-            if last_job_check.elapsed() >= JOB_CHECK_INTERVAL {
-                self.check_completed_jobs();
-                last_job_check = Instant::now();
-            }
+            self.check_background_jobs(&mut last_job_check);
 
             // === STEP 2: WAIT for events ===
-            // Dynamic timeout: fast (16ms/60 FPS) for throbber animation during LLM queries,
-            // slow (100ms/10 FPS) when idle to reduce CPU overhead and keypress lag
-            let render_timeout = if matches!(self.state.mode, TerminalMode::WaitingLLM) {
-                Duration::from_millis(16) // 60 FPS for smooth throbber animation
-            } else {
-                Duration::from_millis(100) // 10 FPS when idle (reduces overhead)
-            };
-
-            // Note: We don't check cancellation_token here because it's used
-            // to cancel async operations (LLM queries), not to exit the app.
-            // App exit is handled by the Quit event handler returning Ok(false).
-            let event = tokio::select! {
-                // biased: prioritize events over idle timeout to minimize keypress lag
-                // Without this, select! randomly picks a ready branch, causing up to 16ms delay
-                biased;
-
-                maybe_event = event_rx.recv() => {
-                    match maybe_event {
-                        Some(event) => event,
-                        None => {
-                            log::info!("Event channel closed");
-                            break;
-                        }
-                    }
-                }
-                _ = tokio::time::sleep(render_timeout) => {
-                    // Idle timeout - loop back to render
-                    continue;
-                }
+            let render_timeout = self.calculate_render_timeout();
+            let event = match Self::wait_for_next_event(&mut event_rx, render_timeout).await {
+                None => break,          // Channel closed
+                Some(None) => continue, // Timeout
+                Some(Some(e)) => e,     // Event received
             };
 
             // === STEP 3: HANDLE events (update state) ===
-            // Process first event
             if !self.handle_event(event).await? {
                 break; // Quit requested
             }
 
             // Drain ALL pending events (non-blocking) for responsive typing
-            let mut event_count = 1usize;
-            while let Ok(event) = event_rx.try_recv() {
-                if !self.handle_event(event).await? {
-                    break;
-                }
-                event_count += 1;
-
-                // Yield every 10 events to not starve the tokio executor
-                // (follows Alice Ryhl's async best practices)
-                if event_count.is_multiple_of(10) {
-                    tokio::task::yield_now().await;
-                }
+            if !self.drain_pending_events(&mut event_rx).await? {
+                break; // Quit requested during drain
             }
-
-            // Loop back to STEP 1 (render updated state)
         }
 
         // Clean up polling task
