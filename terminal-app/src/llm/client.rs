@@ -443,7 +443,7 @@ impl HttpLLMClient {
                             log::trace!("SSE event type: {}", event_type);
                         } else if let Some(data) = line.strip_prefix("data: ") {
                             if let Some(ref event) = current_event {
-                                match self.handle_sse_event_v2(event, data, &mut result) {
+                                match self.handle_sse_event(event, data, &mut result) {
                                     Ok(Some(interrupt)) => {
                                         interrupt_data = Some(interrupt);
                                         // Don't break - continue processing to get any remaining messages
@@ -478,7 +478,7 @@ impl HttpLLMClient {
             }
             if let Some(data) = line.strip_prefix("data: ") {
                 if let Some(ref event) = current_event {
-                    if let Some(interrupt) = self.handle_sse_event_v2(event, data, &mut result)? {
+                    if let Some(interrupt) = self.handle_sse_event(event, data, &mut result)? {
                         interrupt_data = Some(interrupt);
                     }
                 }
@@ -707,7 +707,7 @@ impl HttpLLMClient {
 
     /// Handle a single SSE event - returns interrupt data instead of marker
     /// Returns Some(InterruptData) if an interrupt is detected, None otherwise
-    fn handle_sse_event_v2(
+    fn handle_sse_event(
         &self,
         event: &str,
         data: &str,
@@ -1084,8 +1084,6 @@ mod tests {
         assert!(response.contains("Docker"));
     }
 
-    // Note: Legacy handle_sse_event() tests removed - use handle_sse_event_v2 tests below
-
     #[test]
     fn test_stream_command_serialization() {
         let cmd = StreamCommand {
@@ -1280,55 +1278,55 @@ mod tests {
     }
 
     // =========================================================================
-    // Tests for handle_sse_event_v2 (production SSE parser)
+    // Tests for handle_sse_event (SSE event dispatcher)
     // =========================================================================
 
     #[test]
-    fn test_handle_sse_event_v2_metadata() {
+    fn test_handle_sse_event_metadata() {
         let client =
             HttpLLMClient::new("http://localhost:8080".to_string(), "test-key".to_string());
         let mut result = String::new();
         let data = r#"{"run_id":"run-12345","attempt":1}"#;
 
-        let outcome = client.handle_sse_event_v2("metadata", data, &mut result);
+        let outcome = client.handle_sse_event("metadata", data, &mut result);
         assert!(outcome.is_ok());
         assert!(outcome.unwrap().is_none()); // No interrupt
         assert!(result.is_empty());
     }
 
     #[test]
-    fn test_handle_sse_event_v2_messages_ai() {
+    fn test_handle_sse_event_messages_ai() {
         let client =
             HttpLLMClient::new("http://localhost:8080".to_string(), "test-key".to_string());
         let mut result = String::new();
         let data = r#"[{"type":"ai","content":"Hello from AI"}]"#;
 
-        let outcome = client.handle_sse_event_v2("messages", data, &mut result);
+        let outcome = client.handle_sse_event("messages", data, &mut result);
         assert!(outcome.is_ok());
         assert!(outcome.unwrap().is_none());
         assert_eq!(result, "Hello from AI");
     }
 
     #[test]
-    fn test_handle_sse_event_v2_messages_assistant_role() {
+    fn test_handle_sse_event_messages_assistant_role() {
         let client =
             HttpLLMClient::new("http://localhost:8080".to_string(), "test-key".to_string());
         let mut result = String::new();
         let data = r#"[{"role":"assistant","content":"Response"}]"#;
 
-        let outcome = client.handle_sse_event_v2("messages", data, &mut result);
+        let outcome = client.handle_sse_event("messages", data, &mut result);
         assert!(outcome.is_ok());
         assert_eq!(result, "Response");
     }
 
     #[test]
-    fn test_handle_sse_event_v2_command_approval() {
+    fn test_handle_sse_event_command_approval() {
         let client =
             HttpLLMClient::new("http://localhost:8080".to_string(), "test-key".to_string());
         let mut result = String::new();
         let data = r#"{"__interrupt__":[{"value":{"type":"command_approval","command":"rm -rf /tmp/test","message":"Delete test files?"}}]}"#;
 
-        let outcome = client.handle_sse_event_v2("updates", data, &mut result);
+        let outcome = client.handle_sse_event("updates", data, &mut result);
         assert!(outcome.is_ok());
         let interrupt = outcome.unwrap();
         assert!(interrupt.is_some());
@@ -1343,13 +1341,13 @@ mod tests {
     }
 
     #[test]
-    fn test_handle_sse_event_v2_question_interrupt() {
+    fn test_handle_sse_event_question_interrupt() {
         let client =
             HttpLLMClient::new("http://localhost:8080".to_string(), "test-key".to_string());
         let mut result = String::new();
         let data = r#"{"__interrupt__":[{"value":{"type":"question","question":"What database?","options":["PostgreSQL","MySQL"]}}]}"#;
 
-        let outcome = client.handle_sse_event_v2("updates", data, &mut result);
+        let outcome = client.handle_sse_event("updates", data, &mut result);
         assert!(outcome.is_ok());
         let interrupt = outcome.unwrap();
         assert!(interrupt.is_some());
@@ -1367,14 +1365,14 @@ mod tests {
     }
 
     #[test]
-    fn test_handle_sse_event_v2_question_without_options() {
+    fn test_handle_sse_event_question_without_options() {
         let client =
             HttpLLMClient::new("http://localhost:8080".to_string(), "test-key".to_string());
         let mut result = String::new();
         let data =
             r#"{"__interrupt__":[{"value":{"type":"question","message":"What is your name?"}}]}"#;
 
-        let outcome = client.handle_sse_event_v2("updates", data, &mut result);
+        let outcome = client.handle_sse_event("updates", data, &mut result);
         assert!(outcome.is_ok());
         let interrupt = outcome.unwrap();
         assert!(interrupt.is_some());
@@ -1389,60 +1387,60 @@ mod tests {
     }
 
     #[test]
-    fn test_handle_sse_event_v2_values_simple_content() {
+    fn test_handle_sse_event_values_simple_content() {
         let client =
             HttpLLMClient::new("http://localhost:8080".to_string(), "test-key".to_string());
         let mut result = String::new();
         let data = r#"{"messages":[{"type":"ai","content":"Simple response"}]}"#;
 
-        let outcome = client.handle_sse_event_v2("values", data, &mut result);
+        let outcome = client.handle_sse_event("values", data, &mut result);
         assert!(outcome.is_ok());
         assert_eq!(result, "Simple response");
     }
 
     #[test]
-    fn test_handle_sse_event_v2_values_array_content() {
+    fn test_handle_sse_event_values_array_content() {
         let client =
             HttpLLMClient::new("http://localhost:8080".to_string(), "test-key".to_string());
         let mut result = String::new();
         let data = r#"{"messages":[{"type":"ai","content":[{"type":"text","text":"Part 1"},{"type":"text","text":"Part 2"}]}]}"#;
 
-        let outcome = client.handle_sse_event_v2("values", data, &mut result);
+        let outcome = client.handle_sse_event("values", data, &mut result);
         assert!(outcome.is_ok());
         assert!(result.contains("Part 1"));
         assert!(result.contains("Part 2"));
     }
 
     #[test]
-    fn test_handle_sse_event_v2_error() {
+    fn test_handle_sse_event_error() {
         let client =
             HttpLLMClient::new("http://localhost:8080".to_string(), "test-key".to_string());
         let mut result = String::new();
         let data = r#"{"message":"API error occurred"}"#;
 
-        let outcome = client.handle_sse_event_v2("error", data, &mut result);
+        let outcome = client.handle_sse_event("error", data, &mut result);
         assert!(outcome.is_err());
         assert!(outcome.unwrap_err().to_string().contains("API error"));
     }
 
     #[test]
-    fn test_handle_sse_event_v2_end() {
+    fn test_handle_sse_event_end() {
         let client =
             HttpLLMClient::new("http://localhost:8080".to_string(), "test-key".to_string());
         let mut result = String::new();
 
-        let outcome = client.handle_sse_event_v2("end", "", &mut result);
+        let outcome = client.handle_sse_event("end", "", &mut result);
         assert!(outcome.is_ok());
         assert!(outcome.unwrap().is_none());
     }
 
     #[test]
-    fn test_handle_sse_event_v2_unknown_event() {
+    fn test_handle_sse_event_unknown_event() {
         let client =
             HttpLLMClient::new("http://localhost:8080".to_string(), "test-key".to_string());
         let mut result = String::new();
 
-        let outcome = client.handle_sse_event_v2("unknown_event_type", "{}", &mut result);
+        let outcome = client.handle_sse_event("unknown_event_type", "{}", &mut result);
         assert!(outcome.is_ok());
         assert!(outcome.unwrap().is_none());
     }
