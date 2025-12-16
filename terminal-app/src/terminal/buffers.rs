@@ -36,7 +36,7 @@
 //! state.insert_char('s');
 //!
 //! // Submit and add to history
-//! let command = state.submit_input();
+//! let command = state.submit_input(true); // true = add to history
 //! assert_eq!(command, "ls");
 //! ```
 
