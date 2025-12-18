@@ -202,18 +202,42 @@ impl NaturalLanguageOrchestrator {
                 log::info!("User approved command: {}", command);
             }
 
+            // Show throbber animation while waiting for LLM response
+            state.mode = TerminalMode::WaitingLLM;
+            state.start_throbber();
             ui.render(state)?;
 
-            // Resume the LLM run
-            match self.llm_client.resume_run().await {
-                Ok(result) => {
-                    self.handle_query_result(result, state);
-                }
-                Err(e) => {
-                    state.add_output(MessageFormatter::error(format!("Failed to resume: {e}")));
-                    state.mode = TerminalMode::Normal;
+            // Pin the future so we can poll it multiple times in the render loop
+            let mut resume_future = std::pin::pin!(self.llm_client.resume_run());
+
+            // Render loop with 100ms timeout for ~10 FPS throbber animation
+            loop {
+                tokio::select! {
+                    biased;
+
+                    result = &mut resume_future => {
+                        match result {
+                            Ok(llm_result) => {
+                                state.stop_throbber();
+                                self.handle_query_result(llm_result, state);
+                            }
+                            Err(e) => {
+                                state.stop_throbber();
+                                state.add_output(MessageFormatter::error(format!("Failed to resume: {e}")));
+                                state.mode = TerminalMode::Normal;
+                            }
+                        }
+                        break;
+                    }
+                    _ = tokio::time::sleep(Duration::from_millis(RENDER_INTERVAL_MS)) => {
+                        // Periodic render for throbber animation
+                        ui.render(state)?;
+                    }
                 }
             }
+
+            // Final render to ensure UI reflects stopped throbber immediately
+            ui.render(state)?;
         } else {
             if let Some(PendingInteraction::CommandApproval { ref command, .. }) = pending {
                 log::info!("User rejected command: {}", command);
