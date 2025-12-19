@@ -1538,4 +1538,65 @@ mod tests {
             _ => panic!("Expected Question"),
         }
     }
+
+    // =========================================================================
+    // Additional coverage tests for LLMQueryResult
+    // =========================================================================
+
+    #[test]
+    fn test_llm_query_result_as_complete() {
+        // Test Complete variant returns Some
+        let complete = LLMQueryResult::Complete("test response".to_string());
+        assert_eq!(complete.as_complete(), Some("test response"));
+
+        // Test CommandApproval returns None
+        let approval = LLMQueryResult::CommandApproval {
+            command: "ls".to_string(),
+            message: "list".to_string(),
+        };
+        assert_eq!(approval.as_complete(), None);
+
+        // Test Question returns None
+        let question = LLMQueryResult::Question {
+            question: "which?".to_string(),
+            options: None,
+        };
+        assert_eq!(question.as_complete(), None);
+    }
+
+    #[test]
+    #[should_panic(expected = "Expected Complete, got CommandApproval")]
+    fn test_llm_query_result_unwrap_complete_panics_on_approval() {
+        let result = LLMQueryResult::CommandApproval {
+            command: "test".to_string(),
+            message: "msg".to_string(),
+        };
+        result.unwrap_complete();
+    }
+
+    #[test]
+    #[should_panic(expected = "Expected Complete, got Question")]
+    fn test_llm_query_result_unwrap_complete_panics_on_question() {
+        let result = LLMQueryResult::Question {
+            question: "test?".to_string(),
+            options: None,
+        };
+        result.unwrap_complete();
+    }
+
+    #[test]
+    fn test_is_valid_ai_content() {
+        // Valid content
+        assert!(HttpLLMClient::is_valid_ai_content("Hello, how can I help?"));
+        assert!(HttpLLMClient::is_valid_ai_content("The command is: ls -la"));
+
+        // Invalid content (empty or handoff messages)
+        assert!(!HttpLLMClient::is_valid_ai_content(""));
+        assert!(!HttpLLMClient::is_valid_ai_content(
+            "Transferring to agent..."
+        ));
+        assert!(!HttpLLMClient::is_valid_ai_content(
+            "Successfully transferred control"
+        ));
+    }
 }
