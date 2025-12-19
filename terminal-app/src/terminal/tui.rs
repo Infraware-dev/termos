@@ -193,10 +193,9 @@ fn render_unified_content(
     let terminal_width = area.width as usize;
 
     // Calculate how many visual lines the prompt+input will take when wrapped
-    let (prompt_lines, _, _) =
-        state
-            .input
-            .calculate_wrapped_cursor(prompt_width_for_wrap, terminal_width);
+    let (prompt_lines, _, _) = state
+        .input
+        .calculate_wrapped_cursor(prompt_width_for_wrap, terminal_width);
     let extra_lines = interaction_line_count + prompt_lines;
 
     // Update OutputBuffer with layout info for scroll calculations
@@ -315,10 +314,9 @@ fn render_unified_content(
 
     // === POSITION CURSOR ===
     // Calculate cursor position considering line wrapping
-    let (total_input_lines, cursor_row_in_input, cursor_col) =
-        state
-            .input
-            .calculate_wrapped_cursor(prompt_width, terminal_width);
+    let (total_input_lines, cursor_row_in_input, cursor_col) = state
+        .input
+        .calculate_wrapped_cursor(prompt_width, terminal_width);
 
     // Calculate where the first prompt line is in total content
     let prompt_start_in_total = total_lines.saturating_sub(total_input_lines);

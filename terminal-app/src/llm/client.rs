@@ -582,14 +582,11 @@ impl HttpLLMClient {
                 .and_then(|v| v.as_str())
                 .unwrap_or("Agent is asking for input")
                 .to_string();
-            let options = value
-                .get("options")
-                .and_then(|v| v.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|v| v.as_str().map(String::from))
-                        .collect()
-                });
+            let options = value.get("options").and_then(|v| v.as_array()).map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            });
             InterruptData::Question { question, options }
         }
     }
