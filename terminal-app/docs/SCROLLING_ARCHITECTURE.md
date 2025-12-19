@@ -2,7 +2,7 @@
 
 ## Overview
 
-The terminal scrolling system implements a clean separation of concerns between viewport management, buffer scrolling, and event handling. This document provides a high-level architectural overview.
+The terminal scrolling system implements a clean separation of concerns between viewport management, buffer scrolling, visual scrollbar rendering, and event handling. This document provides a high-level architectural overview including mouse wheel support and visual scrollbar indicators.
 
 ## Core Components
 
@@ -11,46 +11,71 @@ The terminal scrolling system implements a clean separation of concerns between 
 **Location**: `src/terminal/state.rs`
 
 ```
-┌─────────────────────────────────────┐
-│     TerminalState                   │
-├─────────────────────────────────────┤
-│ Fields:                             │
-│ - output: OutputBuffer              │
-│ - input: InputBuffer                │
-│ - history: CommandHistory           │
-│ - mode: TerminalMode                │
-│ - visible_lines: usize    [NEW]     │
-│ - pending_interaction: Option       │
-├─────────────────────────────────────┤
-│ Key Methods:                        │
-│ + scroll_up()                       │
-│ + scroll_down()                     │
-│ + set_visible_lines(lines)  [NEW]   │
-│ + visible_lines() -> usize  [NEW]   │
-└─────────────────────────────────────┘
+┌─────────────────────────────────────────┐
+│     TerminalState                       │
+├─────────────────────────────────────────┤
+│ Fields:                                 │
+│ - output: OutputBuffer                  │
+│ - input: InputBuffer                    │
+│ - history: CommandHistory               │
+│ - mode: TerminalMode                    │
+│ - visible_lines: usize                  │
+│ - pending_interaction: Option           │
+│ - scrollbar_info: Option<ScrollbarInfo> │
+├─────────────────────────────────────────┤
+│ Key Methods:                            │
+│ + scroll_up()                           │
+│ + scroll_down()                         │
+│ + scroll_to_end()                       │
+│ + set_visible_lines(lines)              │
+│ + visible_lines() -> usize              │
+└─────────────────────────────────────────┘
          ↓                    ↑
          │   delegates to     │
          │                    │
          ↓                    │
-┌─────────────────────────────────────┐
-│     OutputBuffer                    │
-├─────────────────────────────────────┤
-│ Fields:                             │
-│ - buffer: Vec<String>               │
-│ - scroll_position: usize            │
-├─────────────────────────────────────┤
-│ Key Methods:                        │
-│ + scroll_up()                       │
-│ + scroll_down(visible_lines) [UPD]  │
-│ + set_visible_lines(lines)  [NEW]   │
-│ + auto_scroll_to_bottom()           │
-└─────────────────────────────────────┘
+┌─────────────────────────────────────────┐
+│     OutputBuffer                        │
+├─────────────────────────────────────────┤
+│ Fields:                                 │
+│ - buffer: Vec<String>                   │
+│ - parsed_buffer: Vec<Line<'static>>     │
+│ - scroll_position: usize                │
+│ - visible_lines: usize                  │
+│ - extra_lines: usize                    │
+├─────────────────────────────────────────┤
+│ Key Methods:                            │
+│ + scroll_up()                           │
+│ + scroll_down()                         │
+│ + scroll_to_end()                       │
+│ + set_visible_lines(lines)              │
+│ + set_extra_lines(lines)                │
+│ + set_scroll_position_exact(pos)        │
+│ + auto_scroll_to_bottom()               │
+└─────────────────────────────────────────┘
 ```
 
-### 2. Event Flow
+### 2. ScrollbarInfo (Mouse Interaction)
+
+**Location**: `src/terminal/state.rs`
+
+```rust
+pub struct ScrollbarInfo {
+    pub column: u16,        // Rightmost column where scrollbar is rendered
+    pub height: u16,        // Total height of scrollbar area
+    pub total_lines: usize, // Total lines in output buffer
+    pub visible_lines: usize, // Visible lines in output area
+}
+```
+
+**Key Methods**:
+- `is_on_scrollbar(column)` - Check if mouse position is on scrollbar
+- `row_to_scroll_position(row)` - Convert mouse row to scroll position
+
+### 3. Event Flow
 
 ```
-Keyboard Input
+Input Events
     │
     ↓
 ┌──────────────────┐
@@ -58,11 +83,13 @@ Keyboard Input
 │  (events.rs)     │
 └──────────────────┘
     │
-    ├─ Key::Up + Ctrl ──→ TerminalEvent::ScrollUp
-    ├─ Key::Down + Ctrl ─→ TerminalEvent::ScrollDown
-    ├─ Key::PageUp ──────→ TerminalEvent::ScrollUp
-    ├─ Key::PageDown ────→ TerminalEvent::ScrollDown
-    └─ Key::Up/Down ─────→ TerminalEvent::HistoryPrevious/Next
+    ├─ Key::Up + Ctrl ──────→ TerminalEvent::ScrollUp
+    ├─ Key::Down + Ctrl ────→ TerminalEvent::ScrollDown
+    ├─ Key::PageUp ─────────→ TerminalEvent::ScrollUp
+    ├─ Key::PageDown ───────→ TerminalEvent::ScrollDown
+    ├─ Mouse::ScrollUp ─────→ TerminalEvent::ScrollUp      [NEW]
+    ├─ Mouse::ScrollDown ───→ TerminalEvent::ScrollDown    [NEW]
+    └─ Key::Up/Down ────────→ TerminalEvent::HistoryPrevious/Next
     │
     ↓
 ┌──────────────────────────┐
@@ -73,6 +100,7 @@ Keyboard Input
     │
     ├─ ScrollUp ──→ state.scroll_up()
     ├─ ScrollDown ─→ state.scroll_down()
+    ├─ Char input ─→ state.scroll_to_end()  [NEW: auto-scroll on typing]
     │   (uses stored visible_lines)
     └─ Other ──────→ other handlers
     │
@@ -86,96 +114,69 @@ Keyboard Input
     ├─ Calculate visible_lines from terminal size
     ├─ Call state.set_visible_lines(lines)
     ├─ Sync OutputBuffer scroll position if needed
-    └─ Render UI with scrolled content
+    ├─ Render UI with scrolled content
+    └─ Render Scrollbar widget if content > viewport  [NEW]
 ```
 
-### 3. Rendering Pipeline
+### 4. Rendering Pipeline with Scrollbar
 
 ```
 TerminalUI::render(&mut state)
 │
-├─ Step 1: Calculate Dimensions
-│  size = terminal.size()?
-│  output_height = size.height.saturating_sub(4)
-│  visible_lines = output_height.saturating_sub(2) as usize
+├─ Step 1: Build All Content Lines
+│  all_lines = output.parsed_lines() + interaction + prompt
+│  output_line_count = output lines only
+│  extra_lines = total - output_line_count
 │
-├─ Step 2: Update State
-│  state.set_visible_lines(visible_lines)
-│  ├─ Updates visible_lines field
-│  └─ (OutputBuffer can now use correct bounds)
+├─ Step 2: Calculate Scroll
+│  total_lines = all_lines.len()
+│  visible_height = area.height
+│  max_scroll = total_lines - visible_height
+│  effective_scroll = scroll_position.min(max_scroll)
+│  [Clamp and sync back to buffer if needed]
 │
-├─ Step 3: Render Frame
-│  terminal.draw(|frame| {
-│      render_frame(frame, state)
-│  })
-│  ├─ Gets visible_lines from state
-│  ├─ Calculates display range from scroll_position
-│  ├─ Renders output lines[scroll_pos..scroll_pos+visible]
-│  ├─ Renders input buffer with cursor
-│  └─ Renders scrollbar indicator
+├─ Step 3: Render Content with Scroll
+│  Paragraph::new(all_lines).scroll((effective_scroll, 0))
+│  [Ratatui handles the scroll offset]
 │
-└─ Complete: UI reflects current scroll position
+├─ Step 4: Render Scrollbar (if needed)
+│  if total_lines > visible_height:
+│    ├─ Store ScrollbarInfo for mouse interaction
+│    ├─ ScrollbarState::default()
+│    │    .content_length(max_scroll.max(1))  [KEY FIX]
+│    │    .position(effective_scroll)
+│    └─ render_stateful_widget(Scrollbar, area, &mut state)
+│
+└─ Step 5: Position Cursor
+   Calculate prompt line position on screen
+   Set cursor at prompt + input width
 ```
 
-## Scrolling Semantics
+## Scrollbar Position Fix
 
-### When User Presses Ctrl+Down
+### The Problem
 
-1. **EventHandler** detects `Key::Down + Ctrl` → generates `TerminalEvent::ScrollDown`
-
-2. **InfrawareTerminal** receives event:
-   ```rust
-   TerminalEvent::ScrollDown => {
-       state.scroll_down()
-   }
-   ```
-
-3. **TerminalState::scroll_down()** (defined in state.rs):
-   ```rust
-   pub fn scroll_down(&mut self) {
-       self.output.scroll_down(self.visible_lines);
-   }
-   ```
-   - Passes the stored `visible_lines` value to OutputBuffer
-   - This ensures scroll knows the viewport height
-
-4. **OutputBuffer::scroll_down(visible_lines)** (defined in buffers.rs):
-   ```rust
-   pub fn scroll_down(&mut self, visible_lines: usize) {
-       let max_scroll = self.buffer.len().saturating_sub(visible_lines);
-       if self.scroll_position < max_scroll {
-           self.scroll_position += 1;
-       }
-   }
-   ```
-   - Calculates maximum allowable scroll position
-   - Clamps to prevent scrolling past content
-   - Increments position if within bounds
-
-5. **TerminalUI::render()** called next frame:
-   - Recalculates `visible_lines` from terminal size
-   - Updates state with current `visible_lines`
-   - Renders visible portion of buffer
-
-### Window Resize Scenario
-
+Ratatui calculates scrollbar thumb position as:
 ```
-Resize event detected (u16, u16)
-    ↓
-InfrawareTerminal::handle_event(Resize)
-    ↓
-[No direct state update - defer to render]
-    ↓
-TerminalUI::render(&mut state)
-    │
-    ├─ New size = terminal.size()?
-    ├─ New visible_lines = recalculate(new_size)
-    ├─ state.set_visible_lines(new_visible_lines)
-    │  └─ [Clamps scroll_position to new bounds]
-    ├─ state.output.set_visible_lines(new_visible_lines)
-    │  └─ [Syncs OutputBuffer with new bounds]
-    └─ Render with properly adjusted scroll
+thumb_position = position / content_length
 ```
+
+Using `content_length(total_lines)` with `position(effective_scroll)` gives wrong results:
+- Example: 33 lines, 30 visible, scrolled to bottom (position=3)
+- Wrong: 3/33 = 9% → thumb near top
+- Expected: 3/3 = 100% → thumb at bottom
+
+### The Solution
+
+```rust
+// content_length = max_scroll (number of scrollable positions: 0..=max_scroll)
+let scrollbar_content_length = max_scroll.max(1); // Avoid division by zero
+let mut scrollbar_state = ScrollbarState::default()
+    .content_length(scrollbar_content_length)
+    .position(effective_scroll);
+```
+
+Now: 3/3 = 100% → thumb correctly at bottom
 
 ## Auto-Scroll Behavior
 
@@ -189,29 +190,101 @@ output.add_line("new line")
     ├─ trim_if_needed()  [if > 10,000 lines]
     │  └─ Adjusts scroll_position if trimmed
     └─ auto_scroll_to_bottom()
-       └─ scroll_position = buffer.len()
+       └─ scroll_position = max_scroll
           [Shows last visible_lines of output]
 ```
 
-**Result**: New output automatically scrolls to bottom, unless user manually scrolled up.
+**Result**: New output automatically scrolls to bottom.
+
+### When User Types (NEW)
+
+```
+User types character
+    ↓
+handle_event(Char(c))
+    ├─ state.insert_char(c)
+    └─ state.scroll_to_end()  [NEW]
+        └─ output.scroll_to_end()
+            └─ scroll_position = usize::MAX
+               [Clamped to max_scroll on next render]
+```
+
+**Result**: Typing always brings prompt back into view, even if user was scrolled up.
 
 ### When User Manually Scrolls Up
 
 ```
-User presses Ctrl+Up
+User presses Ctrl+Up or MouseScrollUp
     ↓
-scroll_position decreases (state.scroll_up())
+scroll_position decreases
     ↓
-User types command output → new line added
+[User can now review history]
     ↓
-auto_scroll_to_bottom() sets:
-    scroll_position = buffer.len()
-    ↓
-Next render shows bottom of output
-[User must scroll up again to see old content]
+User types → scroll_to_end() → back to bottom
 ```
 
-**Behavior**: Auto-scroll respects user's scroll position - pressing Ctrl+Up temporarily "freezes" scroll to review history.
+## Mouse Wheel Support
+
+### Event Mapping (events.rs)
+
+```rust
+fn map_mouse_event(event: MouseEvent) -> TerminalEvent {
+    match event.kind {
+        MouseEventKind::ScrollUp => TerminalEvent::ScrollUp,
+        MouseEventKind::ScrollDown => TerminalEvent::ScrollDown,
+        _ => TerminalEvent::Unknown,
+    }
+}
+```
+
+### Mouse Capture (tui.rs)
+
+```rust
+// In TerminalUI::new()
+execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
+
+// In cleanup()
+execute!(self.terminal.backend_mut(), DisableMouseCapture, LeaveAlternateScreen)?;
+```
+
+## Extra Lines Tracking
+
+### Purpose
+
+The unified content area includes:
+1. Output buffer lines
+2. Pending interaction lines (command approval, questions)
+3. Prompt line
+
+The `extra_lines` field tracks non-output content to calculate correct scroll bounds:
+
+```rust
+// In tui.rs render_unified_content()
+let extra_lines = total_lines.saturating_sub(output_line_count);
+state.output.set_extra_lines(extra_lines);
+```
+
+### Usage in OutputBuffer
+
+```rust
+fn effective_total_lines(&self) -> usize {
+    self.parsed_buffer.len() + self.extra_lines
+}
+```
+
+## Key Invariants
+
+1. **scroll_position ≤ max_scroll** - Never points past scrollable range
+
+2. **max_scroll = total_lines - visible_lines** - Maximum scroll position
+
+3. **effective_scroll = scroll_position.min(max_scroll)** - Clamped for rendering
+
+4. **Scrollbar appears only when total_lines > visible_height**
+
+5. **Scrollbar thumb position = effective_scroll / max_scroll** - Correct at all positions
+
+6. **Typing triggers scroll_to_end()** - Prompt always visible when user types
 
 ## Memory Management
 
@@ -229,136 +302,17 @@ When buffer.len() > 10,000:
    [Adjust scroll if trimmed content was above current view]
 ```
 
-**Example**:
-- Buffer has 11,000 lines, scroll_position = 9,000
-- Trim removes oldest 2,000 lines
-- New buffer has 9,000 lines
-- scroll_position becomes 7,000
-
-## Field Lifecycle
-
-### visible_lines
-
-```
-Default: 20 lines (set in TerminalState::new())
-    ↓
-During render: Recalculated from terminal size
-    ↓
-state.set_visible_lines(calculated)
-    ↓
-Stored for use in scroll operations
-    ↓
-Next event loop uses updated value
-```
-
-**Lifetime**: Per-frame - recalculated every render cycle
-
-### scroll_position
-
-```
-Initial: 0 (empty buffer)
-    ↓
-On add_line: → buffer.len() (auto-scroll to bottom)
-    ↓
-On scroll_up: → scroll_position - 1
-    ↓
-On scroll_down: → scroll_position + 1 (bounded by max_scroll)
-    ↓
-On set_visible_lines: Clamped to new max_scroll
-    ↓
-On trim: Adjusted if trimmed content affected scroll
-```
-
-**Lifetime**: Persistent across frames until reset
-
-## Key Invariants
-
-1. **scroll_position ≤ buffer.len()** - Never points past end
-
-2. **visible_lines ≤ output_height** - Reflects viewport
-
-3. **max_scroll = buffer.len() - visible_lines**
-   - scroll_position stays ≤ max_scroll
-   - Unless buffer smaller than viewport (then 0)
-
-4. **Auto-scroll = (scroll_position == buffer.len())**
-   - Newly added content appears at bottom
-   - Unless user explicitly scrolled up
-
-## Testing Scenarios
-
-### Test: Basic Scrolling
-
-```rust
-let mut state = TerminalState::new();
-state.set_visible_lines(5);
-
-// Add 10 lines
-for i in 0..10 {
-    state.add_output(format!("line {}", i));
-}
-
-// scroll_position should be 10 (at bottom)
-assert_eq!(state.output.scroll_position(), 10);
-
-// Scroll up 3 lines
-state.scroll_up();
-state.scroll_up();
-state.scroll_up();
-assert_eq!(state.output.scroll_position(), 7);
-
-// Scroll down - should clamp to max_scroll (10 - 5 = 5)
-// Wait, actually max_scroll = 10 - 5 = 5, we're at 7, so no change
-state.scroll_down();
-// scroll_position should be 8 after one scroll_down
-```
-
-### Test: Viewport Resize
-
-```rust
-let mut state = TerminalState::new();
-state.set_visible_lines(10);
-
-// Add 20 lines
-for i in 0..20 {
-    state.add_output(format!("line {}", i));
-}
-
-// Scroll to top
-for _ in 0..20 {
-    state.scroll_up();
-}
-assert_eq!(state.output.scroll_position(), 0);
-
-// Simulate terminal shrinking to 5 visible lines
-state.set_visible_lines(5);
-
-// Scroll position should clamp to new max_scroll (20 - 5 = 15)
-// So position 0 stays valid
-assert_eq!(state.output.scroll_position(), 0);
-```
-
-## Edge Cases Handled
-
-1. **Empty Buffer + Scroll Down**: No effect (max_scroll = 0)
-
-2. **Buffer Smaller Than Viewport**: scroll_position clamped to 0
-
-3. **Terminal Resize Larger**: May expose scroll position below buffer end (clamped)
-
-4. **Terminal Resize Smaller**: scroll_position clamped to new max_scroll
-
-5. **Buffer Trim During Scroll**: scroll_position adjusted proportionally
-
 ## Performance Characteristics
 
 | Operation | Time | Space |
 |-----------|------|-------|
 | scroll_up() | O(1) | O(1) |
-| scroll_down(visible_lines) | O(1) | O(1) |
+| scroll_down() | O(1) | O(1) |
+| scroll_to_end() | O(1) | O(1) |
 | set_visible_lines() | O(1) | O(1) |
 | add_line() | O(1)* | O(1)* |
 | trim_if_needed() | O(n)** | - |
+| Scrollbar render | O(1) | O(1) |
 
 *Amortized - buffer is Vec<String>
 **Only when buffer exceeds 10,000 lines
@@ -367,13 +321,24 @@ assert_eq!(state.output.scroll_position(), 0);
 
 | Component | File | Key Functions |
 |-----------|------|----------------|
-| TerminalState | `src/terminal/state.rs` | scroll_up/down, set_visible_lines |
-| OutputBuffer | `src/terminal/buffers.rs` | scroll_down(visible_lines), set_visible_lines |
-| TerminalUI | `src/terminal/tui.rs` | render(&mut state) |
-| EventHandler | `src/terminal/events.rs` | map_key_event, poll_event |
+| TerminalState | `src/terminal/state.rs` | scroll_up/down/to_end, set_visible_lines |
+| OutputBuffer | `src/terminal/buffers.rs` | scroll_down, set_visible_lines, set_extra_lines |
+| ScrollbarInfo | `src/terminal/state.rs` | is_on_scrollbar, row_to_scroll_position |
+| TerminalUI | `src/terminal/tui.rs` | render(&mut state), Scrollbar widget |
+| EventHandler | `src/terminal/events.rs` | map_key_event, map_mouse_event |
 | Main Loop | `src/main.rs` | InfrawareTerminal::handle_event |
+
+## Scrollbar Visual Style
+
+```rust
+let scrollbar = Scrollbar::new(ScrollbarOrientation::VerticalRight)
+    .begin_symbol(Some("↑"))  // Top arrow
+    .end_symbol(Some("↓"));   // Bottom arrow
+```
+
+The scrollbar uses Ratatui's default track (│) and thumb (█) symbols.
 
 ---
 
-**Last Updated**: December 2, 2025
-**Status**: Complete - All changes implemented and documented
+**Last Updated**: December 14, 2025
+**Status**: Complete - Visual scrollbar, mouse wheel, and auto-scroll implemented

@@ -34,7 +34,6 @@ impl PackageInstaller {
 
     /// Create an installer with custom package managers
     #[must_use]
-    #[allow(dead_code)] // Constructor for custom manager list, used in testing
     pub fn with_managers(managers: Vec<Box<dyn PackageManager>>) -> Self {
         Self { managers }
     }
@@ -46,14 +45,12 @@ impl PackageInstaller {
     /// Returns an error if:
     /// - No package manager is available on the system
     /// - The selected package manager fails to install the package
-    #[allow(dead_code)] // Auto-install API for M2/M3
     pub async fn install_package(&self, package: &str) -> Result<()> {
         let manager = self.select_package_manager()?;
         manager.install(package).await
     }
 
     /// Select the best available package manager based on availability and priority
-    #[allow(dead_code)] // Internal API for M2/M3
     fn select_package_manager(&self) -> Result<&dyn PackageManager> {
         self.managers
             .iter()
@@ -71,7 +68,6 @@ impl PackageInstaller {
 
     /// Get the name of the selected package manager
     #[must_use]
-    #[allow(dead_code)] // Public API for M2/M3
     pub fn get_package_manager(&self) -> Option<&str> {
         self.select_package_manager()
             .ok()
@@ -80,7 +76,6 @@ impl PackageInstaller {
 
     /// Get all available package managers
     #[must_use]
-    #[allow(dead_code)] // Public API for M2/M3
     pub fn get_available_managers(&self) -> Vec<&str> {
         self.managers
             .iter()
@@ -106,7 +101,6 @@ impl PackageInstaller {
 
     /// Get the name of the available package manager (static method for compatibility)
     #[must_use]
-    #[allow(dead_code)] // Static API for M2/M3
     pub fn get_package_manager_static() -> Option<String> {
         Self::new()
             .get_package_manager()

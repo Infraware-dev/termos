@@ -9,7 +9,8 @@ fn test_command_existence_check_before_interactive() {
     assert!(CommandExecutor::requires_interactive("top"));
     assert!(CommandExecutor::requires_interactive("vim"));
     assert!(CommandExecutor::requires_interactive("nano"));
-    assert!(CommandExecutor::requires_interactive("sudo"));
+    // sudo is handled via root mode wrapper, not as interactive command
+    assert!(!CommandExecutor::requires_interactive("sudo"));
 
     // Package managers are NOT interactive (output is captured for scrolling)
     assert!(!CommandExecutor::requires_interactive("apt"));

@@ -214,6 +214,320 @@ mod tests {
         assert_eq!(mgr.job_count(), 0);
     }
 
-    // Note: Tests involving actual Child processes require spawning real processes
-    // Those are covered in integration tests
+    // ==================== JobStatus Tests ====================
+
+    #[test]
+    fn test_job_status_debug() {
+        assert!(format!("{:?}", JobStatus::Running).contains("Running"));
+        assert!(format!("{:?}", JobStatus::Done(42)).contains("42"));
+        assert!(format!("{:?}", JobStatus::Terminated).contains("Terminated"));
+    }
+
+    #[test]
+    fn test_job_status_clone() {
+        let status = JobStatus::Done(0);
+        let cloned = status.clone();
+        assert_eq!(status, cloned);
+    }
+
+    #[test]
+    fn test_job_status_eq() {
+        assert_eq!(JobStatus::Running, JobStatus::Running);
+        assert_eq!(JobStatus::Done(0), JobStatus::Done(0));
+        assert_eq!(JobStatus::Terminated, JobStatus::Terminated);
+        assert_ne!(JobStatus::Running, JobStatus::Terminated);
+        assert_ne!(JobStatus::Done(0), JobStatus::Done(1));
+    }
+
+    // ==================== JobInfo Tests ====================
+
+    #[test]
+    fn test_job_info_debug() {
+        let info = JobInfo {
+            id: 1,
+            pid: 12345,
+            command: "sleep 10".to_string(),
+            status: JobStatus::Running,
+            start_time: Instant::now(),
+        };
+        let debug_str = format!("{:?}", info);
+        assert!(debug_str.contains("JobInfo"));
+        assert!(debug_str.contains("12345"));
+        assert!(debug_str.contains("sleep"));
+    }
+
+    #[test]
+    fn test_job_info_clone() {
+        let info = JobInfo {
+            id: 1,
+            pid: 12345,
+            command: "echo test".to_string(),
+            status: JobStatus::Done(0),
+            start_time: Instant::now(),
+        };
+        let cloned = info.clone();
+        assert_eq!(info.id, cloned.id);
+        assert_eq!(info.pid, cloned.pid);
+        assert_eq!(info.command, cloned.command);
+        assert_eq!(info.status, cloned.status);
+    }
+
+    // ==================== JobManager with Child Process Tests ====================
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_job_manager_add_job() {
+        use tokio::process::Command;
+
+        let mut mgr = JobManager::new();
+
+        // Spawn a real process
+        let child = Command::new("sleep")
+            .arg("0.1")
+            .spawn()
+            .expect("Failed to spawn sleep");
+
+        let pid = child.id().expect("No pid");
+        let job_id = mgr.add_job("sleep 0.1".to_string(), pid, child);
+
+        assert_eq!(job_id, 1);
+        assert_eq!(mgr.job_count(), 1);
+        assert!(mgr.has_running_jobs());
+
+        // List jobs
+        let jobs = mgr.list_jobs();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].id, 1);
+        assert_eq!(jobs[0].command, "sleep 0.1");
+        assert_eq!(jobs[0].status, JobStatus::Running);
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_job_manager_multiple_jobs() {
+        use tokio::process::Command;
+
+        let mut mgr = JobManager::new();
+
+        // Spawn multiple processes
+        let child1 = Command::new("sleep")
+            .arg("0.1")
+            .spawn()
+            .expect("Failed to spawn sleep 1");
+        let pid1 = child1.id().expect("No pid 1");
+        let id1 = mgr.add_job("sleep 0.1".to_string(), pid1, child1);
+
+        let child2 = Command::new("sleep")
+            .arg("0.2")
+            .spawn()
+            .expect("Failed to spawn sleep 2");
+        let pid2 = child2.id().expect("No pid 2");
+        let id2 = mgr.add_job("sleep 0.2".to_string(), pid2, child2);
+
+        assert_eq!(id1, 1);
+        assert_eq!(id2, 2);
+        assert_eq!(mgr.job_count(), 2);
+
+        let jobs = mgr.list_jobs();
+        assert_eq!(jobs.len(), 2);
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_job_manager_check_completed() {
+        use tokio::process::Command;
+
+        let mut mgr = JobManager::new();
+
+        // Spawn a fast-completing process
+        let child = Command::new("true").spawn().expect("Failed to spawn true");
+
+        let pid = child.id().expect("No pid");
+        mgr.add_job("true".to_string(), pid, child);
+
+        // Wait for it to complete
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+        // Check completed
+        let completed = mgr.check_completed();
+        assert_eq!(completed.len(), 1);
+        assert_eq!(completed[0].command, "true");
+        assert!(matches!(completed[0].status, JobStatus::Done(0)));
+
+        // Job should be removed
+        assert_eq!(mgr.job_count(), 0);
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_job_manager_check_completed_with_failure() {
+        use tokio::process::Command;
+
+        let mut mgr = JobManager::new();
+
+        // Spawn a process that exits with error
+        let child = Command::new("false")
+            .spawn()
+            .expect("Failed to spawn false");
+
+        let pid = child.id().expect("No pid");
+        mgr.add_job("false".to_string(), pid, child);
+
+        // Wait for it to complete
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+
+        // Check completed
+        let completed = mgr.check_completed();
+        assert_eq!(completed.len(), 1);
+        assert!(matches!(completed[0].status, JobStatus::Done(1)));
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_job_manager_remove_job() {
+        use tokio::process::Command;
+
+        let mut mgr = JobManager::new();
+
+        let child = Command::new("sleep")
+            .arg("10")
+            .spawn()
+            .expect("Failed to spawn sleep");
+
+        let pid = child.id().expect("No pid");
+        let job_id = mgr.add_job("sleep 10".to_string(), pid, child);
+
+        // Remove the job
+        let removed = mgr.remove_job(job_id);
+        assert!(removed.is_some());
+        assert_eq!(removed.unwrap().command, "sleep 10");
+        assert_eq!(mgr.job_count(), 0);
+
+        // Try to remove non-existent job
+        let not_found = mgr.remove_job(999);
+        assert!(not_found.is_none());
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_job_manager_still_running() {
+        use tokio::process::Command;
+
+        let mut mgr = JobManager::new();
+
+        // Spawn a long-running process
+        let child = Command::new("sleep")
+            .arg("10")
+            .spawn()
+            .expect("Failed to spawn sleep");
+
+        let pid = child.id().expect("No pid");
+        mgr.add_job("sleep 10".to_string(), pid, child);
+
+        // Check completed immediately (should be empty)
+        let completed = mgr.check_completed();
+        assert!(completed.is_empty());
+
+        // Job should still be there
+        assert_eq!(mgr.job_count(), 1);
+
+        // Clean up - remove the job to kill the process
+        mgr.remove_job(1);
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_job_manager_job_ids_increment() {
+        use tokio::process::Command;
+
+        let mut mgr = JobManager::new();
+
+        for i in 1..=5 {
+            let child = Command::new("true").spawn().expect("Failed to spawn true");
+            let pid = child.id().expect("No pid");
+            let id = mgr.add_job(format!("job {}", i), pid, child);
+            assert_eq!(id, i);
+        }
+
+        // Wait for all to complete
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        mgr.check_completed();
+
+        // Next job should have ID 6
+        let child = Command::new("true").spawn().expect("Failed to spawn true");
+        let pid = child.id().expect("No pid");
+        let id = mgr.add_job("job 6".to_string(), pid, child);
+        assert_eq!(id, 6);
+    }
+
+    // ==================== JobEntry Tests ====================
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_job_entry_debug() {
+        use tokio::process::Command;
+
+        let child = Command::new("true").spawn().expect("Failed to spawn true");
+
+        let pid = child.id().expect("No pid");
+        let info = JobInfo {
+            id: 1,
+            pid,
+            command: "true".to_string(),
+            status: JobStatus::Running,
+            start_time: Instant::now(),
+        };
+
+        let entry = JobEntry { info, child };
+        let debug_str = format!("{:?}", entry);
+        assert!(debug_str.contains("JobEntry"));
+        assert!(debug_str.contains("true"));
+        assert!(debug_str.contains("<Child>"));
+    }
+
+    // ==================== Default Trait Tests ====================
+
+    #[test]
+    fn test_job_manager_default() {
+        let mgr = JobManager::default();
+        assert_eq!(mgr.job_count(), 0);
+        assert!(!mgr.has_running_jobs());
+    }
+
+    // ==================== SharedJobManager Tests ====================
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn test_shared_job_manager_concurrent_access() {
+        use tokio::process::Command;
+
+        let shared = create_shared_job_manager();
+        let shared_clone = shared.clone();
+
+        // Add job from one reference
+        {
+            let child = Command::new("sleep")
+                .arg("0.1")
+                .spawn()
+                .expect("Failed to spawn sleep");
+            let pid = child.id().expect("No pid");
+            let mut mgr = shared.write().unwrap();
+            mgr.add_job("sleep 0.1".to_string(), pid, child);
+        }
+
+        // Read from another reference
+        {
+            let mgr = shared_clone.read().unwrap();
+            assert_eq!(mgr.job_count(), 1);
+        }
+
+        // Wait and check completed
+        // Use 400ms to allow for CI timing variability (especially on macOS)
+        tokio::time::sleep(tokio::time::Duration::from_millis(400)).await;
+        {
+            let mut mgr = shared.write().unwrap();
+            let completed = mgr.check_completed();
+            assert_eq!(completed.len(), 1);
+        }
+    }
 }

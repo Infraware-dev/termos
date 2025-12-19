@@ -1,6 +1,8 @@
 use anyhow::Result;
-/// Event handling for keyboard input
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+/// Event handling for keyboard and mouse input
+use crossterm::event::{
+    self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind,
+};
 use std::time::Duration;
 
 /// Event handler for terminal input
@@ -28,7 +30,26 @@ impl EventHandler {
     fn map_event(&self, event: Event) -> TerminalEvent {
         match event {
             Event::Key(key_event) => self.map_key_event(key_event),
+            Event::Mouse(mouse_event) => Self::map_mouse_event(mouse_event),
             Event::Resize(width, height) => TerminalEvent::Resize(width, height),
+            _ => TerminalEvent::Unknown,
+        }
+    }
+
+    /// Map mouse events to terminal events (scroll wheel and scrollbar interaction)
+    fn map_mouse_event(event: MouseEvent) -> TerminalEvent {
+        match event.kind {
+            MouseEventKind::ScrollUp => TerminalEvent::ScrollUp,
+            MouseEventKind::ScrollDown => TerminalEvent::ScrollDown,
+            MouseEventKind::Down(crossterm::event::MouseButton::Left) => TerminalEvent::MouseDown {
+                column: event.column,
+                row: event.row,
+            },
+            MouseEventKind::Drag(crossterm::event::MouseButton::Left) => TerminalEvent::MouseDrag {
+                column: event.column,
+                row: event.row,
+            },
+            MouseEventKind::Up(crossterm::event::MouseButton::Left) => TerminalEvent::MouseUp,
             _ => TerminalEvent::Unknown,
         }
     }
@@ -117,6 +138,12 @@ pub enum TerminalEvent {
     Quit,
     /// Terminal resized (width, height) - M2/M3 feature
     Resize(u16, u16),
+    /// Mouse button pressed at position (for scrollbar interaction)
+    MouseDown { column: u16, row: u16 },
+    /// Mouse dragged while button held (for scrollbar dragging)
+    MouseDrag { column: u16, row: u16 },
+    /// Mouse button released
+    MouseUp,
     /// Unknown event
     Unknown,
 }
@@ -318,15 +345,86 @@ mod tests {
     #[test]
     fn test_map_event_unknown() {
         let handler = EventHandler::new();
-        // Mouse events should be mapped to Unknown
+        // Right mouse click events should be mapped to Unknown
         let event = Event::Mouse(crossterm::event::MouseEvent {
-            kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Right),
             column: 0,
             row: 0,
             modifiers: KeyModifiers::NONE,
         });
         let result = handler.map_event(event);
         assert!(matches!(result, TerminalEvent::Unknown));
+    }
+
+    #[test]
+    fn test_mouse_left_click() {
+        let handler = EventHandler::new();
+        let event = Event::Mouse(crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Down(crossterm::event::MouseButton::Left),
+            column: 10,
+            row: 5,
+            modifiers: KeyModifiers::NONE,
+        });
+        let result = handler.map_event(event);
+        assert!(matches!(
+            result,
+            TerminalEvent::MouseDown { column: 10, row: 5 }
+        ));
+    }
+
+    #[test]
+    fn test_mouse_drag() {
+        let handler = EventHandler::new();
+        let event = Event::Mouse(crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Drag(crossterm::event::MouseButton::Left),
+            column: 15,
+            row: 8,
+            modifiers: KeyModifiers::NONE,
+        });
+        let result = handler.map_event(event);
+        assert!(matches!(
+            result,
+            TerminalEvent::MouseDrag { column: 15, row: 8 }
+        ));
+    }
+
+    #[test]
+    fn test_mouse_up() {
+        let handler = EventHandler::new();
+        let event = Event::Mouse(crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::Up(crossterm::event::MouseButton::Left),
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        });
+        let result = handler.map_event(event);
+        assert!(matches!(result, TerminalEvent::MouseUp));
+    }
+
+    #[test]
+    fn test_mouse_scroll_up() {
+        let handler = EventHandler::new();
+        let event = Event::Mouse(crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::ScrollUp,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        });
+        let result = handler.map_event(event);
+        assert!(matches!(result, TerminalEvent::ScrollUp));
+    }
+
+    #[test]
+    fn test_mouse_scroll_down() {
+        let handler = EventHandler::new();
+        let event = Event::Mouse(crossterm::event::MouseEvent {
+            kind: crossterm::event::MouseEventKind::ScrollDown,
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        });
+        let result = handler.map_event(event);
+        assert!(matches!(result, TerminalEvent::ScrollDown));
     }
 
     #[test]

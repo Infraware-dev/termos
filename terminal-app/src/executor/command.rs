@@ -2,10 +2,90 @@
 use anyhow::{Context, Result};
 use std::collections::HashSet;
 use std::process::Stdio;
-use tokio::process::Command as TokioCommand;
+use tokio::io::{AsyncBufReadExt, BufReader};
+use tokio::process::{Child, Command as TokioCommand};
+use tokio::sync::mpsc;
 use tokio::time::{timeout, Duration};
+use tokio_util::sync::CancellationToken;
+
+#[cfg(unix)]
+use std::os::unix::process::ExitStatusExt;
 
 use super::job_manager::SharedJobManager;
+
+/// Command execution timeout in seconds (5 minutes).
+///
+/// Rationale: Long enough for package installations and large builds,
+/// short enough to prevent hung processes from blocking the terminal indefinitely.
+/// Based on typical CI/CD timeout values.
+///
+/// Side effects of changing:
+/// - Too low: Package managers (`apt install`, `cargo build`) may timeout prematurely
+/// - Too high: Hung processes won't be killed promptly, blocking user interaction
+const COMMAND_TIMEOUT_SECS: u64 = 300;
+
+/// Shorter timeout for non-whitelisted commands (30 seconds).
+///
+/// Commands not in UNLIMITED_OUTPUT_COMMANDS get this shorter timeout to prevent
+/// slow infinite commands (like `ping` without -c) from blocking for too long.
+const LIMITED_COMMAND_TIMEOUT_SECS: u64 = 30;
+
+/// Maximum output lines for non-whitelisted commands.
+///
+/// Commands not in UNLIMITED_OUTPUT_COMMANDS will be terminated after this many lines.
+/// This protects against infinite output commands like `yes` or `seq 1 999999`.
+const MAX_OUTPUT_LINES: usize = 1000;
+
+/// Commands that are safe to have unlimited output.
+///
+/// These are standard Unix utilities that don't produce infinite output.
+/// Commands not in this list are limited to MAX_OUTPUT_LINES.
+const UNLIMITED_OUTPUT_COMMANDS: &[&str] = &[
+    // File listing
+    "ls", "dir", "find", "locate", "tree", // File reading
+    "cat", "head", "tail", "less", "more", // Text processing
+    "grep", "awk", "sed", "cut", "sort", "uniq", "wc", // System info
+    "ps", "top", "df", "du", "free", "uname", "whoami", "id", // Network
+    "ifconfig", "ip", "netstat", "ss", "curl", "wget", // Package managers
+    "apt", "apt-get", "yum", "dnf", "pacman", "brew", // Development
+    "git", "cargo", "npm", "pip", "docker", "kubectl", // Other common utilities
+    "echo", "printf", "date", "env", "which", "whereis", "file", "stat", "cp", "mv", "rm", "mkdir",
+    "touch", "chmod", "chown", "tar", "gzip", "gunzip", "zip", "unzip", "diff", "patch", "make",
+    "cmake", "man", "info", "help",
+];
+
+/// Check if a command is in the unlimited output whitelist
+fn is_unlimited_output_command(cmd: &str) -> bool {
+    UNLIMITED_OUTPUT_COMMANDS.contains(&cmd)
+}
+
+/// Commands that produce infinite output and should NOT be run in background.
+///
+/// These commands run forever and would consume CPU indefinitely.
+/// Block them from background execution entirely.
+const INFINITE_OUTPUT_COMMANDS: &[&str] = &["yes"];
+
+/// Check if a command produces infinite output
+fn is_infinite_output_command(cmd: &str) -> bool {
+    INFINITE_OUTPUT_COMMANDS.contains(&cmd)
+}
+
+/// Execution path strategy for command execution.
+///
+/// Reduces cyclomatic complexity by encapsulating the decision logic
+/// for how a command should be executed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ExecutionPath {
+    /// Execute through shell for shell builtins (cd, export, etc.)
+    ShellBuiltin,
+    /// Execute through shell when original input contains operators/pipes
+    ShellInput,
+    /// Execute through shell for glob pattern expansion
+    GlobExpansion,
+    /// Direct execution without shell
+    Direct,
+}
+
 use crate::input::shell_builtins::ShellBuiltinHandler;
 
 /// Output from a command execution
@@ -21,6 +101,16 @@ impl CommandOutput {
     #[must_use]
     pub const fn is_success(&self) -> bool {
         self.exit_code == 0
+    }
+
+    /// Create a blocked command output
+    #[must_use]
+    pub fn blocked(message: String) -> Self {
+        Self {
+            stdout: String::new(),
+            stderr: message,
+            exit_code: 1,
+        }
     }
 
     /// Get combined output (stdout + stderr)
@@ -40,6 +130,55 @@ impl CommandOutput {
     }
 }
 
+/// Handle for command execution with support for both streaming and collected output.
+///
+/// Created by [`CommandExecutor::execute()`]. Provides two consumption patterns:
+/// - **Streaming**: Use [`lines()`](Self::lines) to receive output lines in real-time
+/// - **Collected**: Use [`wait()`](Self::wait) to get the complete result
+///
+/// # Example (streaming)
+/// ```rust,ignore
+/// let mut handle = CommandExecutor::execute(cmd, args, input, cancel_token);
+/// while let Some(line) = handle.lines().recv().await {
+///     println!("{}", line);
+/// }
+/// let result = handle.wait().await?;
+/// ```
+///
+/// # Example (collected)
+/// ```rust,ignore
+/// let handle = CommandExecutor::execute(cmd, args, input, cancel_token);
+/// let result = handle.wait().await?;
+/// ```
+#[must_use = "ExecutionHandle must be consumed via wait() or lines() to collect command output"]
+#[derive(Debug)]
+pub struct ExecutionHandle {
+    lines_rx: mpsc::UnboundedReceiver<String>,
+    result_handle: tokio::task::JoinHandle<Result<CommandOutput>>,
+}
+
+impl ExecutionHandle {
+    /// Get a mutable reference to the line receiver for streaming output.
+    ///
+    /// Use this to receive output lines in real-time as they are produced.
+    /// Lines are sent as they become available from stdout and stderr.
+    /// Stderr lines are prefixed with `[stderr] ` for identification.
+    pub fn lines(&mut self) -> &mut mpsc::UnboundedReceiver<String> {
+        &mut self.lines_rx
+    }
+
+    /// Wait for the command to complete and return the final result.
+    ///
+    /// This consumes the handle. If streaming was used, any unread lines
+    /// are still available in the `CommandOutput::stdout` field.
+    ///
+    /// # Errors
+    /// Returns an error if the spawned task panicked or was cancelled.
+    pub async fn wait(self) -> Result<CommandOutput> {
+        self.result_handle.await?
+    }
+}
+
 /// Commands that require interactive execution (TUI suspension)
 const REQUIRES_INTERACTIVE: &[&str] = &[
     // Text editors
@@ -47,9 +186,9 @@ const REQUIRES_INTERACTIVE: &[&str] = &[
     "less", "more", "most", "man", "info", // File managers
     "mc", "ranger", "nnn", "lf", "vifm",  // Watchers
     "watch", // System monitors (non-root)
-    "top", "htop", "btop", "atop", // Privilege escalation (needs password input)
-    "sudo", // CLI tools with interactive features
+    "top", "htop", "btop", "atop", // CLI tools with interactive features
     "gh",
+    // Note: "sudo" removed - now handled via root mode in orchestrator
 ];
 
 /// Commands that are interactive but NOT supported (blocked entirely)
@@ -87,8 +226,6 @@ const INTERACTIVE_BLOCKED: &[&str] = &[
     "iotop",
     "iftop",
     "nethogs",
-    // Infinite output commands
-    "yes", // Produces infinite "y" output - would freeze terminal
 ];
 
 /// Commands with specific subcommands that are interactive (open browser, etc.)
@@ -150,33 +287,6 @@ fn targets_infinite_device(cmd: &str, args: &[String]) -> bool {
     false
 }
 
-/// Check if ping is missing a limiting flag (would run infinitely)
-///
-/// Supports multiple platforms:
-/// - `-c` count (Linux/macOS)
-/// - `-n` count (Windows)
-/// - `-w` deadline seconds (Linux)
-/// - `-W` timeout (macOS)
-fn is_infinite_ping(cmd: &str, args: &[String]) -> bool {
-    if cmd != "ping" {
-        return false;
-    }
-
-    // Check for any flag that limits ping duration
-    let has_limit = args.iter().any(|a| {
-        a == "-c"
-            || a.starts_with("-c")
-            || a == "-n"
-            || a.starts_with("-n")
-            || a == "-w"
-            || a.starts_with("-w")
-            || a == "-W"
-            || a.starts_with("-W")
-    });
-
-    !has_limit
-}
-
 /// Check if arguments contain glob patterns that need shell expansion
 ///
 /// Detects patterns like:
@@ -217,6 +327,227 @@ fn shell_command_has_infinite_device(shell_input: &str) -> bool {
     has_infinite_device && !has_output_limit
 }
 
+/// Send SIGINT to a child process (Unix only).
+///
+/// This sends the interrupt signal (Ctrl+C equivalent) to allow the process
+/// to handle it gracefully (e.g., ping prints statistics before exiting).
+#[cfg(unix)]
+fn send_sigint(child: &Child) {
+    if let Some(pid) = child.id() {
+        // Safety: We're sending a standard signal to a process we own
+        unsafe {
+            libc::kill(pid as libc::pid_t, libc::SIGINT);
+        }
+    }
+}
+
+/// Send termination signal to a child process (Windows fallback).
+///
+/// On Windows, there's no SIGINT equivalent, so we just mark for later kill.
+#[cfg(not(unix))]
+fn send_sigint(_child: &Child) {
+    // On Windows, we can't send SIGINT. The process will be killed later.
+}
+
+/// Execute a child process with output line limiting, cancellation, and optional streaming.
+///
+/// Reads stdout/stderr incrementally and terminates the process if it exceeds
+/// MAX_OUTPUT_LINES (for non-whitelisted commands) or if cancellation is requested.
+///
+/// # Arguments
+/// * `child` - The spawned child process
+/// * `unlimited` - If true, no line limit is applied (for whitelisted commands)
+/// * `line_tx` - Optional channel sender for streaming output lines in real-time
+/// * `cancel_token` - Optional cancellation token to interrupt execution
+///
+/// # Returns
+/// `CommandOutput` with stdout, stderr, and exit code. If truncated or cancelled,
+/// stdout includes an appropriate message.
+async fn execute_with_limit(
+    mut child: Child,
+    unlimited: bool,
+    line_tx: Option<mpsc::UnboundedSender<String>>,
+    cancel_token: Option<CancellationToken>,
+) -> Result<CommandOutput> {
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+
+    let mut stdout_lines: Vec<String> = Vec::new();
+    let mut stderr_lines: Vec<String> = Vec::new();
+    let mut truncated = false;
+    let mut cancelled = false;
+
+    // Read stdout with optional line limit and cancellation check
+    if let Some(out) = stdout {
+        let reader = BufReader::new(out);
+        let mut lines = reader.lines();
+
+        // Track when SIGINT was sent (to enforce total grace period, not per-line)
+        let mut sigint_time: Option<std::time::Instant> = None;
+
+        let mut line_count = 0u64;
+        loop {
+            // Check for cancellation before reading next line
+            // Send SIGINT once, then continue reading to capture final output (e.g., ping stats)
+            if sigint_time.is_none() {
+                if let Some(ref token) = cancel_token {
+                    if token.is_cancelled() {
+                        cancelled = true;
+                        log::info!(
+                            "Cancellation: Detected via is_cancelled() after {} lines",
+                            line_count
+                        );
+                        // Send SIGINT to allow graceful shutdown (e.g., ping prints stats)
+                        send_sigint(&child);
+                        sigint_time = Some(std::time::Instant::now());
+                        // Don't break - continue reading to capture final output
+                    }
+                }
+            }
+
+            // Use select to check both line reading and cancellation
+            let line_result = if let Some(sigint_start) = sigint_time {
+                // After SIGINT, check if total grace period exceeded (500ms from SIGINT)
+                // This ensures fast-outputting commands are killed promptly
+                let elapsed = sigint_start.elapsed();
+                if elapsed > Duration::from_millis(500) {
+                    log::info!(
+                        "Cancellation: Grace period exceeded ({}ms), killing process",
+                        elapsed.as_millis()
+                    );
+                    child.kill().await.ok();
+                    break;
+                }
+
+                // Read with short timeout (50ms) to stay responsive
+                match tokio::time::timeout(Duration::from_millis(50), lines.next_line()).await {
+                    Ok(result) => result,
+                    Err(_) => {
+                        // No output within 50ms, check grace period again on next iteration
+                        continue;
+                    }
+                }
+            } else if let Some(ref token) = cancel_token {
+                tokio::select! {
+                    biased;
+                    _ = token.cancelled() => {
+                        cancelled = true;
+                        log::info!("Cancellation: Token cancelled, sending SIGINT");
+                        // Send SIGINT to allow graceful shutdown (e.g., ping prints stats)
+                        send_sigint(&child);
+                        sigint_time = Some(std::time::Instant::now());
+                        // Continue reading to capture final output
+                        continue;
+                    }
+                    result = lines.next_line() => result,
+                }
+            } else {
+                lines.next_line().await
+            };
+
+            match line_result {
+                Ok(Some(line)) => {
+                    line_count += 1;
+                    // Stream line in real-time if sender provided
+                    if let Some(ref tx) = line_tx {
+                        // Ignore send errors (receiver may have been dropped)
+                        let _ = tx.send(line.clone());
+                    }
+
+                    stdout_lines.push(line);
+
+                    // Check limit only for non-whitelisted commands
+                    if !unlimited && stdout_lines.len() >= MAX_OUTPUT_LINES {
+                        truncated = true;
+                        // Kill the process to stop infinite output
+                        child.kill().await.ok();
+                        break;
+                    }
+                }
+                Ok(None) => {
+                    log::info!("Command finished: read {} lines total", line_count);
+                    break; // EOF
+                }
+                Err(_) => break, // Error reading
+            }
+        }
+    }
+
+    // Read stderr (always with reasonable limit to catch errors)
+    // Read even after cancellation to capture final error output
+    if let Some(err) = stderr {
+        let reader = BufReader::new(err);
+        let mut lines = reader.lines();
+
+        while let Ok(Some(line)) = lines.next_line().await {
+            // Stream stderr lines too (prefixed to distinguish)
+            if let Some(ref tx) = line_tx {
+                let _ = tx.send(format!("[stderr] {}", line));
+            }
+
+            stderr_lines.push(line);
+            // Limit stderr too to prevent memory issues
+            if stderr_lines.len() > MAX_OUTPUT_LINES {
+                break;
+            }
+        }
+    }
+
+    // Wait for process to finish (may already be dead if killed)
+    let exit_code = match child.wait().await {
+        Ok(status) => {
+            if let Some(code) = status.code() {
+                code
+            } else {
+                // Process was terminated by a signal
+                #[cfg(unix)]
+                {
+                    if let Some(signal) = status.signal() {
+                        log::debug!("Process terminated by signal {}", signal);
+                        // SIGPIPE (13) often happens when process writes to closed pipe
+                        // Treat it as success if we got output
+                        if signal == 13 && !stdout_lines.is_empty() {
+                            0
+                        } else {
+                            -signal
+                        }
+                    } else {
+                        -1
+                    }
+                }
+                #[cfg(not(unix))]
+                {
+                    -1
+                }
+            }
+        }
+        Err(_) => -1, // Process was killed
+    };
+
+    let mut stdout_output = stdout_lines.join("\n");
+
+    if cancelled {
+        let cancel_msg = "\n\n[Interrupted by Ctrl+C]".to_string();
+        stdout_output.push_str(&cancel_msg);
+        if let Some(ref tx) = line_tx {
+            let _ = tx.send(cancel_msg);
+        }
+    } else if truncated {
+        let truncation_msg = format!("\n\n[Output truncated at {} lines]", MAX_OUTPUT_LINES);
+        stdout_output.push_str(&truncation_msg);
+        // Also stream the truncation message
+        if let Some(ref tx) = line_tx {
+            let _ = tx.send(truncation_msg);
+        }
+    }
+
+    Ok(CommandOutput {
+        stdout: stdout_output,
+        stderr: stderr_lines.join("\n"),
+        exit_code,
+    })
+}
+
 /// Command executor for running shell commands
 #[derive(Debug)]
 pub struct CommandExecutor;
@@ -235,7 +566,7 @@ impl CommandExecutor {
         cmd: &str,
         args: &[String],
     ) -> Option<(&'static str, &'static str)> {
-        let first_arg = args.first().map(|s| s.as_str()).unwrap_or("");
+        let first_arg = args.first().map_or("", |s| s.as_str());
 
         INTERACTIVE_SUBCOMMANDS
             .iter()
@@ -273,6 +604,36 @@ impl CommandExecutor {
         REQUIRES_INTERACTIVE_SET.contains(cmd)
     }
 
+    /// Check if a command triggers root mode entry (sudo su, su, sudo -i, etc.)
+    ///
+    /// These commands would normally open a new shell with root privileges.
+    /// Instead, we enter "root mode" where all subsequent commands are
+    /// executed with sudo, without leaving Infraware Terminal.
+    pub fn is_enter_root_command(cmd: &str, args: &[String]) -> bool {
+        match cmd {
+            // Plain "su" or "su -" or "su root" enters root mode
+            "su" => {
+                args.is_empty()
+                    || args
+                        .first()
+                        .map(|a| a == "-" || a == "-l" || a == "--login" || a == "root")
+                        .unwrap_or(false)
+            }
+            // "sudo su", "sudo -i", "sudo -s", "sudo bash", etc.
+            "sudo" => {
+                if let Some(first_arg) = args.first() {
+                    matches!(
+                        first_arg.as_str(),
+                        "su" | "-i" | "-s" | "bash" | "zsh" | "sh" | "-" | "--login"
+                    )
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        }
+    }
+
     /// Check if a command is a shell builtin that must be executed through a shell
     fn is_shell_builtin(cmd: &str) -> bool {
         ShellBuiltinHandler::requires_shell_execution(cmd)
@@ -294,73 +655,63 @@ impl CommandExecutor {
         }
     }
 
-    /// Execute a command asynchronously with a 5-minute timeout
+    /// Validate a command before execution.
     ///
-    /// # Arguments
-    /// * `cmd` - The command name
-    /// * `args` - The command arguments
-    /// * `original_input` - Optional original input string. When present, the command
-    ///   contains shell operators (pipes, redirects, etc.) and will be executed via
-    ///   `sh -c` for proper shell interpretation.
+    /// Performs all safety checks to ensure the command is safe to execute:
+    /// - Blocks interactive commands that aren't supported via TUI suspension
+    /// - Blocks interactive subcommands (e.g., gcloud auth login)
+    /// - Blocks commands targeting infinite devices (e.g., cat /dev/zero)
+    /// - Validates shell commands for infinite device bypasses
     ///
-    /// # Shell Interpretation
-    /// If `original_input` is provided, the entire command is passed to `sh -c` for
-    /// proper shell operator handling (pipes, redirects, subshells, etc.).
-    /// Otherwise, the command is executed directly for better security and performance.
-    ///
-    /// # Interactive Commands
-    /// Interactive commands (vim, top, etc.) are blocked and return an error message.
-    /// Use non-interactive alternatives or specific flags instead.
-    pub async fn execute(
+    /// # Returns
+    /// - `Ok(())` if the command is safe to execute
+    /// - `Err(CommandOutput)` with error message if the command is blocked
+    fn validate_command(
         cmd: &str,
         args: &[String],
         original_input: Option<&str>,
-    ) -> Result<CommandOutput> {
-        log::debug!("Executing command: {} {:?}", cmd, args);
-
-        // Block interactive commands that are NOT supported via TUI suspension
-        // Commands in requires_interactive() will be handled separately
+    ) -> Result<(), CommandOutput> {
+        // 1. Block interactive commands that are NOT supported via TUI suspension
         if Self::is_interactive_command(cmd) && !Self::requires_interactive(cmd) {
             log::warn!("Blocked interactive command: {}", cmd);
-            return Ok(CommandOutput {
-                stdout: String::new(),
-                stderr: format!(
-                    "Interactive command '{cmd}' is not supported in this terminal.\n\
-                     Suggestions:\n\
-                     - For 'top': use 'ps aux' or 'top -b -n 1' for batch mode\n\
-                     - For 'ssh/tmux/screen': use in a separate terminal window\n\
-                     - For REPLs: pass code as argument (e.g., 'python -c \"print(1+1)\"')"
-                ),
-                exit_code: 1,
-            });
+            return Err(CommandOutput::blocked(format!(
+                "Interactive command '{cmd}' is not supported in this terminal.\n\
+                 Suggestions:\n\
+                 - For 'top': use 'ps aux' or 'top -b -n 1' for batch mode\n\
+                 - For 'ssh/tmux/screen': use in a separate terminal window\n\
+                 - For REPLs: pass code as argument (e.g., 'python -c \"print(1+1)\"')"
+            )));
         }
 
-        // Block interactive subcommands (e.g., "gcloud auth login" opens browser)
+        // 2. Block interactive subcommands (e.g., "gcloud auth login" opens browser)
         if let Some((blocked_cmd, blocked_subcmd)) = Self::is_interactive_subcommand(cmd, args) {
             log::warn!(
                 "Blocked interactive subcommand: {} {}",
                 blocked_cmd,
                 blocked_subcmd
             );
-            return Ok(CommandOutput {
-                stdout: String::new(),
-                stderr: format!(
-                    "Command '{blocked_cmd} {blocked_subcmd}' is not supported in this terminal.\n\n\
-                     Reason: This command opens a browser or requires interactive input.\n\n\
-                     Suggestions:\n\
-                     - Run '{blocked_cmd} {blocked_subcmd}' in a separate terminal window\n\
-                     - Use non-interactive authentication (service accounts, tokens, etc.)"
-                ),
-                exit_code: 1,
-            });
+            return Err(CommandOutput::blocked(format!(
+                "Command '{blocked_cmd} {blocked_subcmd}' is not supported in this terminal.\n\n\
+                 Reason: This command opens a browser or requires interactive input.\n\n\
+                 Suggestions:\n\
+                 - Run '{blocked_cmd} {blocked_subcmd}' in a separate terminal window\n\
+                 - Use non-interactive authentication (service accounts, tokens, etc.)"
+            )));
         }
 
-        // Block commands targeting infinite devices (e.g., cat /dev/zero)
+        // 3. Block commands targeting infinite devices (e.g., cat /dev/zero)
+        // BUT allow if piped to a limiting command (e.g., cat /dev/zero | head -c 100)
         if targets_infinite_device(cmd, args) {
-            log::warn!("Blocked infinite device command: {} {:?}", cmd, args);
-            return Ok(CommandOutput {
-                stdout: String::new(),
-                stderr: format!(
+            let has_pipe_limit = original_input.is_some_and(|input| {
+                input.contains("| head")
+                    || input.contains("|head")
+                    || input.contains("| tail")
+                    || input.contains("|tail")
+            });
+
+            if !has_pipe_limit {
+                log::warn!("Blocked infinite device command: {} {:?}", cmd, args);
+                return Err(CommandOutput::blocked(format!(
                     "Command '{} {}' is blocked.\n\n\
                      Reason: Reading from infinite device would freeze the terminal.\n\n\
                      Suggestion: Use 'head' to limit output, e.g., '{} {} | head -c 1000'",
@@ -368,107 +719,58 @@ impl CommandExecutor {
                     args.join(" "),
                     cmd,
                     args.join(" ")
-                ),
-                exit_code: 1,
-            });
+                )));
+            }
         }
 
-        // Block ping without count flag (would run infinitely)
-        if is_infinite_ping(cmd, args) {
-            log::warn!("Blocked infinite ping: {} {:?}", cmd, args);
-            return Ok(CommandOutput {
-                stdout: String::new(),
-                stderr: format!(
-                    "Command 'ping' without count limit is blocked.\n\n\
-                     Reason: Infinite ping would freeze the terminal.\n\n\
-                     Suggestion: Use '-c N' to limit, e.g., 'ping -c 4 {}'",
-                    args.first().map_or("host", String::as_str)
-                ),
-                exit_code: 1,
-            });
-        }
-
-        // If command is a shell builtin, execute through shell
-        // Builtins like '.', ':', '[[', 'source', 'export' don't exist as standalone executables
+        // 4. For shell builtins, check infinite device in reconstructed command
         if Self::is_shell_builtin(cmd) {
-            // Check if this is a Unix-only builtin on Windows
             #[cfg(target_os = "windows")]
             {
                 if ShellBuiltinHandler::is_unix_only(cmd) {
-                    return Ok(CommandOutput {
-                        stdout: String::new(),
-                        stderr: format!(
-                            "Shell builtin '{}' is not available on Windows.\n\
-                             This is a Unix/Linux shell builtin that requires bash or sh.",
-                            cmd
-                        ),
-                        exit_code: 1,
-                    });
+                    return Err(CommandOutput::blocked(format!(
+                        "Shell builtin '{}' is not available on Windows.\n\
+                         This is a Unix/Linux shell builtin that requires bash or sh.",
+                        cmd
+                    )));
                 }
             }
 
-            // Reconstruct the full command from cmd + args
             let full_command = if args.is_empty() {
                 cmd.to_string()
             } else {
                 format!("{} {}", cmd, args.join(" "))
             };
 
-            // CRITICAL: Check for infinite device bypass in shell builtin arguments
             if shell_command_has_infinite_device(&full_command) {
                 log::warn!(
                     "Blocked shell builtin with infinite device: {}",
                     full_command
                 );
-                return Ok(CommandOutput {
-                    stdout: String::new(),
-                    stderr: "Command blocked: contains reference to infinite device.\n\n\
-                             Reason: Reading from /dev/zero, /dev/urandom, or /dev/random would freeze the terminal.\n\n\
-                             Suggestion: Pipe output through 'head' to limit, e.g., 'cat /dev/urandom | head -c 100'"
+                return Err(CommandOutput::blocked(
+                    "Command blocked: contains reference to infinite device.\n\n\
+                     Reason: Reading from /dev/zero, /dev/urandom, or /dev/random would freeze the terminal.\n\n\
+                     Suggestion: Pipe output through 'head' to limit, e.g., 'cat /dev/urandom | head -c 100'"
                         .to_string(),
-                    exit_code: 1,
-                });
+                ));
             }
-
-            let (shell, shell_flag) = Self::get_platform_shell();
-            let execution = TokioCommand::new(shell)
-                .arg(shell_flag)
-                .arg(&full_command)
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .output();
-
-            let output = timeout(Duration::from_secs(300), execution)
-                .await
-                .context("Command execution timed out after 5 minutes")??;
-
-            return Ok(CommandOutput {
-                stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-                stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-                exit_code: output.status.code().unwrap_or(-1),
-            });
         }
 
-        // If original_input is provided, use platform shell for shell operator interpretation
+        // 5. For shell input, check infinite device bypass and interactive subcommands
         if let Some(shell_input) = original_input {
-            // CRITICAL: Check for infinite device bypass in shell command
             if shell_command_has_infinite_device(shell_input) {
                 log::warn!(
                     "Blocked shell command with infinite device: {}",
                     shell_input
                 );
-                return Ok(CommandOutput {
-                    stdout: String::new(),
-                    stderr: "Command blocked: contains reference to infinite device.\n\n\
-                             Reason: Reading from /dev/zero, /dev/urandom, or /dev/random would freeze the terminal.\n\n\
-                             Suggestion: Pipe output through 'head' to limit, e.g., 'cat /dev/urandom | head -c 100'"
+                return Err(CommandOutput::blocked(
+                    "Command blocked: contains reference to infinite device.\n\n\
+                     Reason: Reading from /dev/zero, /dev/urandom, or /dev/random would freeze the terminal.\n\n\
+                     Suggestion: Pipe output through 'head' to limit, e.g., 'cat /dev/urandom | head -c 100'"
                         .to_string(),
-                    exit_code: 1,
-                });
+                ));
             }
 
-            // Check for interactive subcommands in shell input (e.g., "gcloud auth login")
             if let Some((blocked_cmd, blocked_subcmd)) =
                 Self::shell_has_interactive_subcommand(shell_input)
             {
@@ -477,98 +779,232 @@ impl CommandExecutor {
                     blocked_cmd,
                     blocked_subcmd
                 );
-                return Ok(CommandOutput {
-                    stdout: String::new(),
-                    stderr: format!(
-                        "Command '{blocked_cmd} {blocked_subcmd}' is not supported in this terminal.\n\n\
-                         Reason: This command opens a browser or requires interactive input.\n\n\
-                         Suggestions:\n\
-                         - Run '{blocked_cmd} {blocked_subcmd}' in a separate terminal window\n\
-                         - Use non-interactive authentication (service accounts, tokens, etc.)"
-                    ),
-                    exit_code: 1,
-                });
+                return Err(CommandOutput::blocked(format!(
+                    "Command '{blocked_cmd} {blocked_subcmd}' is not supported in this terminal.\n\n\
+                     Reason: This command opens a browser or requires interactive input.\n\n\
+                     Suggestions:\n\
+                     - Run '{blocked_cmd} {blocked_subcmd}' in a separate terminal window\n\
+                     - Use non-interactive authentication (service accounts, tokens, etc.)"
+                )));
             }
-
-            let (shell, shell_flag) = Self::get_platform_shell();
-            let execution = TokioCommand::new(shell)
-                .arg(shell_flag)
-                .arg(shell_input)
-                .stdin(Stdio::null()) // Prevent interactive programs from blocking
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .output();
-
-            let output = timeout(Duration::from_secs(300), execution)
-                .await
-                .context("Command execution timed out after 5 minutes")??;
-
-            return Ok(CommandOutput {
-                stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-                stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-                exit_code: output.status.code().unwrap_or(-1),
-            });
         }
 
-        // Check if arguments contain glob patterns (*, ?, [...], {...})
-        // If so, execute through shell for proper expansion
-        if has_glob_patterns(args) {
-            log::debug!(
-                "Command '{}' has glob patterns, executing through shell",
-                cmd
-            );
+        Ok(())
+    }
 
-            // Reconstruct full command for shell execution
-            let full_command = if args.is_empty() {
-                cmd.to_string()
-            } else {
-                format!("{} {}", cmd, args.join(" "))
-            };
+    /// Internal execution function that handles all command execution paths.
+    ///
+    /// This is the unified execution pipeline that:
+    /// 1. Validates the command via `validate_command()`
+    /// 2. Determines the execution path (shell builtin, shell input, glob, direct)
+    /// 3. Spawns the child process
+    /// 4. Executes with streaming output and cancellation support
+    ///
+    /// # Arguments
+    /// * `cmd` - The command name
+    /// * `args` - The command arguments
+    /// * `original_input` - Optional original input for shell execution
+    /// * `line_tx` - Channel sender for streaming output lines
+    /// * `cancel_token` - Token for Ctrl+C cancellation
+    async fn execute_internal(
+        cmd: &str,
+        args: &[String],
+        original_input: Option<&str>,
+        line_tx: mpsc::UnboundedSender<String>,
+        cancel_token: CancellationToken,
+    ) -> Result<CommandOutput> {
+        log::debug!("Executing command: {} {:?}", cmd, args);
 
-            let (shell, shell_flag) = Self::get_platform_shell();
-            let execution = TokioCommand::new(shell)
-                .arg(shell_flag)
-                .arg(&full_command)
-                .stdin(Stdio::null())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .output();
-
-            let output = timeout(Duration::from_secs(300), execution)
-                .await
-                .context("Command execution timed out after 5 minutes")??;
-
-            return Ok(CommandOutput {
-                stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-                stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-                exit_code: output.status.code().unwrap_or(-1),
-            });
+        // Step 1: Validate command (blocks dangerous/interactive commands)
+        if let Err(blocked_output) = Self::validate_command(cmd, args, original_input) {
+            return Ok(blocked_output);
         }
 
-        // Direct execution (no shell operators, no glob patterns)
-        // Check if command exists
-        if !Self::command_exists(cmd) {
-            log::error!("Command not found: {}", cmd);
-            anyhow::bail!("Command '{cmd}' not found");
-        }
+        // Step 2: Select execution path and spawn child (Strategy pattern)
+        let path = Self::select_execution_path(cmd, args, original_input);
+        let (child, unlimited) = Self::spawn_by_path(path, cmd, args, original_input)?;
 
-        // Execute the command with timeout
-        let execution = TokioCommand::new(cmd)
-            .args(args)
-            .stdin(Stdio::null()) // Prevent interactive programs from blocking
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .output();
+        // Step 3: Execute with streaming, cancellation, and timeout
+        let timeout_secs = Self::calculate_timeout(unlimited);
+        let execution = execute_with_limit(child, unlimited, Some(line_tx), Some(cancel_token));
 
-        let output = timeout(Duration::from_secs(300), execution)
+        timeout(Duration::from_secs(timeout_secs), execution)
             .await
-            .context("Command execution timed out after 5 minutes")??;
+            .context(format!("Command timed out after {} seconds", timeout_secs))?
+    }
 
-        Ok(CommandOutput {
-            stdout: String::from_utf8_lossy(&output.stdout).to_string(),
-            stderr: String::from_utf8_lossy(&output.stderr).to_string(),
-            exit_code: output.status.code().unwrap_or(-1),
-        })
+    /// Select the appropriate execution path for a command.
+    ///
+    /// This encapsulates the decision logic that was previously inline in execute_internal(),
+    /// reducing cyclomatic complexity.
+    fn select_execution_path(
+        cmd: &str,
+        args: &[String],
+        original_input: Option<&str>,
+    ) -> ExecutionPath {
+        if Self::is_shell_builtin(cmd) {
+            ExecutionPath::ShellBuiltin
+        } else if original_input.is_some() {
+            ExecutionPath::ShellInput
+        } else if has_glob_patterns(args) {
+            ExecutionPath::GlobExpansion
+        } else {
+            ExecutionPath::Direct
+        }
+    }
+
+    /// Assemble command and arguments into a single shell command string.
+    fn assemble_command(cmd: &str, args: &[String]) -> String {
+        if args.is_empty() {
+            cmd.to_string()
+        } else {
+            format!("{} {}", cmd, args.join(" "))
+        }
+    }
+
+    /// Spawn a child process based on the execution path.
+    ///
+    /// Returns the child process and whether it has unlimited output.
+    fn spawn_by_path(
+        path: ExecutionPath,
+        cmd: &str,
+        args: &[String],
+        original_input: Option<&str>,
+    ) -> Result<(Child, bool)> {
+        match path {
+            ExecutionPath::ShellBuiltin => {
+                let full_command = Self::assemble_command(cmd, args);
+                let (shell, shell_flag) = Self::get_platform_shell();
+                let first_cmd = full_command.split_whitespace().next().unwrap_or("");
+                let unlimited = is_unlimited_output_command(first_cmd);
+
+                let child = TokioCommand::new(shell)
+                    .arg(shell_flag)
+                    .arg(&full_command)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .context("Failed to spawn shell builtin command")?;
+
+                Ok((child, unlimited))
+            }
+            ExecutionPath::ShellInput => {
+                let shell_input = original_input.expect("ShellInput requires original_input");
+                let (shell, shell_flag) = Self::get_platform_shell();
+                let first_cmd = shell_input.split_whitespace().next().unwrap_or("");
+                let unlimited = is_unlimited_output_command(first_cmd);
+
+                let child = TokioCommand::new(shell)
+                    .arg(shell_flag)
+                    .arg(shell_input)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .context("Failed to spawn shell command")?;
+
+                Ok((child, unlimited))
+            }
+            ExecutionPath::GlobExpansion => {
+                log::debug!(
+                    "Command '{}' has glob patterns, executing through shell",
+                    cmd
+                );
+                let full_command = Self::assemble_command(cmd, args);
+                let (shell, shell_flag) = Self::get_platform_shell();
+                let unlimited = is_unlimited_output_command(cmd);
+
+                let child = TokioCommand::new(shell)
+                    .arg(shell_flag)
+                    .arg(&full_command)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .context("Failed to spawn shell command for glob expansion")?;
+
+                Ok((child, unlimited))
+            }
+            ExecutionPath::Direct => {
+                if !Self::command_exists(cmd) {
+                    log::error!("Command not found: {}", cmd);
+                    anyhow::bail!("Command '{cmd}' not found");
+                }
+
+                let unlimited = is_unlimited_output_command(cmd);
+
+                let child = TokioCommand::new(cmd)
+                    .args(args)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn()
+                    .context("Failed to spawn command")?;
+
+                Ok((child, unlimited))
+            }
+        }
+    }
+
+    /// Calculate timeout based on whether the command has unlimited output.
+    const fn calculate_timeout(unlimited: bool) -> u64 {
+        if unlimited {
+            COMMAND_TIMEOUT_SECS
+        } else {
+            LIMITED_COMMAND_TIMEOUT_SECS
+        }
+    }
+
+    /// Execute a command and return an [`ExecutionHandle`] for flexible consumption.
+    ///
+    /// This is the unified entry point for command execution that supports both:
+    /// - **Streaming**: Use [`handle.lines()`](ExecutionHandle::lines) for real-time output
+    /// - **Collected**: Use [`handle.wait()`](ExecutionHandle::wait) for final result
+    ///
+    /// All commands go through validation (`validate_command()`) before execution,
+    /// blocking dangerous operations like reading from infinite devices (`/dev/zero`).
+    ///
+    /// # Arguments
+    /// * `cmd` - The command name
+    /// * `args` - The command arguments
+    /// * `original_input` - Optional original input for shell execution (pipes, redirects)
+    /// * `cancel_token` - Token for Ctrl+C cancellation support
+    ///
+    /// # Example (streaming for TUI)
+    /// ```rust,ignore
+    /// let mut handle = CommandExecutor::execute(cmd, args, input, cancel_token);
+    /// while let Some(line) = handle.lines().recv().await {
+    ///     ui.render_line(line);
+    /// }
+    /// let result = handle.wait().await?;
+    /// ```
+    ///
+    /// # Example (collected for tests/internal)
+    /// ```rust,ignore
+    /// let handle = CommandExecutor::execute(cmd, args, input, cancel_token);
+    /// let result = handle.wait().await?;
+    /// ```
+    pub fn execute(
+        cmd: &str,
+        args: &[String],
+        original_input: Option<&str>,
+        cancel_token: CancellationToken,
+    ) -> ExecutionHandle {
+        let (tx, rx) = mpsc::unbounded_channel();
+
+        let cmd = cmd.to_string();
+        let args = args.to_vec();
+        let original_input = original_input.map(String::from);
+
+        let handle = tokio::spawn(async move {
+            Self::execute_internal(&cmd, &args, original_input.as_deref(), tx, cancel_token).await
+        });
+
+        ExecutionHandle {
+            lines_rx: rx,
+            result_handle: handle,
+        }
     }
 
     /// Execute interactive command with TUI suspension
@@ -630,8 +1066,15 @@ impl CommandExecutor {
             let args = args.to_vec();
 
             // Run blocking command on dedicated thread pool
+            // IMPORTANT: Explicitly inherit stdin/stdout/stderr so vim/nano/etc
+            // get full terminal access. Without this, input can be lost or delayed.
             let result = tokio::task::spawn_blocking(move || {
-                std::process::Command::new(&cmd).args(&args).status()
+                std::process::Command::new(&cmd)
+                    .args(&args)
+                    .stdin(Stdio::inherit())
+                    .stdout(Stdio::inherit())
+                    .stderr(Stdio::inherit())
+                    .status()
             })
             .await
             .context("Interactive command task panicked")?;
@@ -774,6 +1217,28 @@ impl CommandExecutor {
         // making it impossible to track the actual sleep process.
         let command_without_amp = command.trim().trim_end_matches('&').trim();
 
+        // Block infinite output commands from running in background
+        // They would run forever and consume CPU indefinitely
+        let first_cmd = command_without_amp.split_whitespace().next().unwrap_or("");
+        if is_infinite_output_command(first_cmd) {
+            anyhow::bail!(
+                "Command '{}' produces infinite output and cannot be run in background.\n\
+                 Use it in foreground with output limit, or pipe to a limiting command:\n\
+                 Example: {} | head -n 100",
+                first_cmd,
+                first_cmd
+            );
+        }
+
+        // Block commands targeting infinite devices (e.g., cat /dev/zero &)
+        if shell_command_has_infinite_device(command_without_amp) {
+            anyhow::bail!(
+                "Command contains reference to infinite device (/dev/zero, /dev/urandom, /dev/random).\n\
+                 Cannot run in background - would consume resources indefinitely.\n\
+                 Use with output limit: cat /dev/urandom | head -c 1000 &"
+            );
+        }
+
         log::info!(
             "Spawning background command: {} (original: {})",
             command_without_amp,
@@ -822,7 +1287,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_simple_command() {
-        let output = CommandExecutor::execute("echo", &["hello".to_string()], None)
+        let cancel = CancellationToken::new();
+        let output = CommandExecutor::execute("echo", &["hello".to_string()], None, cancel)
+            .wait()
             .await
             .unwrap();
         assert!(output.is_success());
@@ -831,7 +1298,10 @@ mod tests {
 
     #[tokio::test]
     async fn test_command_not_found() {
-        let result = CommandExecutor::execute("nonexistentcommand123", &[], None).await;
+        let cancel = CancellationToken::new();
+        let result = CommandExecutor::execute("nonexistentcommand123", &[], None, cancel)
+            .wait()
+            .await;
         assert!(result.is_err());
     }
 
@@ -843,10 +1313,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_command_with_multiple_args() {
-        let output =
-            CommandExecutor::execute("echo", &["hello".to_string(), "world".to_string()], None)
-                .await
-                .unwrap();
+        let cancel = CancellationToken::new();
+        let output = CommandExecutor::execute(
+            "echo",
+            &["hello".to_string(), "world".to_string()],
+            None,
+            cancel,
+        )
+        .wait()
+        .await
+        .unwrap();
         assert!(output.is_success());
         assert_eq!(output.stdout.trim(), "hello world");
     }
@@ -854,11 +1330,14 @@ mod tests {
     #[tokio::test]
     async fn test_command_with_stderr() {
         // Use a command that outputs to stderr (grep with no match)
+        let cancel = CancellationToken::new();
         let output = CommandExecutor::execute(
             "sh",
             &["-c".to_string(), "echo error >&2".to_string()],
             None,
+            cancel,
         )
+        .wait()
         .await
         .unwrap();
         assert!(output.is_success());
@@ -868,10 +1347,16 @@ mod tests {
     #[tokio::test]
     async fn test_command_exit_code() {
         // Use false command which exits with code 1
-        let output =
-            CommandExecutor::execute("sh", &["-c".to_string(), "exit 42".to_string()], None)
-                .await
-                .unwrap();
+        let cancel = CancellationToken::new();
+        let output = CommandExecutor::execute(
+            "sh",
+            &["-c".to_string(), "exit 42".to_string()],
+            None,
+            cancel,
+        )
+        .wait()
+        .await
+        .unwrap();
         assert!(!output.is_success());
         assert_eq!(output.exit_code, 42);
     }
@@ -922,7 +1407,11 @@ mod tests {
     async fn test_unsupported_interactive_command_blocked() {
         // Test that unsupported interactive commands (not in requires_interactive) are blocked
         // ssh is in INTERACTIVE_COMMANDS but NOT in requires_interactive
-        let output = CommandExecutor::execute("ssh", &[], None).await.unwrap();
+        let cancel = CancellationToken::new();
+        let output = CommandExecutor::execute("ssh", &[], None, cancel)
+            .wait()
+            .await
+            .unwrap();
         assert!(!output.is_success());
         assert_eq!(output.exit_code, 1);
         assert!(output.stderr.contains("Interactive command"));
@@ -932,7 +1421,11 @@ mod tests {
     #[tokio::test]
     async fn test_python_command_blocked() {
         // python is in INTERACTIVE_BLOCKED, not in requires_interactive
-        let output = CommandExecutor::execute("python", &[], None).await.unwrap();
+        let cancel = CancellationToken::new();
+        let output = CommandExecutor::execute("python", &[], None, cancel)
+            .wait()
+            .await
+            .unwrap();
         assert!(!output.is_success());
         assert!(output.stderr.contains("Interactive command"));
     }
@@ -967,8 +1460,8 @@ mod tests {
         assert!(!CommandExecutor::requires_interactive("dnf"));
         assert!(!CommandExecutor::requires_interactive("pacman"));
 
-        // Privilege escalation requires interactive (password prompt)
-        assert!(CommandExecutor::requires_interactive("sudo"));
+        // sudo is handled via root mode wrapper, not as interactive command
+        assert!(!CommandExecutor::requires_interactive("sudo"));
 
         // Test that blocked commands return false
         assert!(!CommandExecutor::requires_interactive("ssh"));
@@ -984,7 +1477,8 @@ mod tests {
         assert!(CommandExecutor::is_interactive_command("nano"));
         assert!(CommandExecutor::is_interactive_command("htop"));
         assert!(CommandExecutor::is_interactive_command("less"));
-        assert!(CommandExecutor::is_interactive_command("sudo"));
+        // sudo is handled via root mode wrapper, not as interactive command
+        assert!(!CommandExecutor::is_interactive_command("sudo"));
 
         // Blocked interactive
         assert!(CommandExecutor::is_interactive_command("ssh"));
@@ -1055,10 +1549,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_gcloud_auth_blocked() {
-        let output =
-            CommandExecutor::execute("gcloud", &["auth".to_string(), "login".to_string()], None)
-                .await
-                .unwrap();
+        let cancel = CancellationToken::new();
+        let output = CommandExecutor::execute(
+            "gcloud",
+            &["auth".to_string(), "login".to_string()],
+            None,
+            cancel,
+        )
+        .wait()
+        .await
+        .unwrap();
 
         assert!(!output.is_success());
         assert!(output.stderr.contains("not supported"));
@@ -1128,7 +1628,11 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute_with_empty_args() {
-        let output = CommandExecutor::execute("pwd", &[], None).await.unwrap();
+        let cancel = CancellationToken::new();
+        let output = CommandExecutor::execute("pwd", &[], None, cancel)
+            .wait()
+            .await
+            .unwrap();
         assert!(output.is_success());
         assert!(!output.stdout.is_empty());
     }
@@ -1136,11 +1640,14 @@ mod tests {
     #[tokio::test]
     async fn test_pipe_execution() {
         // Test pipe execution via original_input
+        let cancel = CancellationToken::new();
         let output = CommandExecutor::execute(
             "echo",
             &["hello".to_string()],
             Some("echo hello | grep hello"),
+            cancel,
         )
+        .wait()
         .await
         .unwrap();
         assert!(output.is_success());
@@ -1150,11 +1657,14 @@ mod tests {
     #[tokio::test]
     async fn test_pipe_with_multiple_commands() {
         // Test multiple pipes
+        let cancel = CancellationToken::new();
         let output = CommandExecutor::execute(
             "echo",
             &[],
             Some("echo 'line1\nline2\nline3' | grep line2 | wc -l"),
+            cancel,
         )
+        .wait()
         .await
         .unwrap();
         assert!(output.is_success());
@@ -1165,11 +1675,14 @@ mod tests {
     async fn test_redirect_execution() {
         // Test redirect via original_input
         // Create temp file, write to it, read it back
+        let cancel = CancellationToken::new();
         let output = CommandExecutor::execute(
             "echo",
             &[],
             Some("echo test > /tmp/test_redirect.txt && cat /tmp/test_redirect.txt && rm /tmp/test_redirect.txt"),
+            cancel,
         )
+        .wait()
         .await
         .unwrap();
         assert!(output.is_success());
@@ -1179,9 +1692,12 @@ mod tests {
     #[tokio::test]
     async fn test_logical_and_operator() {
         // Test && operator
-        let output = CommandExecutor::execute("echo", &[], Some("echo first && echo second"))
-            .await
-            .unwrap();
+        let cancel = CancellationToken::new();
+        let output =
+            CommandExecutor::execute("echo", &[], Some("echo first && echo second"), cancel)
+                .wait()
+                .await
+                .unwrap();
         assert!(output.is_success());
         assert!(output.stdout.contains("first"));
         assert!(output.stdout.contains("second"));
@@ -1190,7 +1706,9 @@ mod tests {
     #[tokio::test]
     async fn test_subshell_execution() {
         // Test subshell via $()
-        let output = CommandExecutor::execute("echo", &[], Some("echo $(echo nested)"))
+        let cancel = CancellationToken::new();
+        let output = CommandExecutor::execute("echo", &[], Some("echo $(echo nested)"), cancel)
+            .wait()
             .await
             .unwrap();
         assert!(output.is_success());
@@ -1293,5 +1811,79 @@ mod tests {
             "file*".to_string(),
             "other".to_string()
         ]));
+    }
+
+    // ========== Output Truncation Tests ==========
+
+    #[test]
+    fn test_is_unlimited_output_command() {
+        // Whitelisted commands
+        assert!(is_unlimited_output_command("ls"));
+        assert!(is_unlimited_output_command("cat"));
+        assert!(is_unlimited_output_command("grep"));
+        assert!(is_unlimited_output_command("git"));
+        assert!(is_unlimited_output_command("docker"));
+        assert!(is_unlimited_output_command("echo"));
+
+        // Non-whitelisted commands (should be limited)
+        assert!(!is_unlimited_output_command("yes"));
+        assert!(!is_unlimited_output_command("seq"));
+        assert!(!is_unlimited_output_command("unknown_command"));
+    }
+
+    #[tokio::test]
+    async fn test_yes_truncated_at_limit() {
+        // yes produces infinite output, should be truncated
+        let cancel = CancellationToken::new();
+        let output = CommandExecutor::execute("yes", &[], None, cancel)
+            .wait()
+            .await
+            .unwrap();
+        assert!(output.stdout.contains("[Output truncated"));
+        let line_count = output.stdout.lines().count();
+        // Should have MAX_OUTPUT_LINES + truncation message (2 lines)
+        assert!(line_count <= MAX_OUTPUT_LINES + 3);
+    }
+
+    #[tokio::test]
+    async fn test_seq_truncated_when_exceeds_limit() {
+        // seq is NOT whitelisted, so it should be truncated
+        let cancel = CancellationToken::new();
+        let output =
+            CommandExecutor::execute("seq", &["1".to_string(), "2000".to_string()], None, cancel)
+                .wait()
+                .await
+                .unwrap();
+        assert!(output.stdout.contains("[Output truncated"));
+    }
+
+    #[tokio::test]
+    async fn test_ls_not_truncated() {
+        // ls IS whitelisted - should not be truncated for normal directories
+        let cancel = CancellationToken::new();
+        let output = CommandExecutor::execute("ls", &["-la".to_string()], None, cancel)
+            .wait()
+            .await
+            .unwrap();
+        assert!(!output.stdout.contains("[Output truncated"));
+    }
+
+    #[tokio::test]
+    async fn test_echo_not_truncated() {
+        // echo IS whitelisted
+        let cancel = CancellationToken::new();
+        let output = CommandExecutor::execute("echo", &["hello".to_string()], None, cancel)
+            .wait()
+            .await
+            .unwrap();
+        assert!(!output.stdout.contains("[Output truncated"));
+        assert!(output.stdout.contains("hello"));
+    }
+
+    #[test]
+    fn test_is_infinite_output_command() {
+        assert!(is_infinite_output_command("yes"));
+        assert!(!is_infinite_output_command("echo"));
+        assert!(!is_infinite_output_command("ls"));
     }
 }

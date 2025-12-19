@@ -1,0 +1,363 @@
+@startuml Terminal Event Handling - Input Processing
+
+title Terminal Event Handler - Event Mapping and Processing
+
+package "Event Polling and Mapping" {
+    class EventHandler {
+        ---
+        + new() -> Self
+        + poll_event(timeout: Duration) -> Result<Option<TerminalEvent>>
+        - map_event(event: Event) -> TerminalEvent
+        - map_key_event(key: KeyEvent) -> TerminalEvent
+        - map_mouse_event(event: MouseEvent) -> TerminalEvent
+    }
+
+    note right of EventHandler
+        Abstraction layer over crossterm events.
+        Maps platform-specific events to
+        custom TerminalEvent enum.
+
+        Windows-specific:
+        - Filters Release and Repeat events
+        - Only processes Press events
+        - Prevents duplicate input
+
+        Cross-platform:
+        - Keyboard mapping consistent
+        - Mouse wheel support
+        - Resize events handled
+    end note
+}
+
+package "Key Event Mapping" {
+    state KeyEventMapping {
+        state Modifiers <<choice>>
+
+        [*] --> FilterKind
+
+        state FilterKind {
+            note right of FilterKind
+                WINDOWS FIX: Check KeyEventKind
+                - Release -> Unknown
+                - Repeat -> Unknown
+                - Press -> continue
+            end note
+        }
+
+        FilterKind --> Modifiers
+
+        state Modifiers {
+            note right of Modifiers
+                Match (code, modifiers):
+                - CONTROL+C -> CtrlC
+                - CONTROL+L -> ClearScreen
+                - Modifier combinations
+                - Shift for uppercase
+            end note
+        }
+
+        state MatchByCode {
+            code --> Enter: "TerminalEvent::Submit"
+            code --> Backspace: "TerminalEvent::DeleteChar"
+            code --> Tab: "TerminalEvent::TabComplete"
+            code --> "Up (no mod)": "TerminalEvent::HistoryPrevious"
+            code --> "Down (no mod)": "TerminalEvent::HistoryNext"
+            code --> "Left": "TerminalEvent::MoveCursorLeft"
+            code --> "Right": "TerminalEvent::MoveCursorRight"
+            code --> "PageUp": "TerminalEvent::ScrollUp"
+            code --> "PageDown": "TerminalEvent::ScrollDown"
+            code --> "Ctrl+Up": "TerminalEvent::ScrollUp"
+            code --> "Ctrl+Down": "TerminalEvent::ScrollDown"
+            code --> "Char(c)": "TerminalEvent::InputChar(c)"
+            code --> Other: "TerminalEvent::Unknown"
+        }
+
+        Modifiers --> MatchByCode
+
+        Enter --> [*]
+        Backspace --> [*]
+        Tab --> [*]
+        HistoryPrevious --> [*]
+        HistoryNext --> [*]
+        MoveCursorLeft --> [*]
+        MoveCursorRight --> [*]
+        ScrollUp --> [*]
+        ScrollDown --> [*]
+        InputChar --> [*]
+        Unknown --> [*]
+    }
+}
+
+package "Mouse Event Mapping" {
+    class MouseEventMapping {
+        ScrollUp -> TerminalEvent::ScrollUp
+        ScrollDown -> TerminalEvent::ScrollDown
+        ---
+        LeftMouseButton + Down
+          -> MouseDown { column, row }
+        LeftMouseButton + Drag
+          -> MouseDrag { column, row }
+        LeftMouseButton + Up
+          -> MouseUp
+        ---
+        RightMouseButton or other
+          -> Unknown
+    }
+
+    note right of MouseEventMapping
+        Only left mouse button events.
+        Right-click and others ignored.
+
+        Used for scrollbar interaction:
+        - MouseDown on scrollbar column
+        - MouseDrag to drag thumb
+        - MouseUp to finish drag
+
+        Scroll wheel: separate events
+        for smooth scrolling
+    end note
+}
+
+package "TerminalEvent Enum" {
+    class TerminalEvent {
+        <<enum>>
+        ---
+        InputChar(char)
+        Submit
+        DeleteChar
+        MoveCursorLeft
+        MoveCursorRight
+        HistoryPrevious
+        HistoryNext
+        ScrollUp
+        ScrollDown
+        TabComplete
+        ClearScreen
+        CtrlC
+        Quit
+        Resize(u16, u16)
+        MouseDown { column: u16, row: u16 }
+        MouseDrag { column: u16, row: u16 }
+        MouseUp
+        Unknown
+    }
+
+    note right of TerminalEvent
+        Input Events:
+        - InputChar(c): regular character
+        - Submit: Enter pressed
+        - DeleteChar: Backspace
+
+        Navigation Events:
+        - MoveCursorLeft/Right: arrow keys
+        - HistoryPrevious/Next: up/down
+        - ScrollUp/Down: page/ctrl+arrow
+        - TabComplete: Tab key
+
+        Control Events:
+        - CtrlC: Ctrl+C
+        - ClearScreen: Ctrl+L
+        - Quit: application exit
+        - Resize(w, h): terminal resized
+
+        Mouse Events:
+        - MouseDown/Drag/Up: button events
+        - ScrollUp/Down: wheel events
+
+        Error/Fallback:
+        - Unknown: unmapped event
+    end note
+}
+
+package "Event Handling Flow in main.rs" {
+    note as MainLoop
+        Main event loop flow:
+
+        1. event_handler.poll_event(timeout)
+           -> Option<TerminalEvent>
+
+        2. Match on TerminalEvent:
+           - InputChar: insert in InputBuffer
+           - Delete: delete from InputBuffer
+           - MoveCursor: update cursor position
+           - History: navigate history
+           - Scroll: update OutputBuffer scroll
+           - Submit: process input command
+           - Mouse: calculate scrollbar position
+           - Resize: trigger reflow
+           - CtrlC: context-aware cancel
+           - Quit: exit loop
+
+        3. terminal_ui.render(state)
+           -> Renders updated state
+
+        4. Repeat until Quit event
+    end note
+}
+
+package "Context-Aware Event Handling" {
+    note as ContextAware
+        Events interpreted differently
+        based on TerminalMode:
+
+        NORMAL MODE:
+        - InputChar: add to input buffer
+        - Submit: submit command to classifier
+        - HistoryPrevious/Next: navigate history
+        - Scroll: move output view
+
+        EXECUTING_COMMAND:
+        - CtrlC: cancel command with SIGINT
+        - InputChar: buffered but not executed
+
+        WAITING_LLM:
+        - CtrlC: cancel LLM query
+        - Spinner animates independently
+
+        AWAITING_COMMAND_APPROVAL:
+        - 'y' / 'Y': approve command
+        - 'n' / 'N': reject command
+        - Ctrl+C: cancel approval
+
+        AWAITING_ANSWER:
+        - InputChar: build answer text
+        - Submit: send answer to LLM
+        - Backspace: edit answer
+
+        AWAITING_MORE_INPUT (multiline):
+        - InputChar: continue input
+        - Submit: finalize if complete
+        - Ctrl+C: cancel multiline
+    end note
+}
+
+package "Key Binding Reference" {
+    class KeyBindings {
+        Ctrl+C: CtrlC (context-aware)
+        Ctrl+L: ClearScreen
+        Ctrl+Arrow Up: ScrollUp
+        Ctrl+Arrow Down: ScrollDown
+        ---
+        Enter: Submit
+        Backspace: DeleteChar
+        Tab: TabComplete (not impl)
+        ---
+        Arrow Up (no Ctrl): HistoryPrevious
+        Arrow Down (no Ctrl): HistoryNext
+        Arrow Left: MoveCursorLeft
+        Arrow Right: MoveCursorRight
+        ---
+        Page Up: ScrollUp
+        Page Down: ScrollDown
+        ---
+        Char (a-z,0-9, symbols): InputChar
+        Shift+Char: InputChar (uppercase)
+        ---
+        Mouse Scroll: ScrollUp/Down
+        Mouse Click (left): MouseDown
+        Mouse Drag (left): MouseDrag
+        Mouse Release (left): MouseUp
+    }
+
+    note right of KeyBindings
+        Character input:
+        - NONE or SHIFT modifiers only
+        - Other modifiers -> Unknown
+
+        Navigation:
+        - Arrow keys without Ctrl
+          -> history navigation
+        - Arrow keys with Ctrl
+          -> scroll output
+
+        Special:
+        - Some commands suspend TUI
+          (vim, nano, less, etc)
+        - Event polling paused
+          during suspension
+    end note
+}
+
+package "Platform Considerations" {
+    note as Windows
+        WINDOWS SPECIFIC HANDLING:
+
+        Crossterm generates multiple events
+        per keystroke on Windows:
+        - KeyEventKind::Press (initial)
+        - KeyEventKind::Repeat (held down)
+        - KeyEventKind::Release (released)
+
+        Solution: Filter in map_key_event()
+        Only process KeyEventKind::Press
+
+        Result: Single event per keystroke
+        No duplicate input handling needed
+    end note
+
+    note as Linux
+        LINUX/MAC SPECIFIC:
+
+        Single event per keystroke
+        No filtering needed
+
+        Interactive commands work:
+        - suspend() -> vim/nano
+        - resume() -> back to terminal
+
+        Event polling paused during
+        interactive command to prevent
+        input conflicts
+    end note
+}
+
+package "Mouse Scrollbar Interaction" {
+    note as ScrollbarInteraction
+        Mouse events used for scrollbar:
+
+        1. User clicks scrollbar
+           -> MouseDown event
+           -> Get ScrollbarInfo.column
+           -> Check if click on scrollbar
+
+        2. User drags on scrollbar
+           -> MouseDrag events
+           -> ScrollbarInfo.row_to_scroll_position()
+           -> Update OutputBuffer.scroll_position()
+
+        3. User releases mouse
+           -> MouseUp event
+           -> Finalize scroll position
+
+        ScrollbarInfo calculated during
+        render_frame() so mouse coordinates
+        map correctly to content
+    end note
+}
+
+note bottom
+    ARCHITECTURE HIGHLIGHTS:
+
+    1. ABSTRACTION: TerminalEvent enum
+       hides platform differences
+
+    2. WINDOWS COMPATIBILITY: Filters
+       Release/Repeat events for single input
+
+    3. CONTEXT-AWARE: Same event
+       handled differently per mode
+
+    4. SIMPLE MAPPING: KeyCode+Modifiers
+       -> TerminalEvent direct match
+
+    5. MOUSE SUPPORT: Scrollbar and
+       scroll wheel fully integrated
+
+    6. RESIZE HANDLING: Terminal size
+       changes detected and processed
+
+    7. EXTENSIBLE: Easy to add new
+       events without changing core logic
+end note
+
+@enduml

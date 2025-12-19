@@ -6,6 +6,7 @@
 /// - Executing commands (foreground and background)
 /// - Formatting command output
 use anyhow::Result;
+use tokio_util::sync::CancellationToken;
 
 use crate::executor::command::CommandOutput;
 use crate::executor::{CommandExecutor, JobInfo, JobStatus, PackageInstaller, SharedJobManager};
@@ -39,6 +40,8 @@ impl CommandOrchestrator {
     /// * `state` - Terminal state
     /// * `ui` - Terminal UI
     /// * `job_manager` - Shared job manager for background processes
+    /// * `cancel_token` - Cancellation token for Ctrl+C handling
+    #[expect(clippy::too_many_arguments, reason = "orchestrator needs all context")]
     pub async fn handle_command(
         &self,
         cmd: &str,
@@ -47,7 +50,23 @@ impl CommandOrchestrator {
         state: &mut TerminalState,
         ui: &mut TerminalUI,
         job_manager: &SharedJobManager,
+        cancel_token: CancellationToken,
     ) -> Result<()> {
+        // Handle "enter root mode" commands (sudo su, su, sudo -i, etc.)
+        log::debug!(
+            "handle_command: cmd='{}', args={:?}, is_enter_root={}",
+            cmd,
+            args,
+            CommandExecutor::is_enter_root_command(cmd, args)
+        );
+        if CommandExecutor::is_enter_root_command(cmd, args) {
+            log::info!("Entering root mode for command: {} {:?}", cmd, args);
+            return self.handle_enter_root_mode(state, ui).await;
+        }
+
+        // NOTE: "exit" command is handled in main.rs before calling this function
+        // This is intentional to allow early exit handling at the application level
+
         // Handle special built-in commands that would interfere with TUI
         if cmd == "clear" {
             return self.handle_clear_command(state, ui);
@@ -72,6 +91,47 @@ impl CommandOrchestrator {
         if cmd == "history" {
             return self.handle_history_command(state, args);
         }
+
+        // ==================== Command Confirmation Checks ====================
+        // Priority for rm: -i (per-file) > -I (bulk) > write-protected
+
+        if cmd == "rm" {
+            // rm -i: per-file confirmation
+            if let Some(files) = Self::needs_rm_interactive_confirmation(args) {
+                return self.handle_rm_interactive(files, original_input, args, state);
+            }
+            // rm -I: bulk confirmation (>3 files or recursive)
+            if let Some((count, recursive)) = Self::needs_rm_bulk_confirmation(args) {
+                return self.handle_rm_bulk(count, recursive, original_input, args, state);
+            }
+            // rm on write-protected files
+            if let Some(protected_files) = Self::needs_rm_confirmation(args) {
+                return self.handle_rm_confirmation(protected_files, original_input, args, state);
+            }
+        }
+
+        // cp -i: overwrite confirmation
+        if cmd == "cp" {
+            if let Some(dest) = Self::needs_cp_mv_confirmation(args) {
+                return self.handle_cp_confirmation(dest, original_input, args, state);
+            }
+        }
+
+        // mv -i: overwrite confirmation
+        if cmd == "mv" {
+            if let Some(dest) = Self::needs_cp_mv_confirmation(args) {
+                return self.handle_mv_confirmation(dest, original_input, args, state);
+            }
+        }
+
+        // ln -i: replace destination confirmation
+        if cmd == "ln" {
+            if let Some(dest) = Self::needs_ln_confirmation(args) {
+                return self.handle_ln_confirmation(dest, original_input, args, state);
+            }
+        }
+
+        // ==================== End Confirmation Checks ====================
 
         // Check for background command (ends with &)
         if let Some(input) = original_input {
@@ -104,8 +164,8 @@ impl CommandOrchestrator {
                 .await;
         }
 
-        // Execute the command
-        self.execute_and_display(cmd, args, original_input, state)
+        // Execute the command with real-time streaming output
+        self.execute_and_display(cmd, args, original_input, state, ui, cancel_token)
             .await
     }
 
@@ -177,14 +237,16 @@ impl CommandOrchestrator {
         job_manager: &SharedJobManager,
     ) -> Result<()> {
         let jobs: Vec<JobInfo> = {
+            // Per Microsoft Rust Guidelines M-PANIC-IS-STOP: Lock poisoning indicates
+            // a previous panic violated invariants. Fail fast rather than continue
+            // with potentially corrupted state.
             let mgr = match job_manager.read() {
                 Ok(guard) => guard,
-                Err(poisoned) => {
-                    log::error!(
+                Err(_poisoned) => {
+                    anyhow::bail!(
                         "JobManager lock poisoned during handle_jobs_command. \
-                         Recovering but state may be inconsistent."
+                         Cannot safely list jobs due to potential state corruption."
                     );
-                    poisoned.into_inner()
                 }
             };
             mgr.list_jobs()
@@ -327,45 +389,97 @@ impl CommandOrchestrator {
         Ok(())
     }
 
-    /// Execute command and display formatted output
+    /// Execute command and display formatted output with real-time streaming
+    ///
+    /// Output is displayed line-by-line as it's produced by the command,
+    /// providing immediate feedback for long-running commands like `ping`.
     async fn execute_and_display(
         &self,
         cmd: &str,
         args: &[String],
         original_input: Option<&str>,
         state: &mut TerminalState,
+        ui: &mut TerminalUI,
+        cancel_token: CancellationToken,
     ) -> Result<()> {
-        match CommandExecutor::execute(cmd, args, original_input).await {
+        // Build the actual command to execute
+        let (exec_cmd, exec_args, exec_input): (String, Vec<String>, Option<String>) =
+            if state.is_root_mode() {
+                // In root mode, prefix commands with "sudo -n" (non-interactive)
+                let sudo_cmd = if let Some(input) = original_input {
+                    format!("sudo -n {}", input)
+                } else {
+                    let args_str = args.join(" ");
+                    if args_str.is_empty() {
+                        format!("sudo -n {}", cmd)
+                    } else {
+                        format!("sudo -n {} {}", cmd, args_str)
+                    }
+                };
+                // Execute via shell to handle the sudo prefix
+                ("sh".to_string(), vec!["-c".to_string(), sudo_cmd], None)
+            } else {
+                (
+                    cmd.to_string(),
+                    args.to_vec(),
+                    original_input.map(String::from),
+                )
+            };
+
+        // Start streaming execution with cancellation support (Ctrl+C)
+        let mut handle =
+            CommandExecutor::execute(&exec_cmd, &exec_args, exec_input.as_deref(), cancel_token);
+
+        // Throttle rendering to 60fps (16ms) to avoid O(N²) performance issues
+        // Without throttling, each render re-parses ALL lines with ANSI codes
+        let mut last_render = std::time::Instant::now();
+        const RENDER_INTERVAL: std::time::Duration = std::time::Duration::from_millis(16);
+
+        // Stream lines in real-time
+        // Throbber animation runs in a background thread, no need to tick here
+        while let Some(line) = handle.lines().recv().await {
+            // Skip stderr prefix for display (it's just for identification)
+            let display_line = if line.starts_with("[stderr] ") {
+                line.strip_prefix("[stderr] ").unwrap_or(&line).to_string()
+            } else {
+                line
+            };
+
+            state.add_output(display_line);
+
+            // Throttle renders to 60fps max to prevent UI lag on fast output
+            // This reduces renders from 5000 to ~300 for apt list
+            if last_render.elapsed() >= RENDER_INTERVAL {
+                tokio::task::block_in_place(|| {
+                    if let Err(e) = ui.render(state) {
+                        log::warn!("Failed to render during streaming: {}", e);
+                    }
+                });
+                last_render = std::time::Instant::now();
+            }
+        }
+
+        // Final render to show any remaining lines that weren't rendered
+        tokio::task::block_in_place(|| {
+            if let Err(e) = ui.render(state) {
+                log::warn!("Failed to render final output: {}", e);
+            }
+        });
+
+        // Wait for the command to complete and get final result
+        match handle.wait().await {
             Ok(output) => {
-                // Show stdout as-is
-                if !output.stdout.is_empty() {
-                    for line in output.stdout.lines() {
-                        state.add_output(line.to_string());
-                    }
-                }
-
-                // Show stderr - only colorize red if command failed
-                if !output.stderr.is_empty() {
-                    for line in output.stderr.lines() {
-                        if output.is_success() {
-                            // Command succeeded, stderr is just informational
-                            state.add_output(line.to_string());
-                        } else {
-                            // Command failed, highlight stderr in red
-                            state.add_output(MessageFormatter::stderr_error(line));
-                        }
-                    }
-                }
-
                 // Only show "Command failed" for truly problematic exit codes
                 // Exit code 1 is often used semantically (grep no match, diff found differences)
-                // so we suppress the error message if the command produced output
                 if !output.is_success() && !self.is_benign_failure(&output) {
                     state.add_output(MessageFormatter::command_failed(output.exit_code));
                 }
             }
             Err(e) => {
-                state.add_output(MessageFormatter::execution_error(e.to_string()));
+                state.add_output(MessageFormatter::execution_error(format!(
+                    "Command execution failed: {}",
+                    e
+                )));
             }
         }
 
@@ -385,6 +499,745 @@ impl CommandOrchestrator {
         // Exit code 1 is often semantic (grep no match, diff differences, test false)
         // Exit code 2+ usually indicates real errors
         output.exit_code == 1
+    }
+
+    /// Handle entering root mode (sudo su, su, sudo -i, etc.)
+    ///
+    /// This prompts for password in TUI and validates via `sudo -S`.
+    /// On success, enters root mode where all commands are prefixed with `sudo -n`.
+    async fn handle_enter_root_mode(
+        &self,
+        state: &mut TerminalState,
+        _ui: &mut TerminalUI,
+    ) -> Result<()> {
+        log::info!(
+            "handle_enter_root_mode called, current is_root_mode={}",
+            state.is_root_mode()
+        );
+
+        // Already in root mode? Just inform and return
+        if state.is_root_mode() {
+            state.add_output(MessageFormatter::info("Already in root mode."));
+            return Ok(());
+        }
+
+        // Check if sudo credentials are already cached (no password needed)
+        // Use -n (non-interactive) to avoid any prompts, suppress all output
+        let cached = tokio::task::spawn_blocking(|| {
+            use std::process::Stdio;
+            std::process::Command::new("sudo")
+                .args(["-n", "true"])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false)
+        })
+        .await
+        .unwrap_or(false);
+
+        if cached {
+            log::info!("Sudo credentials already cached, entering root mode directly");
+            state.enter_root_mode();
+            state.add_output(MessageFormatter::success(
+                "Entered root mode. Type 'exit' to return to normal user.",
+            ));
+            return Ok(());
+        }
+
+        // Need password - set up password prompt mode (simple prompt like real sudo)
+        state.pending_interaction = Some(crate::terminal::PendingInteraction::Question {
+            question: "[sudo] password: ".to_string(),
+            options: None,
+        });
+        state.mode = crate::terminal::TerminalMode::AwaitingAnswer;
+
+        Ok(())
+    }
+
+    /// Validate sudo password and enter root mode if successful
+    ///
+    /// Called when user submits password in AwaitingAnswer mode for root authentication.
+    pub async fn validate_sudo_password(
+        &self,
+        password: String,
+        state: &mut TerminalState,
+    ) -> Result<bool> {
+        log::info!("Validating sudo password");
+
+        // Use sudo -S to read password from stdin
+        // Run "sudo -S true" to validate credentials (runs /bin/true with sudo)
+        let result = tokio::task::spawn_blocking(move || {
+            use std::io::Write;
+            use std::process::{Command, Stdio};
+
+            let mut child = Command::new("sudo")
+                .args(["-S", "true"]) // -S reads from stdin, "true" is a no-op command
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()) // Suppress "Password:" prompt from sudo
+                .spawn()?;
+
+            // Write password to stdin followed by newline
+            if let Some(mut stdin) = child.stdin.take() {
+                // sudo expects password followed by newline
+                writeln!(stdin, "{}", password)?;
+                // Ensure it's flushed before closing
+                stdin.flush()?;
+            }
+
+            child.wait()
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("sudo validation task panicked: {}", e))?;
+
+        match result {
+            Ok(status) if status.success() => {
+                log::info!("Sudo authentication successful");
+                state.enter_root_mode();
+                state.add_output(MessageFormatter::success(
+                    "Entered root mode. Type 'exit' to return to normal user.",
+                ));
+                Ok(true)
+            }
+            Ok(_) => {
+                log::warn!("Sudo authentication failed");
+                state.add_output(MessageFormatter::error(
+                    "Authentication failed. Incorrect password.",
+                ));
+                Ok(false)
+            }
+            Err(e) => {
+                log::error!("Sudo command error: {}", e);
+                state.add_output(MessageFormatter::error(format!(
+                    "Failed to authenticate: {}",
+                    e
+                )));
+                Ok(false)
+            }
+        }
+    }
+
+    /// Check if we're waiting for sudo password
+    pub fn is_waiting_for_sudo_password(state: &TerminalState) -> bool {
+        if let Some(crate::terminal::PendingInteraction::Question { question, .. }) =
+            &state.pending_interaction
+        {
+            question.contains("[sudo] password")
+        } else {
+            false
+        }
+    }
+
+    // ==================== Flag Detection Helpers ====================
+
+    /// Generic flag detection helper
+    ///
+    /// Checks if args contain a flag with:
+    /// - Exact short form match (e.g., "-f")
+    /// - Combined short flags containing the character (e.g., "-rf" contains 'f')
+    /// - Optional long form match (e.g., "--force")
+    /// - Optional exclusion character (e.g., 'i' but not 'I')
+    fn has_flag(args: &[String], short: char, long: Option<&str>, exclude: Option<char>) -> bool {
+        args.iter().any(|a| {
+            // Long form match
+            if let Some(l) = long {
+                if a == l {
+                    return true;
+                }
+            }
+            // Short form: -X or combined flags containing X
+            if a.starts_with('-') && !a.starts_with("--") && a.contains(short) {
+                // Check exclusion (e.g., 'i' but not if 'I' present)
+                if let Some(exc) = exclude {
+                    return !a.contains(exc);
+                }
+                return true;
+            }
+            false
+        })
+    }
+
+    /// Check for -i flag (handles -iv, -ri, etc. but NOT -I)
+    fn has_interactive_flag(args: &[String]) -> bool {
+        Self::has_flag(args, 'i', None, Some('I'))
+    }
+
+    /// Check for -I flag (bulk interactive)
+    fn has_bulk_interactive_flag(args: &[String]) -> bool {
+        Self::has_flag(args, 'I', None, None)
+    }
+
+    /// Check for -f flag (force - disables confirmation)
+    fn has_force_flag(args: &[String]) -> bool {
+        Self::has_flag(args, 'f', Some("--force"), None)
+    }
+
+    /// Check for recursive flags (-r, -R, --recursive)
+    fn has_recursive_flag(args: &[String]) -> bool {
+        Self::has_flag(args, 'r', Some("--recursive"), None)
+            || Self::has_flag(args, 'R', None, None)
+    }
+
+    /// Extract file/path arguments from args (filters out flags)
+    fn get_file_args(args: &[String]) -> Vec<&String> {
+        args.iter().filter(|a| !a.starts_with('-')).collect()
+    }
+
+    /// Build command string from original input or reconstruct from parts
+    fn build_command_string(original_input: Option<&str>, cmd: &str, args: &[String]) -> String {
+        original_input.map(|s| s.to_string()).unwrap_or_else(|| {
+            if args.is_empty() {
+                cmd.to_string()
+            } else {
+                format!("{} {}", cmd, args.join(" "))
+            }
+        })
+    }
+
+    /// Add -f (force) flag to a command string
+    fn add_force_flag(command: &str, cmd_name: &str) -> String {
+        command.replacen(&format!("{} ", cmd_name), &format!("{} -f ", cmd_name), 1)
+    }
+
+    // ==================== Detection Functions ====================
+
+    /// Check if rm -i needs per-file confirmation
+    /// Returns Some(files) if -i is present, None otherwise
+    fn needs_rm_interactive_confirmation(args: &[String]) -> Option<Vec<String>> {
+        if Self::has_force_flag(args) || !Self::has_interactive_flag(args) {
+            return None;
+        }
+
+        let files: Vec<String> = Self::get_file_args(args).into_iter().cloned().collect();
+
+        if files.is_empty() {
+            None
+        } else {
+            Some(files)
+        }
+    }
+
+    /// Check if rm -I needs bulk confirmation
+    /// -I prompts once if: >3 files OR recursive deletion
+    fn needs_rm_bulk_confirmation(args: &[String]) -> Option<(usize, bool)> {
+        if Self::has_force_flag(args) || !Self::has_bulk_interactive_flag(args) {
+            return None;
+        }
+
+        let file_count = Self::get_file_args(args).len();
+        let is_recursive = Self::has_recursive_flag(args);
+
+        // Only prompt if >3 files or recursive
+        if file_count > 3 || is_recursive {
+            Some((file_count, is_recursive))
+        } else {
+            None
+        }
+    }
+
+    /// Check if cp/mv -i needs confirmation for overwrite
+    /// Returns Some(destination) if -i is present and destination exists
+    fn needs_cp_mv_confirmation(args: &[String]) -> Option<String> {
+        if Self::has_force_flag(args) || !Self::has_interactive_flag(args) {
+            return None;
+        }
+
+        let paths = Self::get_file_args(args);
+
+        if paths.len() >= 2 {
+            let dest = paths.last()?;
+            let dest_path = std::path::Path::new(dest);
+
+            if paths.len() == 2 {
+                // Single file copy: check if dest file exists
+                if dest_path.exists() && dest_path.is_file() {
+                    return Some(dest.to_string());
+                }
+            } else {
+                // Multiple sources to directory: check if any target exists
+                if dest_path.is_dir() {
+                    for source in &paths[..paths.len() - 1] {
+                        if let Some(name) = std::path::Path::new(source).file_name() {
+                            let target = dest_path.join(name);
+                            if target.exists() {
+                                return Some(target.display().to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        None
+    }
+
+    /// Check if ln -i needs confirmation for removing destination
+    fn needs_ln_confirmation(args: &[String]) -> Option<String> {
+        if Self::has_force_flag(args) || !Self::has_interactive_flag(args) {
+            return None;
+        }
+
+        let paths = Self::get_file_args(args);
+
+        if paths.len() >= 2 {
+            let dest = paths.last()?;
+            if std::path::Path::new(dest).exists() {
+                return Some(dest.to_string());
+            }
+        }
+
+        None
+    }
+
+    // ==================== Write-Protected Detection ====================
+
+    /// Check if user can write to a file (Unix: uses access() syscall)
+    ///
+    /// This checks the effective permissions for the current user, which is
+    /// exactly what `rm` does to decide whether to prompt for confirmation.
+    #[cfg(unix)]
+    fn user_can_write_file(path: &std::path::Path) -> bool {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+
+        if let Ok(c_path) = CString::new(path.as_os_str().as_bytes()) {
+            // SAFETY: FFI to libc::access (M-UNSAFE: FFI and platform interactions)
+            // Preconditions satisfied:
+            // - c_path is a valid null-terminated C string (guaranteed by CString::new Ok)
+            // - libc::W_OK is a valid constant defined by libc (value 2 on Unix)
+            // - access() is thread-safe and only reads filesystem metadata
+            // This call cannot cause UB as c_path remains valid for the duration of the call.
+            unsafe { libc::access(c_path.as_ptr(), libc::W_OK) == 0 }
+        } else {
+            // If path conversion fails (contains null bytes), assume writable (don't block)
+            true
+        }
+    }
+
+    #[cfg(not(unix))]
+    fn user_can_write_file(path: &std::path::Path) -> bool {
+        // On Windows, fall back to readonly check
+        std::fs::metadata(path)
+            .map(|m| !m.permissions().readonly())
+            .unwrap_or(true)
+    }
+
+    /// Check if rm command needs confirmation for write-protected files
+    ///
+    /// Returns Some(list of protected files) if confirmation is needed,
+    /// None if the command can proceed without confirmation.
+    ///
+    /// A file is considered "write-protected" if the current user cannot write to it.
+    /// This matches `rm` behavior which checks effective permissions, not just the
+    /// readonly bit.
+    fn needs_rm_confirmation(args: &[String]) -> Option<Vec<String>> {
+        // Skip if -f flag is present (user explicitly wants force)
+        if Self::has_force_flag(args) {
+            return None;
+        }
+
+        // Get file paths from args (skip flags)
+        let files = Self::get_file_args(args);
+
+        // Check which files the user cannot write to
+        let mut protected_files = Vec::new();
+        for file in files {
+            let path = std::path::Path::new(file);
+            // Only check existing files - rm will handle non-existent files
+            if path.exists() && !Self::user_can_write_file(path) {
+                protected_files.push(file.clone());
+            }
+        }
+
+        if protected_files.is_empty() {
+            None
+        } else {
+            Some(protected_files)
+        }
+    }
+
+    /// Handle rm confirmation for protected files
+    fn handle_rm_confirmation(
+        &self,
+        protected_files: Vec<String>,
+        original_input: Option<&str>,
+        args: &[String],
+        state: &mut TerminalState,
+    ) -> Result<()> {
+        let files_list = protected_files.join(", ");
+        let command = Self::build_command_string(original_input, "rm", args);
+
+        state.pending_interaction = Some(crate::terminal::PendingInteraction::CommandApproval {
+            command,
+            message: format!("rm: remove write-protected file(s): {}?", files_list),
+            confirmation_type: Some(crate::terminal::ConfirmationType::RmWriteProtected),
+        });
+        state.mode = crate::terminal::TerminalMode::AwaitingCommandApproval;
+
+        Ok(())
+    }
+
+    // ==================== Confirmation Handlers ====================
+
+    /// Get file type description for rm prompt (matches Linux output)
+    fn get_file_type_description(path: &str) -> &'static str {
+        let p = std::path::Path::new(path);
+        if let Ok(meta) = p.symlink_metadata() {
+            if meta.is_dir() {
+                "directory"
+            } else if meta.file_type().is_symlink() {
+                "symbolic link"
+            } else {
+                "regular file"
+            }
+        } else {
+            "file"
+        }
+    }
+
+    /// Handle rm -i confirmation for individual files
+    fn handle_rm_interactive(
+        &self,
+        files: Vec<String>,
+        original_input: Option<&str>,
+        args: &[String],
+        state: &mut TerminalState,
+    ) -> Result<()> {
+        if files.is_empty() {
+            return Ok(());
+        }
+
+        // SAFETY: files.is_empty() check above guarantees first() returns Some.
+        // Using expect() instead of unwrap_or_default() for clearer intent.
+        let first_file = files
+            .first()
+            .cloned()
+            .expect("files vec verified non-empty above");
+        let command = Self::build_command_string(original_input, "rm", args);
+
+        // Linux rm format: "rm: remove regular file 'X'?"
+        let file_type = Self::get_file_type_description(&first_file);
+        let message = format!("rm: remove {} '{}'?", file_type, first_file);
+
+        state.pending_interaction = Some(crate::terminal::PendingInteraction::CommandApproval {
+            command: command.clone(),
+            message,
+            confirmation_type: Some(crate::terminal::ConfirmationType::RmInteractive {
+                files,
+                current_index: 0,
+                command,
+            }),
+        });
+        state.mode = crate::terminal::TerminalMode::AwaitingCommandApproval;
+
+        Ok(())
+    }
+
+    /// Handle rm -I bulk confirmation
+    fn handle_rm_bulk(
+        &self,
+        file_count: usize,
+        is_recursive: bool,
+        original_input: Option<&str>,
+        args: &[String],
+        state: &mut TerminalState,
+    ) -> Result<()> {
+        let command = Self::build_command_string(original_input, "rm", args);
+
+        // Linux rm -I format: "rm: remove N arguments?" or "rm: remove N arguments recursively?"
+        let message = if is_recursive {
+            format!("rm: remove {} arguments recursively?", file_count)
+        } else {
+            format!("rm: remove {} arguments?", file_count)
+        };
+
+        state.pending_interaction = Some(crate::terminal::PendingInteraction::CommandApproval {
+            command,
+            message,
+            confirmation_type: Some(crate::terminal::ConfirmationType::RmInteractiveBulk {
+                file_count,
+                is_recursive,
+            }),
+        });
+        state.mode = crate::terminal::TerminalMode::AwaitingCommandApproval;
+
+        Ok(())
+    }
+
+    /// Handle cp -i confirmation for overwrite
+    fn handle_cp_confirmation(
+        &self,
+        destination: String,
+        original_input: Option<&str>,
+        args: &[String],
+        state: &mut TerminalState,
+    ) -> Result<()> {
+        let command = Self::build_command_string(original_input, "cp", args);
+
+        // Linux cp format: "cp: overwrite 'X'?"
+        let message = format!("cp: overwrite '{}'?", destination);
+
+        state.pending_interaction = Some(crate::terminal::PendingInteraction::CommandApproval {
+            command,
+            message,
+            confirmation_type: Some(crate::terminal::ConfirmationType::CpInteractive {
+                destination,
+            }),
+        });
+        state.mode = crate::terminal::TerminalMode::AwaitingCommandApproval;
+
+        Ok(())
+    }
+
+    /// Handle mv -i confirmation for overwrite
+    fn handle_mv_confirmation(
+        &self,
+        destination: String,
+        original_input: Option<&str>,
+        args: &[String],
+        state: &mut TerminalState,
+    ) -> Result<()> {
+        let command = Self::build_command_string(original_input, "mv", args);
+
+        // Linux mv format: "mv: overwrite 'X'?"
+        let message = format!("mv: overwrite '{}'?", destination);
+
+        state.pending_interaction = Some(crate::terminal::PendingInteraction::CommandApproval {
+            command,
+            message,
+            confirmation_type: Some(crate::terminal::ConfirmationType::MvInteractive {
+                destination,
+            }),
+        });
+        state.mode = crate::terminal::TerminalMode::AwaitingCommandApproval;
+
+        Ok(())
+    }
+
+    /// Handle ln -i confirmation for removing destination
+    fn handle_ln_confirmation(
+        &self,
+        destination: String,
+        original_input: Option<&str>,
+        args: &[String],
+        state: &mut TerminalState,
+    ) -> Result<()> {
+        let command = Self::build_command_string(original_input, "ln", args);
+
+        // Linux ln format: "ln: replace 'X'?"
+        let message = format!("ln: replace '{}'?", destination);
+
+        state.pending_interaction = Some(crate::terminal::PendingInteraction::CommandApproval {
+            command,
+            message,
+            confirmation_type: Some(crate::terminal::ConfirmationType::LnInteractive {
+                destination,
+            }),
+        });
+        state.mode = crate::terminal::TerminalMode::AwaitingCommandApproval;
+
+        Ok(())
+    }
+
+    /// Helper to remove a specific flag from command string
+    fn remove_flag_from_command(cmd: &str, flag: &str) -> String {
+        cmd.split_whitespace()
+            .filter(|part| *part != flag)
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// Helper to execute a shell command and display output
+    async fn execute_shell_command(&self, cmd: &str, state: &mut TerminalState) -> Result<()> {
+        let cancel_token = tokio_util::sync::CancellationToken::new();
+        let handle = crate::executor::CommandExecutor::execute(
+            "sh",
+            &["-c".to_string(), cmd.to_string()],
+            None,
+            cancel_token,
+        );
+        let output = handle.wait().await;
+
+        match output {
+            Ok(out) => {
+                if !out.stdout.is_empty() {
+                    for line in out.stdout.lines() {
+                        state.add_output(line.to_string());
+                    }
+                }
+                if !out.stderr.is_empty() {
+                    for line in out.stderr.lines() {
+                        if out.is_success() {
+                            state.add_output(line.to_string());
+                        } else {
+                            state.add_output(MessageFormatter::stderr_error(line));
+                        }
+                    }
+                }
+                if !out.is_success() {
+                    state.add_output(MessageFormatter::command_failed(out.exit_code));
+                }
+            }
+            Err(e) => {
+                state.add_output(MessageFormatter::error(format!("Failed to execute: {}", e)));
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Handle shell confirmation approval (rm on write-protected files, etc.)
+    ///
+    /// This is called from main.rs when user responds y/n to a shell confirmation.
+    /// Business logic is kept here in the orchestrator, main.rs only delegates.
+    pub async fn handle_shell_confirmation(
+        &self,
+        approved: bool,
+        state: &mut TerminalState,
+    ) -> Result<()> {
+        // Take the pending interaction
+        let pending = state.pending_interaction.take();
+        state.mode = crate::terminal::TerminalMode::Normal;
+
+        // Special handling for rm -i: 'n' skips to next file, doesn't cancel all
+        if !approved {
+            if let Some(crate::terminal::PendingInteraction::CommandApproval {
+                confirmation_type:
+                    Some(crate::terminal::ConfirmationType::RmInteractive {
+                        files,
+                        current_index,
+                        command,
+                    }),
+                ..
+            }) = pending
+            {
+                // Skip this file, move to next
+                if current_index + 1 < files.len() {
+                    let next_index = current_index + 1;
+                    // SAFETY: bounds check above guarantees get() returns Some
+                    let next_file = files
+                        .get(next_index)
+                        .cloned()
+                        .expect("next_index verified in bounds above");
+                    let file_type = Self::get_file_type_description(&next_file);
+                    let message = format!("rm: remove {} '{}'?", file_type, next_file);
+
+                    state.pending_interaction =
+                        Some(crate::terminal::PendingInteraction::CommandApproval {
+                            command: command.clone(),
+                            message,
+                            confirmation_type: Some(
+                                crate::terminal::ConfirmationType::RmInteractive {
+                                    files,
+                                    current_index: next_index,
+                                    command,
+                                },
+                            ),
+                        });
+                    state.mode = crate::terminal::TerminalMode::AwaitingCommandApproval;
+                    return Ok(());
+                }
+                // All files processed (skipped)
+                return Ok(());
+            }
+
+            // For other confirmation types, just cancel
+            state.add_output(MessageFormatter::info("Cancelled."));
+            return Ok(());
+        }
+
+        // Handle based on confirmation type
+        if let Some(crate::terminal::PendingInteraction::CommandApproval {
+            command,
+            confirmation_type: Some(confirm_type),
+            ..
+        }) = pending
+        {
+            match confirm_type {
+                crate::terminal::ConfirmationType::RmWriteProtected => {
+                    // Execute rm -f to force removal of write-protected files
+                    let forced_cmd = Self::add_force_flag(&command, "rm");
+                    self.execute_shell_command(&forced_cmd, state).await?;
+                }
+
+                crate::terminal::ConfirmationType::RmInteractive {
+                    files,
+                    current_index,
+                    command: orig_cmd,
+                } => {
+                    // Remove just this one file (without -i to avoid subprocess prompt)
+                    if let Some(file) = files.get(current_index) {
+                        let single_cmd = format!("rm '{}'", file);
+                        self.execute_shell_command(&single_cmd, state).await?;
+                    }
+
+                    // If more files remain, prompt for next
+                    if current_index + 1 < files.len() {
+                        let next_index = current_index + 1;
+                        // SAFETY: bounds check above guarantees get() returns Some
+                        let next_file = files
+                            .get(next_index)
+                            .cloned()
+                            .expect("next_index verified in bounds above");
+                        let file_type = Self::get_file_type_description(&next_file);
+                        let message = format!("rm: remove {} '{}'?", file_type, next_file);
+
+                        state.pending_interaction =
+                            Some(crate::terminal::PendingInteraction::CommandApproval {
+                                command: orig_cmd.clone(),
+                                message,
+                                confirmation_type: Some(
+                                    crate::terminal::ConfirmationType::RmInteractive {
+                                        files,
+                                        current_index: next_index,
+                                        command: orig_cmd,
+                                    },
+                                ),
+                            });
+                        state.mode = crate::terminal::TerminalMode::AwaitingCommandApproval;
+                    }
+                }
+
+                crate::terminal::ConfirmationType::RmInteractiveBulk { .. } => {
+                    // Remove -I flag and execute the full command
+                    let exec_cmd = Self::remove_flag_from_command(&command, "-I");
+                    self.execute_shell_command(&exec_cmd, state).await?;
+                }
+
+                crate::terminal::ConfirmationType::CpInteractive { .. } => {
+                    // Execute cp with -f flag to force overwrite
+                    let exec_cmd = Self::add_force_flag(&command, "cp");
+                    self.execute_shell_command(&exec_cmd, state).await?;
+                }
+
+                crate::terminal::ConfirmationType::MvInteractive { .. } => {
+                    // Execute mv with -f flag to force overwrite
+                    let exec_cmd = Self::add_force_flag(&command, "mv");
+                    self.execute_shell_command(&exec_cmd, state).await?;
+                }
+
+                crate::terminal::ConfirmationType::LnInteractive { .. } => {
+                    // Execute ln with -f flag to force (removes existing destination)
+                    let exec_cmd = Self::add_force_flag(&command, "ln");
+                    self.execute_shell_command(&exec_cmd, state).await?;
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Check if a pending interaction is a shell confirmation (not LLM)
+    pub fn is_shell_confirmation(state: &TerminalState) -> bool {
+        matches!(
+            &state.pending_interaction,
+            Some(crate::terminal::PendingInteraction::CommandApproval {
+                confirmation_type: Some(_),
+                ..
+            })
+        )
     }
 }
 
@@ -406,91 +1259,70 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute_simple_command() {
-        let orchestrator = CommandOrchestrator::new();
-        let mut state = TerminalState::new();
-
-        // Execute "echo hello"
-        orchestrator
-            .execute_and_display("echo", &["hello".to_string()], None, &mut state)
+        // Test via CommandExecutor directly (orchestrator just streams to UI)
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let output = CommandExecutor::execute("echo", &["hello".to_string()], None, cancel)
+            .wait()
             .await
             .unwrap();
 
-        // Should have output
-        assert!(!state.output.lines().is_empty());
-        assert!(state
-            .output
-            .lines()
-            .iter()
-            .any(|line| line.contains("hello")));
+        assert!(output.is_success());
+        assert!(output.stdout.contains("hello"));
     }
 
     #[tokio::test]
     async fn test_execute_command_with_failure() {
-        let orchestrator = CommandOrchestrator::new();
-        let mut state = TerminalState::new();
+        // Test via CommandExecutor directly
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let output = CommandExecutor::execute(
+            "sh",
+            &["-c".to_string(), "exit 1".to_string()],
+            None,
+            cancel,
+        )
+        .wait()
+        .await
+        .unwrap();
 
-        // Execute command that fails with exit 1 (benign failure)
-        orchestrator
-            .execute_and_display(
-                "sh",
-                &["-c".to_string(), "exit 1".to_string()],
-                None,
-                &mut state,
-            )
-            .await
-            .unwrap();
-
-        // Exit 1 is benign, should NOT show "exited with code" message
-        assert!(!state
-            .output
-            .lines()
-            .iter()
-            .any(|line| line.contains("exited")));
+        // Exit 1 is benign failure
+        assert!(!output.is_success());
+        assert_eq!(output.exit_code, 1);
     }
 
     #[tokio::test]
     async fn test_execute_command_with_stderr_success() {
-        let orchestrator = CommandOrchestrator::new();
-        let mut state = TerminalState::new();
+        // Test via CommandExecutor directly
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let output = CommandExecutor::execute(
+            "sh",
+            &["-c".to_string(), "echo warning >&2".to_string()],
+            None,
+            cancel,
+        )
+        .wait()
+        .await
+        .unwrap();
 
-        // Command succeeds but outputs to stderr
-        orchestrator
-            .execute_and_display(
-                "sh",
-                &["-c".to_string(), "echo warning >&2".to_string()],
-                None,
-                &mut state,
-            )
-            .await
-            .unwrap();
-
-        // Should have stderr output (not colorized since command succeeded)
-        assert!(state
-            .output
-            .lines()
-            .iter()
-            .any(|line| line.contains("warning")));
+        assert!(output.is_success());
+        assert!(output.stderr.contains("warning"));
     }
 
     #[tokio::test]
     async fn test_execute_command_with_stderr_failure() {
-        let orchestrator = CommandOrchestrator::new();
-        let mut state = TerminalState::new();
+        // Test via CommandExecutor directly
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let output = CommandExecutor::execute(
+            "sh",
+            &["-c".to_string(), "echo error >&2; exit 1".to_string()],
+            None,
+            cancel,
+        )
+        .wait()
+        .await
+        .unwrap();
 
-        // Command fails and outputs to stderr
-        orchestrator
-            .execute_and_display(
-                "sh",
-                &["-c".to_string(), "echo error >&2; exit 1".to_string()],
-                None,
-                &mut state,
-            )
-            .await
-            .unwrap();
-
-        // Should have stderr output (colorized since command failed)
-        let output_str = state.output.lines().join("\n");
-        assert!(output_str.contains("error"));
+        assert!(!output.is_success());
+        assert!(output.stderr.contains("error"));
     }
 
     #[test]
@@ -507,81 +1339,69 @@ mod tests {
 
     #[tokio::test]
     async fn test_execute_nonexistent_command() {
-        let orchestrator = CommandOrchestrator::new();
-        let mut state = TerminalState::new();
-
-        // Try to execute using execute_and_display on nonexistent command
-        // This would fail before reaching execute_and_display in real flow,
-        // but we test the executor's error handling
-        let result = orchestrator
-            .execute_and_display("nonexistentcmd123", &[], None, &mut state)
+        // Test via CommandExecutor directly
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let result = CommandExecutor::execute("nonexistentcmd123", &[], None, cancel)
+            .wait()
             .await;
 
-        // Should complete successfully (error is captured in state)
-        assert!(result.is_ok());
-        assert!(state
-            .output
-            .lines()
-            .iter()
-            .any(|line| line.contains("Error executing")));
+        // Should fail (command not found)
+        assert!(result.is_err());
     }
 
     #[tokio::test]
     async fn test_execute_command_empty_output() {
-        let orchestrator = CommandOrchestrator::new();
-        let mut state = TerminalState::new();
-
-        // Execute command with no output
-        orchestrator
-            .execute_and_display("true", &[], None, &mut state)
+        // Test via CommandExecutor directly
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let output = CommandExecutor::execute("true", &[], None, cancel)
+            .wait()
             .await
             .unwrap();
 
-        // true command produces no output, state might be empty or have minimal output
-        // Just verify it doesn't panic
+        // true command produces no output
+        assert!(output.is_success());
+        assert!(output.stdout.is_empty());
     }
 
     #[tokio::test]
     async fn test_grep_no_match_exit_1_benign() {
-        let orchestrator = CommandOrchestrator::new();
-        let mut state = TerminalState::new();
+        // Test via CommandExecutor directly
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let output = CommandExecutor::execute(
+            "sh",
+            &[],
+            Some("echo 'hello world' | grep 'nonexistent'"),
+            cancel,
+        )
+        .wait()
+        .await
+        .unwrap();
 
         // grep with no match returns exit 1 (benign, not an error)
-        orchestrator
-            .execute_and_display(
-                "sh",
-                &[],
-                Some("echo 'hello world' | grep 'nonexistent'"),
-                &mut state,
-            )
-            .await
-            .unwrap();
-
-        // Should NOT show "Command exited with code 1" message
-        // because exit 1 is benign for grep
-        let output_str = state.output.lines().join("\n");
-        assert!(!output_str.contains("exited with code"));
+        assert_eq!(output.exit_code, 1);
+        // is_benign_failure() check is done in orchestrator
+        let orchestrator = CommandOrchestrator::new();
+        assert!(orchestrator.is_benign_failure(&output));
     }
 
     #[tokio::test]
     async fn test_exit_code_2_shows_error() {
+        // Test via CommandExecutor directly
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let output = CommandExecutor::execute(
+            "sh",
+            &["-c".to_string(), "exit 2".to_string()],
+            None,
+            cancel,
+        )
+        .wait()
+        .await
+        .unwrap();
+
+        // Exit code 2 is NOT benign
+        assert_eq!(output.exit_code, 2);
         let orchestrator = CommandOrchestrator::new();
-        let mut state = TerminalState::new();
-
-        // Exit code 2 should show error message (real error)
-        orchestrator
-            .execute_and_display(
-                "sh",
-                &["-c".to_string(), "exit 2".to_string()],
-                None,
-                &mut state,
-            )
-            .await
-            .unwrap();
-
-        // Should show "Command exited with code 2" message
-        let output_str = state.output.lines().join("\n");
-        assert!(output_str.contains("exited with code 2"));
+        assert!(!orchestrator.is_benign_failure(&output));
     }
 
     #[test]
@@ -619,5 +1439,1007 @@ mod tests {
             exit_code: 127,
         };
         assert!(!orchestrator.is_benign_failure(&not_found));
+    }
+
+    // ==================== Flag Detection Tests ====================
+
+    #[test]
+    fn test_has_interactive_flag() {
+        // Standalone -i
+        assert!(CommandOrchestrator::has_interactive_flag(&[
+            "-i".to_string()
+        ]));
+        // Combined flags like -iv
+        assert!(CommandOrchestrator::has_interactive_flag(&[
+            "-iv".to_string()
+        ]));
+        assert!(CommandOrchestrator::has_interactive_flag(&[
+            "-ri".to_string()
+        ]));
+        // Should NOT match -I (capital I)
+        assert!(!CommandOrchestrator::has_interactive_flag(&[
+            "-I".to_string()
+        ]));
+        assert!(!CommandOrchestrator::has_interactive_flag(&[
+            "-rI".to_string()
+        ]));
+        // Should NOT match non-i flags
+        assert!(!CommandOrchestrator::has_interactive_flag(&[
+            "-f".to_string()
+        ]));
+        assert!(!CommandOrchestrator::has_interactive_flag(&[
+            "-r".to_string()
+        ]));
+    }
+
+    #[test]
+    fn test_has_bulk_interactive_flag() {
+        // Standalone -I
+        assert!(CommandOrchestrator::has_bulk_interactive_flag(&[
+            "-I".to_string()
+        ]));
+        // Combined flags like -rI
+        assert!(CommandOrchestrator::has_bulk_interactive_flag(&[
+            "-rI".to_string()
+        ]));
+        // Should NOT match -i (lowercase)
+        assert!(!CommandOrchestrator::has_bulk_interactive_flag(&[
+            "-i".to_string()
+        ]));
+    }
+
+    #[test]
+    fn test_has_force_flag() {
+        assert!(CommandOrchestrator::has_force_flag(&["-f".to_string()]));
+        assert!(CommandOrchestrator::has_force_flag(
+            &["--force".to_string()]
+        ));
+        assert!(CommandOrchestrator::has_force_flag(&["-rf".to_string()]));
+        assert!(!CommandOrchestrator::has_force_flag(&["-i".to_string()]));
+        assert!(!CommandOrchestrator::has_force_flag(&["-r".to_string()]));
+    }
+
+    #[test]
+    fn test_has_recursive_flag() {
+        assert!(CommandOrchestrator::has_recursive_flag(&["-r".to_string()]));
+        assert!(CommandOrchestrator::has_recursive_flag(&["-R".to_string()]));
+        assert!(CommandOrchestrator::has_recursive_flag(&[
+            "--recursive".to_string()
+        ]));
+        assert!(CommandOrchestrator::has_recursive_flag(
+            &["-rf".to_string()]
+        ));
+        assert!(!CommandOrchestrator::has_recursive_flag(
+            &["-i".to_string()]
+        ));
+    }
+
+    // ==================== Detection Function Tests ====================
+
+    #[test]
+    fn test_needs_rm_interactive_confirmation() {
+        // With -i flag and files
+        let args = vec![
+            "-i".to_string(),
+            "file1.txt".to_string(),
+            "file2.txt".to_string(),
+        ];
+        let result = CommandOrchestrator::needs_rm_interactive_confirmation(&args);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), vec!["file1.txt", "file2.txt"]);
+
+        // Without -i flag
+        let args = vec!["file1.txt".to_string()];
+        assert!(CommandOrchestrator::needs_rm_interactive_confirmation(&args).is_none());
+
+        // With -f flag (should skip)
+        let args = vec!["-if".to_string(), "file1.txt".to_string()];
+        assert!(CommandOrchestrator::needs_rm_interactive_confirmation(&args).is_none());
+    }
+
+    #[test]
+    fn test_needs_rm_bulk_confirmation() {
+        // With -I and >3 files
+        let args = vec![
+            "-I".to_string(),
+            "a".to_string(),
+            "b".to_string(),
+            "c".to_string(),
+            "d".to_string(),
+        ];
+        let result = CommandOrchestrator::needs_rm_bulk_confirmation(&args);
+        assert!(result.is_some());
+        let (count, recursive) = result.unwrap();
+        assert_eq!(count, 4);
+        assert!(!recursive);
+
+        // With -I and recursive
+        let args = vec!["-rI".to_string(), "dir".to_string()];
+        let result = CommandOrchestrator::needs_rm_bulk_confirmation(&args);
+        assert!(result.is_some());
+        let (_, recursive) = result.unwrap();
+        assert!(recursive);
+
+        // With -I but <=3 files and not recursive (no prompt needed)
+        let args = vec!["-I".to_string(), "a".to_string(), "b".to_string()];
+        assert!(CommandOrchestrator::needs_rm_bulk_confirmation(&args).is_none());
+
+        // With -f flag (should skip)
+        let args = vec!["-If".to_string(), "a".to_string(), "b".to_string()];
+        assert!(CommandOrchestrator::needs_rm_bulk_confirmation(&args).is_none());
+    }
+
+    #[test]
+    fn test_get_file_type_description() {
+        // For non-existent files, returns "file"
+        assert_eq!(
+            CommandOrchestrator::get_file_type_description("/nonexistent/path"),
+            "file"
+        );
+        // For existing directory - use temp_dir() for cross-platform compatibility
+        // (on macOS /tmp is a symlink to /private/tmp)
+        let temp_dir = std::env::temp_dir();
+        assert_eq!(
+            CommandOrchestrator::get_file_type_description(temp_dir.to_str().unwrap()),
+            "directory"
+        );
+    }
+
+    #[test]
+    fn test_remove_flag_from_command() {
+        // Remove -I from command
+        let cmd = "rm -rI file1 file2";
+        let result = CommandOrchestrator::remove_flag_from_command(cmd, "-rI");
+        assert_eq!(result, "rm file1 file2");
+
+        // Remove standalone flag
+        let cmd = "rm -I -r file1";
+        let result = CommandOrchestrator::remove_flag_from_command(cmd, "-I");
+        assert_eq!(result, "rm -r file1");
+    }
+
+    // ==================== State Detection Tests ====================
+
+    #[test]
+    fn test_is_waiting_for_sudo_password() {
+        let mut state = TerminalState::new();
+
+        // Initially not waiting for sudo password
+        assert!(!CommandOrchestrator::is_waiting_for_sudo_password(&state));
+
+        // Set up sudo password prompt
+        state.pending_interaction = Some(crate::terminal::PendingInteraction::Question {
+            question: "[sudo] password: ".to_string(),
+            options: None,
+        });
+        assert!(CommandOrchestrator::is_waiting_for_sudo_password(&state));
+
+        // Different question should not match
+        state.pending_interaction = Some(crate::terminal::PendingInteraction::Question {
+            question: "What is your name?".to_string(),
+            options: None,
+        });
+        assert!(!CommandOrchestrator::is_waiting_for_sudo_password(&state));
+
+        // Command approval should not match
+        state.pending_interaction = Some(crate::terminal::PendingInteraction::CommandApproval {
+            command: "rm file".to_string(),
+            message: "Remove file?".to_string(),
+            confirmation_type: None,
+        });
+        assert!(!CommandOrchestrator::is_waiting_for_sudo_password(&state));
+
+        // None should not match
+        state.pending_interaction = None;
+        assert!(!CommandOrchestrator::is_waiting_for_sudo_password(&state));
+    }
+
+    #[test]
+    fn test_is_shell_confirmation() {
+        let mut state = TerminalState::new();
+
+        // Initially no shell confirmation
+        assert!(!CommandOrchestrator::is_shell_confirmation(&state));
+
+        // LLM approval (no confirmation_type) is NOT a shell confirmation
+        state.pending_interaction = Some(crate::terminal::PendingInteraction::CommandApproval {
+            command: "docker ps".to_string(),
+            message: "Run this command?".to_string(),
+            confirmation_type: None,
+        });
+        assert!(!CommandOrchestrator::is_shell_confirmation(&state));
+
+        // Shell confirmation with RmWriteProtected IS a shell confirmation
+        state.pending_interaction = Some(crate::terminal::PendingInteraction::CommandApproval {
+            command: "rm protected.txt".to_string(),
+            message: "rm: remove write-protected file(s): protected.txt?".to_string(),
+            confirmation_type: Some(crate::terminal::ConfirmationType::RmWriteProtected),
+        });
+        assert!(CommandOrchestrator::is_shell_confirmation(&state));
+
+        // Shell confirmation with RmInteractive IS a shell confirmation
+        state.pending_interaction = Some(crate::terminal::PendingInteraction::CommandApproval {
+            command: "rm -i file.txt".to_string(),
+            message: "rm: remove regular file 'file.txt'?".to_string(),
+            confirmation_type: Some(crate::terminal::ConfirmationType::RmInteractive {
+                files: vec!["file.txt".to_string()],
+                current_index: 0,
+                command: "rm -i file.txt".to_string(),
+            }),
+        });
+        assert!(CommandOrchestrator::is_shell_confirmation(&state));
+
+        // Question is NOT a shell confirmation
+        state.pending_interaction = Some(crate::terminal::PendingInteraction::Question {
+            question: "What do you want to do?".to_string(),
+            options: None,
+        });
+        assert!(!CommandOrchestrator::is_shell_confirmation(&state));
+    }
+
+    // ==================== Helper Function Tests ====================
+
+    #[test]
+    fn test_get_file_args() {
+        // Only flags
+        let args = vec!["-r".to_string(), "-f".to_string()];
+        assert!(CommandOrchestrator::get_file_args(&args).is_empty());
+
+        // Only files
+        let args = vec!["file1.txt".to_string(), "file2.txt".to_string()];
+        let result = CommandOrchestrator::get_file_args(&args);
+        assert_eq!(result.len(), 2);
+        assert_eq!(*result[0], "file1.txt");
+        assert_eq!(*result[1], "file2.txt");
+
+        // Mixed flags and files
+        let args = vec![
+            "-rf".to_string(),
+            "file1.txt".to_string(),
+            "--force".to_string(),
+            "file2.txt".to_string(),
+        ];
+        let result = CommandOrchestrator::get_file_args(&args);
+        assert_eq!(result.len(), 2);
+        assert_eq!(*result[0], "file1.txt");
+        assert_eq!(*result[1], "file2.txt");
+
+        // Empty args
+        let args: Vec<String> = vec![];
+        assert!(CommandOrchestrator::get_file_args(&args).is_empty());
+    }
+
+    #[test]
+    fn test_build_command_string() {
+        // With original_input
+        let result =
+            CommandOrchestrator::build_command_string(Some("ls -la | grep foo"), "ls", &[]);
+        assert_eq!(result, "ls -la | grep foo");
+
+        // Without original_input, no args
+        let result = CommandOrchestrator::build_command_string(None, "ls", &[]);
+        assert_eq!(result, "ls");
+
+        // Without original_input, with args
+        let result = CommandOrchestrator::build_command_string(
+            None,
+            "rm",
+            &["-rf".to_string(), "dir".to_string()],
+        );
+        assert_eq!(result, "rm -rf dir");
+    }
+
+    #[test]
+    fn test_add_force_flag() {
+        // Add to rm command
+        let result = CommandOrchestrator::add_force_flag("rm file.txt", "rm");
+        assert_eq!(result, "rm -f file.txt");
+
+        // Add to cp command
+        let result = CommandOrchestrator::add_force_flag("cp src dest", "cp");
+        assert_eq!(result, "cp -f src dest");
+
+        // Add to mv command with flags
+        let result = CommandOrchestrator::add_force_flag("mv -i src dest", "mv");
+        assert_eq!(result, "mv -f -i src dest");
+    }
+
+    #[test]
+    fn test_has_flag_with_long_form() {
+        // --force matches
+        assert!(CommandOrchestrator::has_flag(
+            &["--force".to_string()],
+            'f',
+            Some("--force"),
+            None
+        ));
+
+        // --recursive matches
+        assert!(CommandOrchestrator::has_flag(
+            &["--recursive".to_string()],
+            'r',
+            Some("--recursive"),
+            None
+        ));
+
+        // Wrong long form doesn't match
+        assert!(!CommandOrchestrator::has_flag(
+            &["--verbose".to_string()],
+            'f',
+            Some("--force"),
+            None
+        ));
+    }
+
+    #[test]
+    fn test_needs_cp_mv_confirmation_no_interactive() {
+        // Without -i flag
+        let args = vec!["src.txt".to_string(), "dest.txt".to_string()];
+        assert!(CommandOrchestrator::needs_cp_mv_confirmation(&args).is_none());
+    }
+
+    #[test]
+    fn test_needs_cp_mv_confirmation_with_force() {
+        // With both -i and -f, force wins
+        let args = vec![
+            "-if".to_string(),
+            "src.txt".to_string(),
+            "dest.txt".to_string(),
+        ];
+        assert!(CommandOrchestrator::needs_cp_mv_confirmation(&args).is_none());
+    }
+
+    #[test]
+    fn test_needs_cp_mv_confirmation_no_destination() {
+        // Only one file (no destination)
+        let args = vec!["-i".to_string(), "src.txt".to_string()];
+        assert!(CommandOrchestrator::needs_cp_mv_confirmation(&args).is_none());
+    }
+
+    #[test]
+    fn test_needs_ln_confirmation_no_interactive() {
+        // Without -i flag
+        let args = vec!["src.txt".to_string(), "link.txt".to_string()];
+        assert!(CommandOrchestrator::needs_ln_confirmation(&args).is_none());
+    }
+
+    #[test]
+    fn test_needs_ln_confirmation_with_force() {
+        // With both -i and -f
+        let args = vec![
+            "-if".to_string(),
+            "src.txt".to_string(),
+            "link.txt".to_string(),
+        ];
+        assert!(CommandOrchestrator::needs_ln_confirmation(&args).is_none());
+    }
+
+    #[test]
+    fn test_needs_ln_confirmation_nonexistent_dest() {
+        // Destination doesn't exist
+        let args = vec![
+            "-i".to_string(),
+            "/tmp".to_string(),
+            "/nonexistent/link/path".to_string(),
+        ];
+        assert!(CommandOrchestrator::needs_ln_confirmation(&args).is_none());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_user_can_write_file_writable() {
+        // /tmp is typically writable
+        use std::path::Path;
+        assert!(CommandOrchestrator::user_can_write_file(Path::new("/tmp")));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_user_can_write_file_readonly() {
+        // /etc is typically not writable by normal users
+        use std::path::Path;
+        // This test is only valid for non-root users
+        if unsafe { libc::getuid() } != 0 {
+            assert!(!CommandOrchestrator::user_can_write_file(Path::new(
+                "/etc/passwd"
+            )));
+        }
+    }
+
+    #[test]
+    fn test_needs_rm_confirmation_with_force() {
+        // -f flag skips confirmation
+        let args = vec!["-f".to_string(), "protected.txt".to_string()];
+        assert!(CommandOrchestrator::needs_rm_confirmation(&args).is_none());
+    }
+
+    #[test]
+    fn test_needs_rm_confirmation_nonexistent() {
+        // Non-existent files don't need confirmation
+        let args = vec!["/nonexistent/file/path/xyz.txt".to_string()];
+        assert!(CommandOrchestrator::needs_rm_confirmation(&args).is_none());
+    }
+
+    // ==================== Confirmation Type Tests ====================
+
+    #[test]
+    fn test_confirmation_type_debug() {
+        let rm_write = crate::terminal::ConfirmationType::RmWriteProtected;
+        let debug_str = format!("{:?}", rm_write);
+        assert!(debug_str.contains("RmWriteProtected"));
+
+        let rm_interactive = crate::terminal::ConfirmationType::RmInteractive {
+            files: vec!["a.txt".to_string()],
+            current_index: 0,
+            command: "rm -i a.txt".to_string(),
+        };
+        let debug_str = format!("{:?}", rm_interactive);
+        assert!(debug_str.contains("RmInteractive"));
+        assert!(debug_str.contains("a.txt"));
+
+        let rm_bulk = crate::terminal::ConfirmationType::RmInteractiveBulk {
+            file_count: 5,
+            is_recursive: true,
+        };
+        let debug_str = format!("{:?}", rm_bulk);
+        assert!(debug_str.contains("RmInteractiveBulk"));
+        assert!(debug_str.contains("5"));
+
+        let cp = crate::terminal::ConfirmationType::CpInteractive {
+            destination: "dest.txt".to_string(),
+        };
+        let debug_str = format!("{:?}", cp);
+        assert!(debug_str.contains("CpInteractive"));
+
+        let mv = crate::terminal::ConfirmationType::MvInteractive {
+            destination: "dest.txt".to_string(),
+        };
+        let debug_str = format!("{:?}", mv);
+        assert!(debug_str.contains("MvInteractive"));
+
+        let ln = crate::terminal::ConfirmationType::LnInteractive {
+            destination: "link.txt".to_string(),
+        };
+        let debug_str = format!("{:?}", ln);
+        assert!(debug_str.contains("LnInteractive"));
+    }
+
+    #[test]
+    fn test_confirmation_type_clone_eq() {
+        let rm_write1 = crate::terminal::ConfirmationType::RmWriteProtected;
+        let rm_write2 = rm_write1.clone();
+        assert_eq!(rm_write1, rm_write2);
+
+        let bulk1 = crate::terminal::ConfirmationType::RmInteractiveBulk {
+            file_count: 5,
+            is_recursive: true,
+        };
+        let bulk2 = bulk1.clone();
+        assert_eq!(bulk1, bulk2);
+
+        let bulk3 = crate::terminal::ConfirmationType::RmInteractiveBulk {
+            file_count: 3,
+            is_recursive: false,
+        };
+        assert_ne!(bulk1, bulk3);
+    }
+
+    // ==================== Pending Interaction Tests ====================
+
+    #[test]
+    fn test_pending_interaction_debug() {
+        let approval = crate::terminal::PendingInteraction::CommandApproval {
+            command: "rm -rf /".to_string(),
+            message: "Are you sure?".to_string(),
+            confirmation_type: None,
+        };
+        let debug_str = format!("{:?}", approval);
+        assert!(debug_str.contains("CommandApproval"));
+        assert!(debug_str.contains("rm -rf"));
+
+        let question = crate::terminal::PendingInteraction::Question {
+            question: "What is your name?".to_string(),
+            options: Some(vec!["Alice".to_string(), "Bob".to_string()]),
+        };
+        let debug_str = format!("{:?}", question);
+        assert!(debug_str.contains("Question"));
+        assert!(debug_str.contains("Alice"));
+    }
+
+    #[test]
+    fn test_pending_interaction_clone() {
+        let approval = crate::terminal::PendingInteraction::CommandApproval {
+            command: "ls".to_string(),
+            message: "List?".to_string(),
+            confirmation_type: Some(crate::terminal::ConfirmationType::RmWriteProtected),
+        };
+        let cloned = approval.clone();
+        match cloned {
+            crate::terminal::PendingInteraction::CommandApproval {
+                command, message, ..
+            } => {
+                assert_eq!(command, "ls");
+                assert_eq!(message, "List?");
+            }
+            _ => panic!("Expected CommandApproval"),
+        }
+    }
+
+    // ==================== Confirmation Handler Tests ====================
+
+    #[test]
+    fn test_handle_rm_interactive_empty_files() {
+        let orchestrator = CommandOrchestrator::new();
+        let mut state = TerminalState::new();
+        let result = orchestrator.handle_rm_interactive(vec![], None, &[], &mut state);
+        assert!(result.is_ok());
+        assert!(state.pending_interaction.is_none());
+    }
+
+    #[test]
+    fn test_handle_rm_interactive_with_files() {
+        let orchestrator = CommandOrchestrator::new();
+        let mut state = TerminalState::new();
+        let files = vec!["file1.txt".to_string(), "file2.txt".to_string()];
+        let args = vec![
+            "-i".to_string(),
+            "file1.txt".to_string(),
+            "file2.txt".to_string(),
+        ];
+
+        let result = orchestrator.handle_rm_interactive(files, None, &args, &mut state);
+        assert!(result.is_ok());
+        assert!(state.pending_interaction.is_some());
+        assert_eq!(
+            state.mode,
+            crate::terminal::TerminalMode::AwaitingCommandApproval
+        );
+
+        if let Some(crate::terminal::PendingInteraction::CommandApproval { message, .. }) =
+            &state.pending_interaction
+        {
+            assert!(message.contains("file1.txt"));
+        } else {
+            panic!("Expected CommandApproval");
+        }
+    }
+
+    #[test]
+    fn test_handle_rm_bulk() {
+        let orchestrator = CommandOrchestrator::new();
+        let mut state = TerminalState::new();
+        let args = vec![
+            "-I".to_string(),
+            "a".to_string(),
+            "b".to_string(),
+            "c".to_string(),
+            "d".to_string(),
+        ];
+
+        let result = orchestrator.handle_rm_bulk(4, false, None, &args, &mut state);
+        assert!(result.is_ok());
+        assert!(state.pending_interaction.is_some());
+
+        if let Some(crate::terminal::PendingInteraction::CommandApproval { message, .. }) =
+            &state.pending_interaction
+        {
+            assert!(message.contains("4 arguments"));
+            assert!(!message.contains("recursively"));
+        } else {
+            panic!("Expected CommandApproval");
+        }
+    }
+
+    #[test]
+    fn test_handle_rm_bulk_recursive() {
+        let orchestrator = CommandOrchestrator::new();
+        let mut state = TerminalState::new();
+        let args = vec!["-rI".to_string(), "dir".to_string()];
+
+        let result = orchestrator.handle_rm_bulk(1, true, None, &args, &mut state);
+        assert!(result.is_ok());
+
+        if let Some(crate::terminal::PendingInteraction::CommandApproval { message, .. }) =
+            &state.pending_interaction
+        {
+            assert!(message.contains("recursively"));
+        } else {
+            panic!("Expected CommandApproval");
+        }
+    }
+
+    #[test]
+    fn test_handle_cp_confirmation() {
+        let orchestrator = CommandOrchestrator::new();
+        let mut state = TerminalState::new();
+        let args = vec![
+            "-i".to_string(),
+            "src.txt".to_string(),
+            "dest.txt".to_string(),
+        ];
+
+        let result =
+            orchestrator.handle_cp_confirmation("dest.txt".to_string(), None, &args, &mut state);
+        assert!(result.is_ok());
+
+        if let Some(crate::terminal::PendingInteraction::CommandApproval {
+            message,
+            confirmation_type,
+            ..
+        }) = &state.pending_interaction
+        {
+            assert!(message.contains("overwrite"));
+            assert!(message.contains("dest.txt"));
+            assert!(matches!(
+                confirmation_type,
+                Some(crate::terminal::ConfirmationType::CpInteractive { .. })
+            ));
+        } else {
+            panic!("Expected CommandApproval");
+        }
+    }
+
+    #[test]
+    fn test_handle_mv_confirmation() {
+        let orchestrator = CommandOrchestrator::new();
+        let mut state = TerminalState::new();
+        let args = vec![
+            "-i".to_string(),
+            "src.txt".to_string(),
+            "dest.txt".to_string(),
+        ];
+
+        let result =
+            orchestrator.handle_mv_confirmation("dest.txt".to_string(), None, &args, &mut state);
+        assert!(result.is_ok());
+
+        if let Some(crate::terminal::PendingInteraction::CommandApproval {
+            message,
+            confirmation_type,
+            ..
+        }) = &state.pending_interaction
+        {
+            assert!(message.contains("overwrite"));
+            assert!(matches!(
+                confirmation_type,
+                Some(crate::terminal::ConfirmationType::MvInteractive { .. })
+            ));
+        } else {
+            panic!("Expected CommandApproval");
+        }
+    }
+
+    #[test]
+    fn test_handle_ln_confirmation() {
+        let orchestrator = CommandOrchestrator::new();
+        let mut state = TerminalState::new();
+        let args = vec!["-i".to_string(), "src".to_string(), "link".to_string()];
+
+        let result =
+            orchestrator.handle_ln_confirmation("link".to_string(), None, &args, &mut state);
+        assert!(result.is_ok());
+
+        if let Some(crate::terminal::PendingInteraction::CommandApproval {
+            message,
+            confirmation_type,
+            ..
+        }) = &state.pending_interaction
+        {
+            assert!(message.contains("replace"));
+            assert!(matches!(
+                confirmation_type,
+                Some(crate::terminal::ConfirmationType::LnInteractive { .. })
+            ));
+        } else {
+            panic!("Expected CommandApproval");
+        }
+    }
+
+    #[test]
+    fn test_handle_rm_confirmation() {
+        let orchestrator = CommandOrchestrator::new();
+        let mut state = TerminalState::new();
+        let protected = vec!["protected.txt".to_string()];
+        let args = vec!["protected.txt".to_string()];
+
+        let result = orchestrator.handle_rm_confirmation(protected, None, &args, &mut state);
+        assert!(result.is_ok());
+
+        if let Some(crate::terminal::PendingInteraction::CommandApproval {
+            message,
+            confirmation_type,
+            ..
+        }) = &state.pending_interaction
+        {
+            assert!(message.contains("write-protected"));
+            assert!(matches!(
+                confirmation_type,
+                Some(crate::terminal::ConfirmationType::RmWriteProtected)
+            ));
+        } else {
+            panic!("Expected CommandApproval");
+        }
+    }
+
+    #[tokio::test]
+    async fn test_execute_shell_command_success() {
+        let orchestrator = CommandOrchestrator::new();
+        let mut state = TerminalState::new();
+
+        let result = orchestrator
+            .execute_shell_command("echo hello", &mut state)
+            .await;
+        assert!(result.is_ok());
+        assert!(!state.output.lines().is_empty());
+        assert!(state.output.lines().iter().any(|l| l.contains("hello")));
+    }
+
+    #[tokio::test]
+    async fn test_execute_shell_command_with_stderr() {
+        let orchestrator = CommandOrchestrator::new();
+        let mut state = TerminalState::new();
+
+        let result = orchestrator
+            .execute_shell_command("echo warning >&2", &mut state)
+            .await;
+        assert!(result.is_ok());
+        assert!(state.output.lines().iter().any(|l| l.contains("warning")));
+    }
+
+    #[tokio::test]
+    async fn test_execute_shell_command_failure() {
+        let orchestrator = CommandOrchestrator::new();
+        let mut state = TerminalState::new();
+
+        let result = orchestrator
+            .execute_shell_command("exit 1", &mut state)
+            .await;
+        assert!(result.is_ok()); // Method doesn't fail, just reports error
+    }
+
+    #[tokio::test]
+    async fn test_execute_shell_command_not_found() {
+        let orchestrator = CommandOrchestrator::new();
+        let mut state = TerminalState::new();
+
+        let result = orchestrator
+            .execute_shell_command("nonexistentcommand12345", &mut state)
+            .await;
+        assert!(result.is_ok()); // Method doesn't fail, just reports error
+        assert!(state
+            .output
+            .lines()
+            .iter()
+            .any(|l| l.contains("not found") || l.contains("command")));
+    }
+
+    #[tokio::test]
+    async fn test_handle_shell_confirmation_cancelled() {
+        let orchestrator = CommandOrchestrator::new();
+        let mut state = TerminalState::new();
+
+        // Set up a pending confirmation
+        state.pending_interaction = Some(crate::terminal::PendingInteraction::CommandApproval {
+            command: "rm file.txt".to_string(),
+            message: "Remove?".to_string(),
+            confirmation_type: Some(crate::terminal::ConfirmationType::RmWriteProtected),
+        });
+        state.mode = crate::terminal::TerminalMode::AwaitingCommandApproval;
+
+        let result = orchestrator
+            .handle_shell_confirmation(false, &mut state)
+            .await;
+        assert!(result.is_ok());
+        assert_eq!(state.mode, crate::terminal::TerminalMode::Normal);
+        assert!(state.output.lines().iter().any(|l| l.contains("Cancelled")));
+    }
+
+    #[tokio::test]
+    async fn test_handle_shell_confirmation_rm_interactive_skip() {
+        let orchestrator = CommandOrchestrator::new();
+        let mut state = TerminalState::new();
+
+        // Set up rm -i with multiple files
+        state.pending_interaction = Some(crate::terminal::PendingInteraction::CommandApproval {
+            command: "rm -i file1.txt file2.txt".to_string(),
+            message: "rm: remove regular file 'file1.txt'?".to_string(),
+            confirmation_type: Some(crate::terminal::ConfirmationType::RmInteractive {
+                files: vec!["file1.txt".to_string(), "file2.txt".to_string()],
+                current_index: 0,
+                command: "rm -i file1.txt file2.txt".to_string(),
+            }),
+        });
+        state.mode = crate::terminal::TerminalMode::AwaitingCommandApproval;
+
+        // User says 'n' - should skip to next file
+        let result = orchestrator
+            .handle_shell_confirmation(false, &mut state)
+            .await;
+        assert!(result.is_ok());
+
+        // Should still be in approval mode for next file
+        assert_eq!(
+            state.mode,
+            crate::terminal::TerminalMode::AwaitingCommandApproval
+        );
+        if let Some(crate::terminal::PendingInteraction::CommandApproval {
+            message,
+            confirmation_type,
+            ..
+        }) = &state.pending_interaction
+        {
+            assert!(message.contains("file2.txt"));
+            if let Some(crate::terminal::ConfirmationType::RmInteractive {
+                current_index, ..
+            }) = confirmation_type
+            {
+                assert_eq!(*current_index, 1);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn test_handle_shell_confirmation_rm_interactive_last_file_skip() {
+        let orchestrator = CommandOrchestrator::new();
+        let mut state = TerminalState::new();
+
+        // Set up rm -i with single file (last/only)
+        state.pending_interaction = Some(crate::terminal::PendingInteraction::CommandApproval {
+            command: "rm -i file1.txt".to_string(),
+            message: "rm: remove regular file 'file1.txt'?".to_string(),
+            confirmation_type: Some(crate::terminal::ConfirmationType::RmInteractive {
+                files: vec!["file1.txt".to_string()],
+                current_index: 0,
+                command: "rm -i file1.txt".to_string(),
+            }),
+        });
+        state.mode = crate::terminal::TerminalMode::AwaitingCommandApproval;
+
+        // User says 'n' - no more files, should go back to normal
+        let result = orchestrator
+            .handle_shell_confirmation(false, &mut state)
+            .await;
+        assert!(result.is_ok());
+        assert_eq!(state.mode, crate::terminal::TerminalMode::Normal);
+        assert!(state.pending_interaction.is_none());
+    }
+
+    // ==================== File Type Description Tests ====================
+
+    #[test]
+    fn test_get_file_type_description_symlink() {
+        // Create a temp symlink to test
+        let temp_dir = std::env::temp_dir();
+        let target = temp_dir.join("test_target_for_symlink");
+        let link = temp_dir.join("test_symlink_for_type");
+
+        // Clean up any existing test files
+        let _ = std::fs::remove_file(&link);
+        let _ = std::fs::remove_file(&target);
+
+        // Create target file and symlink
+        std::fs::write(&target, "test").ok();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(&target, &link).ok();
+
+        #[cfg(unix)]
+        {
+            let desc = CommandOrchestrator::get_file_type_description(link.to_str().unwrap());
+            assert_eq!(desc, "symbolic link");
+        }
+
+        // Cleanup
+        let _ = std::fs::remove_file(&link);
+        let _ = std::fs::remove_file(&target);
+    }
+
+    #[test]
+    fn test_get_file_type_description_regular_file() {
+        let temp_dir = std::env::temp_dir();
+        let file = temp_dir.join("test_regular_file_for_type");
+        std::fs::write(&file, "test content").ok();
+
+        let desc = CommandOrchestrator::get_file_type_description(file.to_str().unwrap());
+        assert_eq!(desc, "regular file");
+
+        let _ = std::fs::remove_file(&file);
+    }
+
+    // ==================== needs_cp_mv_confirmation edge cases ====================
+
+    #[test]
+    fn test_needs_cp_mv_confirmation_dest_exists() {
+        // Create a temp file to act as existing destination
+        let temp_dir = std::env::temp_dir();
+        let dest = temp_dir.join("test_cp_dest_exists");
+        std::fs::write(&dest, "existing").ok();
+
+        let args = vec![
+            "-i".to_string(),
+            "src.txt".to_string(),
+            dest.to_str().unwrap().to_string(),
+        ];
+
+        let result = CommandOrchestrator::needs_cp_mv_confirmation(&args);
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), dest.to_str().unwrap());
+
+        let _ = std::fs::remove_file(&dest);
+    }
+
+    #[test]
+    fn test_needs_cp_mv_confirmation_multi_source_to_dir() {
+        // Multiple sources to directory with existing target
+        let temp_dir = std::env::temp_dir();
+        let dest_dir = temp_dir.join("test_cp_dest_dir");
+        let _ = std::fs::create_dir(&dest_dir);
+
+        // Create an existing file in dest_dir
+        let existing = dest_dir.join("src1.txt");
+        std::fs::write(&existing, "existing").ok();
+
+        let args = vec![
+            "-i".to_string(),
+            "src1.txt".to_string(),
+            "src2.txt".to_string(),
+            dest_dir.to_str().unwrap().to_string(),
+        ];
+
+        let result = CommandOrchestrator::needs_cp_mv_confirmation(&args);
+        assert!(result.is_some());
+
+        let _ = std::fs::remove_dir_all(&dest_dir);
+    }
+
+    #[test]
+    fn test_needs_ln_confirmation_existing_dest() {
+        let temp_dir = std::env::temp_dir();
+        let dest = temp_dir.join("test_ln_dest_exists");
+        std::fs::write(&dest, "existing").ok();
+
+        let args = vec![
+            "-i".to_string(),
+            "/tmp".to_string(),
+            dest.to_str().unwrap().to_string(),
+        ];
+
+        let result = CommandOrchestrator::needs_ln_confirmation(&args);
+        assert!(result.is_some());
+
+        let _ = std::fs::remove_file(&dest);
+    }
+
+    // ==================== needs_rm_confirmation Tests ====================
+
+    #[test]
+    #[cfg(unix)]
+    fn test_needs_rm_confirmation_write_protected() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // Skip if running as root
+        if unsafe { libc::getuid() } == 0 {
+            return;
+        }
+
+        let temp_dir = std::env::temp_dir();
+        let protected = temp_dir.join("test_rm_protected_file");
+        std::fs::write(&protected, "protected").ok();
+
+        // Make file read-only
+        let mut perms = std::fs::metadata(&protected).unwrap().permissions();
+        perms.set_mode(0o444);
+        std::fs::set_permissions(&protected, perms).ok();
+
+        let args = vec![protected.to_str().unwrap().to_string()];
+        let result = CommandOrchestrator::needs_rm_confirmation(&args);
+
+        // Should detect protected file
+        assert!(result.is_some());
+
+        // Cleanup: restore write permission and delete
+        let mut perms = std::fs::metadata(&protected).unwrap().permissions();
+        perms.set_mode(0o644);
+        std::fs::set_permissions(&protected, perms).ok();
+        let _ = std::fs::remove_file(&protected);
     }
 }

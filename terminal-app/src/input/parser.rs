@@ -18,7 +18,6 @@ impl CommandParser {
     }
 
     /// Quote an argument if it contains spaces
-    #[allow(dead_code)] // Used in test module for command reconstruction
     pub fn quote_if_needed(arg: &str) -> String {
         if arg.contains(' ') || arg.contains('\t') {
             format!("\"{}\"", arg.replace('"', "\\\""))
@@ -28,7 +27,6 @@ impl CommandParser {
     }
 
     /// Join command and arguments back into a string
-    #[allow(dead_code)] // Used in test module for command reconstruction
     pub fn join(command: &str, args: &[String]) -> String {
         let mut result = command.to_string();
         for arg in args {

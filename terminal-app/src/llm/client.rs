@@ -8,7 +8,6 @@ use tokio_util::sync::CancellationToken;
 
 /// Request to the LLM backend (legacy - kept for backward compatibility)
 #[derive(Debug, Serialize)]
-#[allow(dead_code)] // Legacy API for M2/M3
 pub struct LLMRequest {
     pub query: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -17,7 +16,6 @@ pub struct LLMRequest {
 
 /// Response from the LLM backend
 #[derive(Debug, Deserialize)]
-#[allow(dead_code)] // Legacy API for M2/M3
 pub struct LLMResponse {
     pub text: String,
     #[serde(default)]
@@ -249,7 +247,6 @@ impl HttpLLMClient {
     }
 
     /// Create a new HTTP LLM client with custom timeout
-    #[allow(dead_code)] // Constructor with custom timeout for testing
     pub fn with_timeout(base_url: String, api_key: String, timeout_secs: u64) -> Result<Self> {
         Ok(Self {
             base_url,
@@ -446,7 +443,7 @@ impl HttpLLMClient {
                             log::trace!("SSE event type: {}", event_type);
                         } else if let Some(data) = line.strip_prefix("data: ") {
                             if let Some(ref event) = current_event {
-                                match self.handle_sse_event_v2(event, data, &mut result) {
+                                match self.handle_sse_event(event, data, &mut result) {
                                     Ok(Some(interrupt)) => {
                                         interrupt_data = Some(interrupt);
                                         // Don't break - continue processing to get any remaining messages
@@ -481,7 +478,7 @@ impl HttpLLMClient {
             }
             if let Some(data) = line.strip_prefix("data: ") {
                 if let Some(ref event) = current_event {
-                    if let Some(interrupt) = self.handle_sse_event_v2(event, data, &mut result)? {
+                    if let Some(interrupt) = self.handle_sse_event(event, data, &mut result)? {
                         interrupt_data = Some(interrupt);
                     }
                 }
@@ -509,347 +506,218 @@ impl HttpLLMClient {
         }
     }
 
-    /// Handle a single SSE event (legacy - used by tests)
-    #[cfg(test)]
-    fn handle_sse_event(&self, event: &str, data: &str, result: &mut String) -> Result<()> {
-        match event {
-            "metadata" => {
-                // Log run_id for debugging
-                if let Ok(meta) = serde_json::from_str::<serde_json::Value>(data) {
-                    if let Some(run_id) = meta.get("run_id").and_then(|v| v.as_str()) {
-                        log::info!("Run started: {}", run_id);
-                    }
-                }
-            }
-            "messages" => {
-                // Extract AI message content
-                if let Ok(messages) = serde_json::from_str::<serde_json::Value>(data) {
-                    if let Some(msgs) = messages.as_array() {
-                        for msg in msgs {
-                            let is_ai = msg.get("type").and_then(|v| v.as_str()) == Some("ai")
-                                || msg.get("role").and_then(|v| v.as_str()) == Some("assistant");
-                            if is_ai {
-                                if let Some(content) = msg.get("content").and_then(|v| v.as_str()) {
-                                    if !result.is_empty() {
-                                        result.push('\n');
-                                    }
-                                    result.push_str(content);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            "updates" => {
-                // Check for interrupt (human-in-the-loop for command approval)
-                if let Ok(updates) = serde_json::from_str::<serde_json::Value>(data) {
-                    if let Some(interrupts) =
-                        updates.get("__interrupt__").and_then(|v| v.as_array())
-                    {
-                        for interrupt in interrupts {
-                            if let Some(value) = interrupt.get("value") {
-                                let interrupt_type =
-                                    value.get("type").and_then(|v| v.as_str()).unwrap_or("");
-                                if interrupt_type == "command_approval" {
-                                    let command = value
-                                        .get("command")
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("unknown");
-                                    log::info!(
-                                        "Command approval requested for: {} - auto-approving",
-                                        command
-                                    );
-                                    // Signal that we need to resume with approval
-                                    // The calling code will handle the resume
-                                    result.push_str("__INTERRUPT_RESUME__");
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            "values" => {
-                // State updates contain the full message history including AI responses
-                if let Ok(values) = serde_json::from_str::<serde_json::Value>(data) {
-                    if let Some(msgs) = values.get("messages").and_then(|v| v.as_array()) {
-                        // Get the last AI message with actual content from the values
-                        // Skip messages with empty content or just handoff messages
-                        for msg in msgs.iter().rev() {
-                            let is_ai = msg.get("type").and_then(|v| v.as_str()) == Some("ai")
-                                || msg.get("role").and_then(|v| v.as_str()) == Some("assistant");
+    // ========== SSE Event Parsing Helpers ==========
 
-                            // Skip handoff messages (they just transfer control)
-                            let is_handoff = msg
-                                .get("response_metadata")
-                                .and_then(|m| m.get("__is_handoff_back"))
-                                .is_some();
-
-                            if is_ai && !is_handoff {
-                                // Handle content as string or array of content blocks
-                                let content_text = if let Some(content) =
-                                    msg.get("content").and_then(|v| v.as_str())
-                                {
-                                    // Content is a simple string
-                                    if !content.is_empty() {
-                                        Some(content.to_string())
-                                    } else {
-                                        None
-                                    }
-                                } else if let Some(content_array) =
-                                    msg.get("content").and_then(|v| v.as_array())
-                                {
-                                    // Content is an array of blocks (text, tool_use, etc.)
-                                    // Skip if array is empty
-                                    if content_array.is_empty() {
-                                        None
-                                    } else {
-                                        let text_parts: Vec<String> = content_array
-                                            .iter()
-                                            .filter_map(|block| {
-                                                if block.get("type").and_then(|v| v.as_str())
-                                                    == Some("text")
-                                                {
-                                                    block
-                                                        .get("text")
-                                                        .and_then(|v| v.as_str())
-                                                        .map(|s| s.to_string())
-                                                } else {
-                                                    None
-                                                }
-                                            })
-                                            .collect();
-                                        if !text_parts.is_empty() {
-                                            Some(text_parts.join("\n"))
-                                        } else {
-                                            None
-                                        }
-                                    }
-                                } else {
-                                    None
-                                };
-
-                                if let Some(content) = content_text {
-                                    // Only update if we have new meaningful content
-                                    if !content.is_empty()
-                                        && !content.starts_with("Transferring")
-                                        && !content.starts_with("Successfully transferred")
-                                    {
-                                        result.clear(); // Replace with latest AI message
-                                        result.push_str(&content);
-                                        break; // Found a good message, stop searching
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            "error" => {
-                if let Ok(error) = serde_json::from_str::<serde_json::Value>(data) {
-                    let msg = error
-                        .get("message")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("Unknown error");
-                    log::error!("Stream error: {}", msg);
-                    anyhow::bail!("Stream error: {}", msg);
-                }
-            }
-            "end" => {
-                log::debug!("Stream ended");
-            }
-            _ => {
-                log::trace!("Unknown SSE event type: {}", event);
-            }
-        }
-        Ok(())
+    /// Check if a JSON message is from the AI (type="ai" OR role="assistant")
+    fn is_ai_message(msg: &serde_json::Value) -> bool {
+        msg.get("type").and_then(|v| v.as_str()) == Some("ai")
+            || msg.get("role").and_then(|v| v.as_str()) == Some("assistant")
     }
 
-    /// Handle a single SSE event (v2 - returns interrupt data instead of marker)
+    /// Extract text content from a message, handling both string and array formats
+    fn extract_message_content(msg: &serde_json::Value) -> Option<String> {
+        // Try string content first
+        if let Some(content) = msg.get("content").and_then(|v| v.as_str()) {
+            return if content.is_empty() {
+                None
+            } else {
+                Some(content.to_string())
+            };
+        }
+
+        // Try array of content blocks
+        let content_array = msg.get("content").and_then(|v| v.as_array())?;
+        if content_array.is_empty() {
+            return None;
+        }
+
+        let text_parts: Vec<String> = content_array
+            .iter()
+            .filter_map(|block| {
+                if block.get("type").and_then(|v| v.as_str()) == Some("text") {
+                    block
+                        .get("text")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        if text_parts.is_empty() {
+            None
+        } else {
+            Some(text_parts.join("\n"))
+        }
+    }
+
+    /// Check if content is valid (not empty, not a handoff message)
+    fn is_valid_ai_content(content: &str) -> bool {
+        !content.is_empty()
+            && !content.starts_with("Transferring")
+            && !content.starts_with("Successfully transferred")
+    }
+
+    /// Parse an interrupt value to determine if it's CommandApproval or Question
+    fn parse_interrupt_value(value: &serde_json::Value) -> InterruptData {
+        if value.get("command").is_some() {
+            // CommandApproval: has "command" field
+            let command = value
+                .get("command")
+                .and_then(|v| v.as_str())
+                .unwrap_or("unknown")
+                .to_string();
+            let message = value
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Command requires approval")
+                .to_string();
+            InterruptData::CommandApproval { command, message }
+        } else {
+            // Question: has "question" field or only "message"
+            let question = value
+                .get("question")
+                .or_else(|| value.get("message"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("Agent is asking for input")
+                .to_string();
+            let options = value.get("options").and_then(|v| v.as_array()).map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(String::from))
+                    .collect()
+            });
+            InterruptData::Question { question, options }
+        }
+    }
+
+    // ========== SSE Event Handlers ==========
+
+    /// Handle "metadata" SSE event - log run_id for debugging
+    fn handle_metadata_event(data: &str) {
+        if let Ok(meta) = serde_json::from_str::<serde_json::Value>(data) {
+            if let Some(run_id) = meta.get("run_id").and_then(|v| v.as_str()) {
+                log::info!("Run started: {}", run_id);
+            }
+        }
+    }
+
+    /// Handle "messages" SSE event - extract and accumulate AI message content
+    fn handle_messages_event(data: &str, result: &mut String) {
+        let Ok(messages) = serde_json::from_str::<serde_json::Value>(data) else {
+            return;
+        };
+        let Some(msgs) = messages.as_array() else {
+            return;
+        };
+
+        for msg in msgs {
+            if Self::is_ai_message(msg) {
+                if let Some(content) = msg.get("content").and_then(|v| v.as_str()) {
+                    if !result.is_empty() {
+                        result.push('\n');
+                    }
+                    result.push_str(content);
+                }
+            }
+        }
+    }
+
+    /// Handle "updates" SSE event - check for human-in-the-loop interrupts
+    fn handle_updates_event(data: &str) -> Result<Option<InterruptData>> {
+        let Ok(updates) = serde_json::from_str::<serde_json::Value>(data) else {
+            return Ok(None);
+        };
+        let Some(interrupts) = updates.get("__interrupt__").and_then(|v| v.as_array()) else {
+            return Ok(None);
+        };
+
+        for interrupt in interrupts {
+            if let Some(value) = interrupt.get("value") {
+                let interrupt_data = Self::parse_interrupt_value(value);
+                match &interrupt_data {
+                    InterruptData::CommandApproval { command, .. } => {
+                        log::info!(
+                            "Command approval requested for: {} - awaiting user decision",
+                            command
+                        );
+                    }
+                    InterruptData::Question { question, .. } => {
+                        log::info!("Question received: {} - awaiting user answer", question);
+                    }
+                }
+                return Ok(Some(interrupt_data));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Handle "values" SSE event - extract latest AI message from state update
+    fn handle_values_event(data: &str, result: &mut String) {
+        let Ok(values) = serde_json::from_str::<serde_json::Value>(data) else {
+            return;
+        };
+        let Some(msgs) = values.get("messages").and_then(|v| v.as_array()) else {
+            return;
+        };
+
+        // Get the last AI message with actual content from the values
+        // Skip messages with empty content or just handoff messages
+        for msg in msgs.iter().rev() {
+            if !Self::is_ai_message(msg) {
+                continue;
+            }
+
+            // Skip handoff messages (they just transfer control)
+            let is_handoff = msg
+                .get("response_metadata")
+                .and_then(|m| m.get("__is_handoff_back"))
+                .is_some();
+            if is_handoff {
+                continue;
+            }
+
+            if let Some(content) = Self::extract_message_content(msg) {
+                if Self::is_valid_ai_content(&content) {
+                    result.clear(); // Replace with latest AI message
+                    result.push_str(&content);
+                    break; // Found a good message, stop searching
+                }
+            }
+        }
+    }
+
+    /// Handle "error" SSE event - signal fatal stream error
+    fn handle_error_event(data: &str) -> Result<Option<InterruptData>> {
+        if let Ok(error) = serde_json::from_str::<serde_json::Value>(data) {
+            let msg = error
+                .get("message")
+                .and_then(|v| v.as_str())
+                .unwrap_or("Unknown error");
+            log::error!("Stream error: {}", msg);
+            anyhow::bail!("Stream error: {}", msg);
+        }
+        Ok(None)
+    }
+
+    // ========== Main SSE Event Dispatcher ==========
+
+    /// Handle a single SSE event - returns interrupt data instead of marker
     /// Returns Some(InterruptData) if an interrupt is detected, None otherwise
-    fn handle_sse_event_v2(
+    fn handle_sse_event(
         &self,
         event: &str,
         data: &str,
         result: &mut String,
     ) -> Result<Option<InterruptData>> {
         match event {
-            "metadata" => {
-                // Log run_id for debugging
-                if let Ok(meta) = serde_json::from_str::<serde_json::Value>(data) {
-                    if let Some(run_id) = meta.get("run_id").and_then(|v| v.as_str()) {
-                        log::info!("Run started: {}", run_id);
-                    }
-                }
-            }
-            "messages" => {
-                // Extract AI message content
-                if let Ok(messages) = serde_json::from_str::<serde_json::Value>(data) {
-                    if let Some(msgs) = messages.as_array() {
-                        for msg in msgs {
-                            let is_ai = msg.get("type").and_then(|v| v.as_str()) == Some("ai")
-                                || msg.get("role").and_then(|v| v.as_str()) == Some("assistant");
-                            if is_ai {
-                                if let Some(content) = msg.get("content").and_then(|v| v.as_str()) {
-                                    if !result.is_empty() {
-                                        result.push('\n');
-                                    }
-                                    result.push_str(content);
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            "updates" => {
-                // Check for interrupt (human-in-the-loop)
-                if let Ok(updates) = serde_json::from_str::<serde_json::Value>(data) {
-                    if let Some(interrupts) =
-                        updates.get("__interrupt__").and_then(|v| v.as_array())
-                    {
-                        for interrupt in interrupts {
-                            if let Some(value) = interrupt.get("value") {
-                                // Detect interrupt type by field presence (compatible with Python backend)
-                                // Backend sends: {"command": "...", "message": "..."} for approvals
-                                // or {"question": "...", "options": [...]} for questions
-                                if value.get("command").is_some() {
-                                    // CommandApproval: has "command" field
-                                    let command = value
-                                        .get("command")
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("unknown")
-                                        .to_string();
-                                    let message = value
-                                        .get("message")
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("Command requires approval")
-                                        .to_string();
-                                    log::info!(
-                                        "Command approval requested for: {} - awaiting user decision",
-                                        command
-                                    );
-                                    return Ok(Some(InterruptData::CommandApproval {
-                                        command,
-                                        message,
-                                    }));
-                                } else {
-                                    // Question: has "question" field or only "message"
-                                    let question = value
-                                        .get("question")
-                                        .or_else(|| value.get("message"))
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("Agent is asking for input")
-                                        .to_string();
-                                    let options = value
-                                        .get("options")
-                                        .and_then(|v| v.as_array())
-                                        .map(|arr| {
-                                            arr.iter()
-                                                .filter_map(|v| v.as_str().map(String::from))
-                                                .collect()
-                                        });
-                                    log::info!(
-                                        "Question received: {} - awaiting user answer",
-                                        question
-                                    );
-                                    return Ok(Some(InterruptData::Question { question, options }));
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            "values" => {
-                // State updates contain the full message history including AI responses
-                if let Ok(values) = serde_json::from_str::<serde_json::Value>(data) {
-                    if let Some(msgs) = values.get("messages").and_then(|v| v.as_array()) {
-                        // Get the last AI message with actual content from the values
-                        // Skip messages with empty content or just handoff messages
-                        for msg in msgs.iter().rev() {
-                            let is_ai = msg.get("type").and_then(|v| v.as_str()) == Some("ai")
-                                || msg.get("role").and_then(|v| v.as_str()) == Some("assistant");
-
-                            // Skip handoff messages (they just transfer control)
-                            let is_handoff = msg
-                                .get("response_metadata")
-                                .and_then(|m| m.get("__is_handoff_back"))
-                                .is_some();
-
-                            if is_ai && !is_handoff {
-                                // Handle content as string or array of content blocks
-                                let content_text = if let Some(content) =
-                                    msg.get("content").and_then(|v| v.as_str())
-                                {
-                                    // Content is a simple string
-                                    if !content.is_empty() {
-                                        Some(content.to_string())
-                                    } else {
-                                        None
-                                    }
-                                } else if let Some(content_array) =
-                                    msg.get("content").and_then(|v| v.as_array())
-                                {
-                                    // Content is an array of blocks (text, tool_use, etc.)
-                                    // Skip if array is empty
-                                    if content_array.is_empty() {
-                                        None
-                                    } else {
-                                        let text_parts: Vec<String> = content_array
-                                            .iter()
-                                            .filter_map(|block| {
-                                                if block.get("type").and_then(|v| v.as_str())
-                                                    == Some("text")
-                                                {
-                                                    block
-                                                        .get("text")
-                                                        .and_then(|v| v.as_str())
-                                                        .map(|s| s.to_string())
-                                                } else {
-                                                    None
-                                                }
-                                            })
-                                            .collect();
-                                        if !text_parts.is_empty() {
-                                            Some(text_parts.join("\n"))
-                                        } else {
-                                            None
-                                        }
-                                    }
-                                } else {
-                                    None
-                                };
-
-                                if let Some(content) = content_text {
-                                    // Only update if we have new meaningful content
-                                    if !content.is_empty()
-                                        && !content.starts_with("Transferring")
-                                        && !content.starts_with("Successfully transferred")
-                                    {
-                                        result.clear(); // Replace with latest AI message
-                                        result.push_str(&content);
-                                        break; // Found a good message, stop searching
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-            "error" => {
-                if let Ok(error) = serde_json::from_str::<serde_json::Value>(data) {
-                    let msg = error
-                        .get("message")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("Unknown error");
-                    log::error!("Stream error: {}", msg);
-                    anyhow::bail!("Stream error: {}", msg);
-                }
-            }
-            "end" => {
-                log::debug!("Stream ended");
-            }
-            _ => {
-                log::trace!("Unknown SSE event type: {}", event);
-            }
+            "metadata" => Self::handle_metadata_event(data),
+            "messages" => Self::handle_messages_event(data, result),
+            "updates" => return Self::handle_updates_event(data),
+            "values" => Self::handle_values_event(data, result),
+            "error" => return Self::handle_error_event(data),
+            "end" => log::debug!("Stream ended"),
+            _ => log::trace!("Unknown SSE event type: {}", event),
         }
         Ok(None)
     }
@@ -1214,197 +1082,6 @@ mod tests {
     }
 
     #[test]
-    fn test_handle_sse_metadata_event() {
-        let client =
-            HttpLLMClient::new("http://localhost:8080".to_string(), "test-key".to_string());
-        let mut result = String::new();
-        let data = r#"{"run_id":"test-run-123","attempt":1}"#;
-
-        // Should not fail, just logs
-        let outcome = client.handle_sse_event("metadata", data, &mut result);
-        assert!(outcome.is_ok());
-        assert!(result.is_empty()); // metadata doesn't add to result
-    }
-
-    #[test]
-    fn test_handle_sse_values_event_string_content() {
-        let client =
-            HttpLLMClient::new("http://localhost:8080".to_string(), "test-key".to_string());
-        let mut result = String::new();
-        let data = r#"{"messages":[{"type":"ai","content":"Hello, this is a response"}]}"#;
-
-        let outcome = client.handle_sse_event("values", data, &mut result);
-        assert!(outcome.is_ok());
-        assert_eq!(result, "Hello, this is a response");
-    }
-
-    #[test]
-    fn test_handle_sse_values_event_array_content() {
-        let client =
-            HttpLLMClient::new("http://localhost:8080".to_string(), "test-key".to_string());
-        let mut result = String::new();
-        let data = r#"{"messages":[{"type":"ai","content":[{"type":"text","text":"First part"},{"type":"text","text":"Second part"}]}]}"#;
-
-        let outcome = client.handle_sse_event("values", data, &mut result);
-        assert!(outcome.is_ok());
-        assert!(result.contains("First part"));
-        assert!(result.contains("Second part"));
-    }
-
-    #[test]
-    fn test_handle_sse_values_skips_empty_content_array() {
-        let client =
-            HttpLLMClient::new("http://localhost:8080".to_string(), "test-key".to_string());
-        let mut result = String::new();
-        let data = r#"{"messages":[{"type":"ai","content":[]}]}"#;
-
-        let outcome = client.handle_sse_event("values", data, &mut result);
-        assert!(outcome.is_ok());
-        assert!(result.is_empty());
-    }
-
-    #[test]
-    fn test_handle_sse_values_skips_handoff_messages() {
-        let client =
-            HttpLLMClient::new("http://localhost:8080".to_string(), "test-key".to_string());
-        let mut result = String::new();
-        let data = r#"{"messages":[{"type":"ai","content":"Transferring back to supervisor","response_metadata":{"__is_handoff_back":true}}]}"#;
-
-        let outcome = client.handle_sse_event("values", data, &mut result);
-        assert!(outcome.is_ok());
-        assert!(result.is_empty()); // Handoff messages are skipped
-    }
-
-    #[test]
-    fn test_handle_sse_values_skips_transfer_messages() {
-        let client =
-            HttpLLMClient::new("http://localhost:8080".to_string(), "test-key".to_string());
-        let mut result = String::new();
-        let data = r#"{"messages":[{"type":"ai","content":"Successfully transferred to agent"}]}"#;
-
-        let outcome = client.handle_sse_event("values", data, &mut result);
-        assert!(outcome.is_ok());
-        assert!(result.is_empty()); // Transfer messages are skipped
-    }
-
-    #[test]
-    fn test_handle_sse_values_gets_last_meaningful_ai_message() {
-        let client =
-            HttpLLMClient::new("http://localhost:8080".to_string(), "test-key".to_string());
-        let mut result = String::new();
-        // Multiple messages - should get the last meaningful AI message
-        let data = r#"{"messages":[
-            {"type":"human","content":"What OS am I using?"},
-            {"type":"ai","content":"Let me check that for you."},
-            {"type":"ai","content":"You are using Linux on WSL2."}
-        ]}"#;
-
-        let outcome = client.handle_sse_event("values", data, &mut result);
-        assert!(outcome.is_ok());
-        assert_eq!(result, "You are using Linux on WSL2.");
-    }
-
-    #[test]
-    fn test_handle_sse_interrupt_event() {
-        let client =
-            HttpLLMClient::new("http://localhost:8080".to_string(), "test-key".to_string());
-        let mut result = String::new();
-        let data = r#"{"__interrupt__":[{"value":{"type":"command_approval","command":"uname -a","message":"Approve?"}}]}"#;
-
-        let outcome = client.handle_sse_event("updates", data, &mut result);
-        assert!(outcome.is_ok());
-        assert!(result.contains("__INTERRUPT_RESUME__"));
-    }
-
-    #[test]
-    fn test_handle_sse_updates_no_interrupt() {
-        let client =
-            HttpLLMClient::new("http://localhost:8080".to_string(), "test-key".to_string());
-        let mut result = String::new();
-        let data = r#"{"supervisor":{"messages":[]}}"#;
-
-        let outcome = client.handle_sse_event("updates", data, &mut result);
-        assert!(outcome.is_ok());
-        assert!(result.is_empty()); // No interrupt marker
-    }
-
-    #[test]
-    fn test_handle_sse_error_event() {
-        let client =
-            HttpLLMClient::new("http://localhost:8080".to_string(), "test-key".to_string());
-        let mut result = String::new();
-        let data = r#"{"message":"Something went wrong"}"#;
-
-        let outcome = client.handle_sse_event("error", data, &mut result);
-        assert!(outcome.is_err());
-        assert!(outcome
-            .unwrap_err()
-            .to_string()
-            .contains("Something went wrong"));
-    }
-
-    #[test]
-    fn test_handle_sse_end_event() {
-        let client =
-            HttpLLMClient::new("http://localhost:8080".to_string(), "test-key".to_string());
-        let mut result = String::new();
-
-        let outcome = client.handle_sse_event("end", "", &mut result);
-        assert!(outcome.is_ok());
-        assert!(result.is_empty());
-    }
-
-    #[test]
-    fn test_handle_sse_unknown_event() {
-        let client =
-            HttpLLMClient::new("http://localhost:8080".to_string(), "test-key".to_string());
-        let mut result = String::new();
-
-        let outcome = client.handle_sse_event("unknown_event", "{}", &mut result);
-        assert!(outcome.is_ok());
-        assert!(result.is_empty());
-    }
-
-    #[test]
-    fn test_handle_sse_messages_event() {
-        let client =
-            HttpLLMClient::new("http://localhost:8080".to_string(), "test-key".to_string());
-        let mut result = String::new();
-        let data = r#"[{"type":"ai","content":"Response from AI"}]"#;
-
-        let outcome = client.handle_sse_event("messages", data, &mut result);
-        assert!(outcome.is_ok());
-        assert_eq!(result, "Response from AI");
-    }
-
-    #[test]
-    fn test_handle_sse_messages_multiple_ai() {
-        let client =
-            HttpLLMClient::new("http://localhost:8080".to_string(), "test-key".to_string());
-        let mut result = String::new();
-        let data = r#"[{"type":"ai","content":"First"},{"type":"ai","content":"Second"}]"#;
-
-        let outcome = client.handle_sse_event("messages", data, &mut result);
-        assert!(outcome.is_ok());
-        assert!(result.contains("First"));
-        assert!(result.contains("Second"));
-    }
-
-    #[test]
-    fn test_handle_sse_messages_skips_human() {
-        let client =
-            HttpLLMClient::new("http://localhost:8080".to_string(), "test-key".to_string());
-        let mut result = String::new();
-        let data =
-            r#"[{"type":"human","content":"User message"},{"type":"ai","content":"AI response"}]"#;
-
-        let outcome = client.handle_sse_event("messages", data, &mut result);
-        assert!(outcome.is_ok());
-        assert!(!result.contains("User message"));
-        assert!(result.contains("AI response"));
-    }
-
-    #[test]
     fn test_stream_command_serialization() {
         let cmd = StreamCommand {
             resume: "approved".to_string(),
@@ -1598,55 +1275,55 @@ mod tests {
     }
 
     // =========================================================================
-    // Tests for handle_sse_event_v2 (production SSE parser)
+    // Tests for handle_sse_event (SSE event dispatcher)
     // =========================================================================
 
     #[test]
-    fn test_handle_sse_event_v2_metadata() {
+    fn test_handle_sse_event_metadata() {
         let client =
             HttpLLMClient::new("http://localhost:8080".to_string(), "test-key".to_string());
         let mut result = String::new();
         let data = r#"{"run_id":"run-12345","attempt":1}"#;
 
-        let outcome = client.handle_sse_event_v2("metadata", data, &mut result);
+        let outcome = client.handle_sse_event("metadata", data, &mut result);
         assert!(outcome.is_ok());
         assert!(outcome.unwrap().is_none()); // No interrupt
         assert!(result.is_empty());
     }
 
     #[test]
-    fn test_handle_sse_event_v2_messages_ai() {
+    fn test_handle_sse_event_messages_ai() {
         let client =
             HttpLLMClient::new("http://localhost:8080".to_string(), "test-key".to_string());
         let mut result = String::new();
         let data = r#"[{"type":"ai","content":"Hello from AI"}]"#;
 
-        let outcome = client.handle_sse_event_v2("messages", data, &mut result);
+        let outcome = client.handle_sse_event("messages", data, &mut result);
         assert!(outcome.is_ok());
         assert!(outcome.unwrap().is_none());
         assert_eq!(result, "Hello from AI");
     }
 
     #[test]
-    fn test_handle_sse_event_v2_messages_assistant_role() {
+    fn test_handle_sse_event_messages_assistant_role() {
         let client =
             HttpLLMClient::new("http://localhost:8080".to_string(), "test-key".to_string());
         let mut result = String::new();
         let data = r#"[{"role":"assistant","content":"Response"}]"#;
 
-        let outcome = client.handle_sse_event_v2("messages", data, &mut result);
+        let outcome = client.handle_sse_event("messages", data, &mut result);
         assert!(outcome.is_ok());
         assert_eq!(result, "Response");
     }
 
     #[test]
-    fn test_handle_sse_event_v2_command_approval() {
+    fn test_handle_sse_event_command_approval() {
         let client =
             HttpLLMClient::new("http://localhost:8080".to_string(), "test-key".to_string());
         let mut result = String::new();
         let data = r#"{"__interrupt__":[{"value":{"type":"command_approval","command":"rm -rf /tmp/test","message":"Delete test files?"}}]}"#;
 
-        let outcome = client.handle_sse_event_v2("updates", data, &mut result);
+        let outcome = client.handle_sse_event("updates", data, &mut result);
         assert!(outcome.is_ok());
         let interrupt = outcome.unwrap();
         assert!(interrupt.is_some());
@@ -1661,13 +1338,13 @@ mod tests {
     }
 
     #[test]
-    fn test_handle_sse_event_v2_question_interrupt() {
+    fn test_handle_sse_event_question_interrupt() {
         let client =
             HttpLLMClient::new("http://localhost:8080".to_string(), "test-key".to_string());
         let mut result = String::new();
         let data = r#"{"__interrupt__":[{"value":{"type":"question","question":"What database?","options":["PostgreSQL","MySQL"]}}]}"#;
 
-        let outcome = client.handle_sse_event_v2("updates", data, &mut result);
+        let outcome = client.handle_sse_event("updates", data, &mut result);
         assert!(outcome.is_ok());
         let interrupt = outcome.unwrap();
         assert!(interrupt.is_some());
@@ -1685,14 +1362,14 @@ mod tests {
     }
 
     #[test]
-    fn test_handle_sse_event_v2_question_without_options() {
+    fn test_handle_sse_event_question_without_options() {
         let client =
             HttpLLMClient::new("http://localhost:8080".to_string(), "test-key".to_string());
         let mut result = String::new();
         let data =
             r#"{"__interrupt__":[{"value":{"type":"question","message":"What is your name?"}}]}"#;
 
-        let outcome = client.handle_sse_event_v2("updates", data, &mut result);
+        let outcome = client.handle_sse_event("updates", data, &mut result);
         assert!(outcome.is_ok());
         let interrupt = outcome.unwrap();
         assert!(interrupt.is_some());
@@ -1707,60 +1384,60 @@ mod tests {
     }
 
     #[test]
-    fn test_handle_sse_event_v2_values_simple_content() {
+    fn test_handle_sse_event_values_simple_content() {
         let client =
             HttpLLMClient::new("http://localhost:8080".to_string(), "test-key".to_string());
         let mut result = String::new();
         let data = r#"{"messages":[{"type":"ai","content":"Simple response"}]}"#;
 
-        let outcome = client.handle_sse_event_v2("values", data, &mut result);
+        let outcome = client.handle_sse_event("values", data, &mut result);
         assert!(outcome.is_ok());
         assert_eq!(result, "Simple response");
     }
 
     #[test]
-    fn test_handle_sse_event_v2_values_array_content() {
+    fn test_handle_sse_event_values_array_content() {
         let client =
             HttpLLMClient::new("http://localhost:8080".to_string(), "test-key".to_string());
         let mut result = String::new();
         let data = r#"{"messages":[{"type":"ai","content":[{"type":"text","text":"Part 1"},{"type":"text","text":"Part 2"}]}]}"#;
 
-        let outcome = client.handle_sse_event_v2("values", data, &mut result);
+        let outcome = client.handle_sse_event("values", data, &mut result);
         assert!(outcome.is_ok());
         assert!(result.contains("Part 1"));
         assert!(result.contains("Part 2"));
     }
 
     #[test]
-    fn test_handle_sse_event_v2_error() {
+    fn test_handle_sse_event_error() {
         let client =
             HttpLLMClient::new("http://localhost:8080".to_string(), "test-key".to_string());
         let mut result = String::new();
         let data = r#"{"message":"API error occurred"}"#;
 
-        let outcome = client.handle_sse_event_v2("error", data, &mut result);
+        let outcome = client.handle_sse_event("error", data, &mut result);
         assert!(outcome.is_err());
         assert!(outcome.unwrap_err().to_string().contains("API error"));
     }
 
     #[test]
-    fn test_handle_sse_event_v2_end() {
+    fn test_handle_sse_event_end() {
         let client =
             HttpLLMClient::new("http://localhost:8080".to_string(), "test-key".to_string());
         let mut result = String::new();
 
-        let outcome = client.handle_sse_event_v2("end", "", &mut result);
+        let outcome = client.handle_sse_event("end", "", &mut result);
         assert!(outcome.is_ok());
         assert!(outcome.unwrap().is_none());
     }
 
     #[test]
-    fn test_handle_sse_event_v2_unknown_event() {
+    fn test_handle_sse_event_unknown_event() {
         let client =
             HttpLLMClient::new("http://localhost:8080".to_string(), "test-key".to_string());
         let mut result = String::new();
 
-        let outcome = client.handle_sse_event_v2("unknown_event_type", "{}", &mut result);
+        let outcome = client.handle_sse_event("unknown_event_type", "{}", &mut result);
         assert!(outcome.is_ok());
         assert!(outcome.unwrap().is_none());
     }
@@ -1860,5 +1537,66 @@ mod tests {
             }
             _ => panic!("Expected Question"),
         }
+    }
+
+    // =========================================================================
+    // Additional coverage tests for LLMQueryResult
+    // =========================================================================
+
+    #[test]
+    fn test_llm_query_result_as_complete() {
+        // Test Complete variant returns Some
+        let complete = LLMQueryResult::Complete("test response".to_string());
+        assert_eq!(complete.as_complete(), Some("test response"));
+
+        // Test CommandApproval returns None
+        let approval = LLMQueryResult::CommandApproval {
+            command: "ls".to_string(),
+            message: "list".to_string(),
+        };
+        assert_eq!(approval.as_complete(), None);
+
+        // Test Question returns None
+        let question = LLMQueryResult::Question {
+            question: "which?".to_string(),
+            options: None,
+        };
+        assert_eq!(question.as_complete(), None);
+    }
+
+    #[test]
+    #[should_panic(expected = "Expected Complete, got CommandApproval")]
+    fn test_llm_query_result_unwrap_complete_panics_on_approval() {
+        let result = LLMQueryResult::CommandApproval {
+            command: "test".to_string(),
+            message: "msg".to_string(),
+        };
+        result.unwrap_complete();
+    }
+
+    #[test]
+    #[should_panic(expected = "Expected Complete, got Question")]
+    fn test_llm_query_result_unwrap_complete_panics_on_question() {
+        let result = LLMQueryResult::Question {
+            question: "test?".to_string(),
+            options: None,
+        };
+        result.unwrap_complete();
+    }
+
+    #[test]
+    fn test_is_valid_ai_content() {
+        // Valid content
+        assert!(HttpLLMClient::is_valid_ai_content("Hello, how can I help?"));
+        assert!(HttpLLMClient::is_valid_ai_content("The command is: ls -la"));
+
+        // Invalid content (empty or handoff messages)
+        assert!(!HttpLLMClient::is_valid_ai_content(""));
+        assert!(!HttpLLMClient::is_valid_ai_content(
+            "Transferring to agent..."
+        ));
+        assert!(!HttpLLMClient::is_valid_ai_content(
+            "Successfully transferred control"
+        ));
     }
 }

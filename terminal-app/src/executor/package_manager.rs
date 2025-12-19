@@ -6,13 +6,25 @@
 use anyhow::Result;
 use async_trait::async_trait;
 
-use crate::executor::command::CommandExecutor;
+use crate::executor::command::{CommandExecutor, CommandOutput};
 
 // Priority constants for package manager selection
 const PRIORITY_VERY_HIGH: u8 = 90;
 const PRIORITY_HIGH: u8 = 85;
 const PRIORITY_MEDIUM: u8 = 80;
 const PRIORITY_LOW: u8 = 70;
+
+/// Check installation result and return error if failed
+fn check_install_result(output: &CommandOutput) -> Result<()> {
+    if !output.is_success() {
+        anyhow::bail!(
+            "Package installation failed (exit code {}): {}",
+            output.exit_code,
+            output.stderr.trim()
+        );
+    }
+    Ok(())
+}
 
 /// Trait defining the interface for package managers
 #[async_trait]
@@ -58,16 +70,7 @@ impl PackageManager for AptPackageManager {
             &["install".to_string(), "-y".to_string(), package.to_string()],
         )
         .await?;
-
-        if !output.is_success() {
-            anyhow::bail!(
-                "Package installation failed (exit code {}): {}",
-                output.exit_code,
-                output.stderr.trim()
-            );
-        }
-
-        Ok(())
+        check_install_result(&output)
     }
 
     fn priority(&self) -> u8 {
@@ -95,16 +98,7 @@ impl PackageManager for YumPackageManager {
             &["install".to_string(), "-y".to_string(), package.to_string()],
         )
         .await?;
-
-        if !output.is_success() {
-            anyhow::bail!(
-                "Package installation failed (exit code {}): {}",
-                output.exit_code,
-                output.stderr.trim()
-            );
-        }
-
-        Ok(())
+        check_install_result(&output)
     }
 
     fn priority(&self) -> u8 {
@@ -132,16 +126,7 @@ impl PackageManager for DnfPackageManager {
             &["install".to_string(), "-y".to_string(), package.to_string()],
         )
         .await?;
-
-        if !output.is_success() {
-            anyhow::bail!(
-                "Package installation failed (exit code {}): {}",
-                output.exit_code,
-                output.stderr.trim()
-            );
-        }
-
-        Ok(())
+        check_install_result(&output)
     }
 
     fn priority(&self) -> u8 {
@@ -173,16 +158,7 @@ impl PackageManager for PacmanPackageManager {
             ],
         )
         .await?;
-
-        if !output.is_success() {
-            anyhow::bail!(
-                "Package installation failed (exit code {}): {}",
-                output.exit_code,
-                output.stderr.trim()
-            );
-        }
-
-        Ok(())
+        check_install_result(&output)
     }
 
     fn priority(&self) -> u8 {
@@ -205,19 +181,15 @@ impl PackageManager for BrewPackageManager {
     }
 
     async fn install(&self, package: &str) -> Result<()> {
-        let output =
-            CommandExecutor::execute("brew", &["install".to_string(), package.to_string()], None)
-                .await?;
-
-        if !output.is_success() {
-            anyhow::bail!(
-                "Package installation failed (exit code {}): {}",
-                output.exit_code,
-                output.stderr.trim()
-            );
-        }
-
-        Ok(())
+        let cancel_token = tokio_util::sync::CancellationToken::new();
+        let handle = CommandExecutor::execute(
+            "brew",
+            &["install".to_string(), package.to_string()],
+            None,
+            cancel_token,
+        );
+        let output = handle.wait().await?;
+        check_install_result(&output)
     }
 
     fn priority(&self) -> u8 {
@@ -240,22 +212,15 @@ impl PackageManager for ChocoPackageManager {
     }
 
     async fn install(&self, package: &str) -> Result<()> {
-        let output = CommandExecutor::execute(
+        let cancel_token = tokio_util::sync::CancellationToken::new();
+        let handle = CommandExecutor::execute(
             "choco",
             &["install".to_string(), "-y".to_string(), package.to_string()],
             None,
-        )
-        .await?;
-
-        if !output.is_success() {
-            anyhow::bail!(
-                "Package installation failed (exit code {}): {}",
-                output.exit_code,
-                output.stderr.trim()
-            );
-        }
-
-        Ok(())
+            cancel_token,
+        );
+        let output = handle.wait().await?;
+        check_install_result(&output)
     }
 
     fn priority(&self) -> u8 {
@@ -278,22 +243,15 @@ impl PackageManager for WingetPackageManager {
     }
 
     async fn install(&self, package: &str) -> Result<()> {
-        let output = CommandExecutor::execute(
+        let cancel_token = tokio_util::sync::CancellationToken::new();
+        let handle = CommandExecutor::execute(
             "winget",
             &["install".to_string(), package.to_string()],
             None,
-        )
-        .await?;
-
-        if !output.is_success() {
-            anyhow::bail!(
-                "Package installation failed (exit code {}): {}",
-                output.exit_code,
-                output.stderr.trim()
-            );
-        }
-
-        Ok(())
+            cancel_token,
+        );
+        let output = handle.wait().await?;
+        check_install_result(&output)
     }
 
     fn priority(&self) -> u8 {

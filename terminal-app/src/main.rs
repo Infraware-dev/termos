@@ -314,10 +314,11 @@ impl InfrawareTerminal {
         self.using_mock_llm = using_mock;
     }
 
-    /// Run the main event loop
-    async fn run(&mut self) -> Result<()> {
-        // Load aliases at startup (blocking to ensure they're available before first command)
-        // Use spawn_blocking for file I/O to avoid blocking the executor
+    /// Load system and user aliases at startup.
+    ///
+    /// Uses spawn_blocking for file I/O to avoid blocking the executor.
+    /// Errors are logged but not propagated (fail-soft for aliases).
+    async fn load_aliases_at_startup() {
         let alias_load_result = tokio::task::spawn_blocking(|| {
             use input::discovery::CommandCache;
 
@@ -335,25 +336,10 @@ impl InfrawareTerminal {
         if let Err(e) = alias_load_result {
             log::error!("Alias loading task panicked: {}", e);
         }
+    }
 
-        // Display welcome message
-        self.state.add_output(MessageFormatter::banner_line(
-            "╔══════════════════════════════════════════════════════════════╗",
-        ));
-        self.state.add_output(MessageFormatter::banner_line(
-            "║   Infraware Terminal - AI-Assisted DevOps Shell              ║",
-        ));
-        self.state.add_output(MessageFormatter::banner_line(
-            "╚══════════════════════════════════════════════════════════════╝",
-        ));
-        self.state.add_output(String::new());
-        self.state.add_output(
-            "Type a command to execute or ask a question in natural language.".to_string(),
-        );
-        self.state
-            .add_output(MessageFormatter::banner_hint("Type 'exit' to quit"));
-
-        // Show LLM client status
+    /// Display LLM client connection status at startup.
+    fn display_llm_status(&mut self) {
         if self.using_mock_llm {
             self.state.add_output(MessageFormatter::info(
                 "LLM: Mock mode (backend not available)",
@@ -363,6 +349,172 @@ impl InfrawareTerminal {
                 .add_output(MessageFormatter::success("LLM: Connected to backend"));
         }
         self.state.add_output(String::new());
+    }
+
+    /// Calculate render timeout based on current terminal mode.
+    ///
+    /// Returns 16ms (60 FPS) during LLM wait for smooth throbber animation,
+    /// 100ms (10 FPS) otherwise to reduce CPU overhead.
+    fn calculate_render_timeout(&self) -> Duration {
+        if matches!(self.state.mode, TerminalMode::WaitingLLM) {
+            Duration::from_millis(16) // 60 FPS for smooth throbber animation
+        } else {
+            Duration::from_millis(100) // 10 FPS when idle (reduces overhead)
+        }
+    }
+
+    /// Check for completed background jobs if enough time has passed.
+    ///
+    /// Uses periodic checking (250ms interval) to reduce lock contention
+    /// on the job manager.
+    fn check_background_jobs(&mut self, last_job_check: &mut Instant) {
+        if last_job_check.elapsed() >= JOB_CHECK_INTERVAL {
+            self.check_completed_jobs();
+            *last_job_check = Instant::now();
+        }
+    }
+
+    /// Poll for one event and send it to the main loop.
+    ///
+    /// # Returns
+    /// `true` to continue polling, `false` to stop.
+    fn poll_and_send_event(
+        event_handler: &EventHandler,
+        event_tx: &tokio::sync::mpsc::Sender<TerminalEvent>,
+        cancel_token_rx: &watch::Receiver<CancellationToken>,
+    ) -> bool {
+        match event_handler.poll_event(Duration::from_millis(1)) {
+            Ok(Some(event)) => {
+                // For CtrlC, cancel the current token immediately
+                if matches!(event, TerminalEvent::CtrlC) {
+                    log::info!("Event poller: CtrlC detected, cancelling current token");
+                    cancel_token_rx.borrow().cancel();
+                }
+                // Send event to main loop (exit if channel closed)
+                event_tx.blocking_send(event).is_ok()
+            }
+            Ok(None) => true, // No event, continue polling
+            Err(e) => {
+                log::error!("Event polling error: {}", e);
+                false
+            }
+        }
+    }
+
+    /// Inner event polling loop (runs in spawn_blocking context).
+    fn event_polling_loop(
+        event_tx: tokio::sync::mpsc::Sender<TerminalEvent>,
+        cancel_token_rx: watch::Receiver<CancellationToken>,
+        pause_polling_flag: Arc<std::sync::atomic::AtomicBool>,
+    ) {
+        use std::sync::atomic::Ordering;
+        let event_handler = EventHandler::new();
+
+        loop {
+            // Check if main loop has exited (receiver dropped)
+            if event_tx.is_closed() {
+                log::info!("Event poller: channel closed, stopping");
+                break;
+            }
+
+            // Check if polling is paused (during interactive commands like vim)
+            if pause_polling_flag.load(Ordering::SeqCst) {
+                std::thread::sleep(Duration::from_millis(50));
+                continue;
+            }
+
+            // Poll and send event
+            if !Self::poll_and_send_event(&event_handler, &event_tx, &cancel_token_rx) {
+                break;
+            }
+        }
+    }
+
+    /// Spawn background task for event polling.
+    ///
+    /// This task runs independently and polls for terminal events.
+    /// It can cancel async operations on Ctrl+C via the cancellation token.
+    fn spawn_event_polling_task(
+        event_tx: tokio::sync::mpsc::Sender<TerminalEvent>,
+        cancel_token_rx: watch::Receiver<CancellationToken>,
+        pause_polling_flag: Arc<std::sync::atomic::AtomicBool>,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::task::spawn_blocking(move || {
+            InfrawareTerminal::event_polling_loop(event_tx, cancel_token_rx, pause_polling_flag);
+        })
+    }
+
+    /// Wait for next event or timeout.
+    ///
+    /// Uses biased select to prioritize events over idle timeout,
+    /// minimizing keypress lag.
+    ///
+    /// # Returns
+    /// - `None` - Channel closed (caller should exit)
+    /// - `Some(None)` - Timeout (caller should continue)
+    /// - `Some(Some(event))` - Event received
+    async fn wait_for_next_event(
+        event_rx: &mut tokio::sync::mpsc::Receiver<TerminalEvent>,
+        render_timeout: Duration,
+    ) -> Option<Option<TerminalEvent>> {
+        tokio::select! {
+            biased;
+
+            maybe_event = event_rx.recv() => {
+                match maybe_event {
+                    Some(event) => Some(Some(event)),
+                    None => {
+                        log::info!("Event channel closed");
+                        None // Signal to break main loop
+                    }
+                }
+            }
+            _ = tokio::time::sleep(render_timeout) => {
+                Some(None) // Timeout - continue to next iteration
+            }
+        }
+    }
+
+    /// Drain all pending events from the channel (non-blocking).
+    ///
+    /// Processes events in batches, yielding every 10 events to avoid
+    /// starving the tokio executor (follows Alice Ryhl's async best practices).
+    ///
+    /// # Returns
+    /// - `Ok(true)` - Continue main loop
+    /// - `Ok(false)` - Quit requested
+    async fn drain_pending_events(
+        &mut self,
+        event_rx: &mut tokio::sync::mpsc::Receiver<TerminalEvent>,
+    ) -> Result<bool> {
+        let mut event_count = 1usize;
+
+        while let Ok(event) = event_rx.try_recv() {
+            if !self.handle_event(event).await? {
+                return Ok(false); // Quit requested
+            }
+            event_count += 1;
+
+            // Yield every 10 events to not starve the tokio executor
+            if event_count.is_multiple_of(10) {
+                tokio::task::yield_now().await;
+            }
+        }
+
+        Ok(true)
+    }
+
+    /// Run the main event loop
+    async fn run(&mut self) -> Result<()> {
+        // Load aliases at startup
+        Self::load_aliases_at_startup().await;
+
+        // Show LLM client status
+        self.display_llm_status();
+
+        // Set initial window title
+        let title = self.state.get_window_title();
+        let _ = self.ui.set_window_title(&title);
 
         // Initial render
         self.ui.render(&mut self.state)?;
@@ -371,90 +523,47 @@ impl InfrawareTerminal {
         let (event_tx, mut event_rx) = tokio::sync::mpsc::channel::<TerminalEvent>(32);
 
         // Subscribe to cancellation token via watch channel
-        // This allows poller to always see the current token (even after resets)
         let cancel_token_rx = self.cancellation_token_tx.subscribe();
 
-        // Spawn background task for event polling
-        // This task runs independently and can cancel async operations on Ctrl+C
-        let poll_handle = tokio::task::spawn_blocking(move || {
-            let event_handler = EventHandler::new();
-            loop {
-                // Check if main loop has exited (receiver dropped)
-                if event_tx.is_closed() {
-                    log::info!("Event poller: channel closed, stopping");
-                    break;
-                }
+        // Get pause flag for event polling (used during interactive commands like vim)
+        let pause_polling_flag = self.ui.event_polling_pause_flag();
 
-                // Poll with short timeout
-                match event_handler.poll_event(Duration::from_millis(50)) {
-                    Ok(Some(event)) => {
-                        // For CtrlC, cancel the current token immediately
-                        // This interrupts any ongoing async operation (e.g., LLM query)
-                        // The main loop will handle the event and clear input after
-                        if matches!(event, TerminalEvent::CtrlC) {
-                            log::info!("Event poller: CtrlC detected, cancelling current token");
-                            cancel_token_rx.borrow().cancel();
-                        }
-                        // Send event to main loop (exit if channel closed)
-                        if event_tx.blocking_send(event).is_err() {
-                            break;
-                        }
-                    }
-                    Ok(None) => {
-                        // No event, continue polling
-                    }
-                    Err(e) => {
-                        log::error!("Event polling error: {}", e);
-                        break;
-                    }
-                }
-            }
-        });
+        // Spawn background task for event polling
+        let poll_handle =
+            Self::spawn_event_polling_task(event_tx, cancel_token_rx, pause_polling_flag);
 
         // Track last job check time for periodic checking (reduces lock contention)
         let mut last_job_check = Instant::now();
 
-        // Main event loop - receives events from background poller
+        // Main event loop - follows Elm Architecture pattern (ratatui best practice):
+        // 1. RENDER current state first
+        // 2. Wait for events
+        // 3. Handle events (update state)
+        // 4. Loop back to render
         loop {
-            // Wait for event with timeout
-            // Note: We don't check cancellation_token here because it's used
-            // to cancel async operations (LLM queries), not to exit the app.
-            // App exit is handled by the Quit event handler returning Ok(false).
-            let event = tokio::select! {
-                maybe_event = event_rx.recv() => {
-                    match maybe_event {
-                        Some(event) => event,
-                        None => {
-                            log::info!("Event channel closed");
-                            break;
-                        }
-                    }
-                }
-                _ = tokio::time::sleep(Duration::from_millis(100)) => {
-                    // Timeout - check jobs periodically even without events
-                    if last_job_check.elapsed() >= JOB_CHECK_INTERVAL {
-                        self.check_completed_jobs();
-                        last_job_check = Instant::now();
-                        self.ui.render(&mut self.state)?;
-                    }
-                    continue;
-                }
+            // === STEP 1: RENDER current state (Elm pattern: view first) ===
+            self.ui.render(&mut self.state)?;
+
+            // Check for completed background jobs periodically
+            self.check_background_jobs(&mut last_job_check);
+
+            // === STEP 2: WAIT for events ===
+            let render_timeout = self.calculate_render_timeout();
+            let event = match Self::wait_for_next_event(&mut event_rx, render_timeout).await {
+                None => break,          // Channel closed
+                Some(None) => continue, // Timeout
+                Some(Some(e)) => e,     // Event received
             };
 
-            // Handle the event
+            // === STEP 3: HANDLE events (update state) ===
             if !self.handle_event(event).await? {
                 break; // Quit requested
             }
 
-            // Check for completed background jobs periodically (not on every event)
-            // This reduces lock contention during rapid typing
-            if last_job_check.elapsed() >= JOB_CHECK_INTERVAL {
-                self.check_completed_jobs();
-                last_job_check = Instant::now();
+            // Drain ALL pending events (non-blocking) for responsive typing
+            if !self.drain_pending_events(&mut event_rx).await? {
+                break; // Quit requested during drain
             }
-
-            // Re-render after handling event
-            self.ui.render(&mut self.state)?;
         }
 
         // Clean up polling task
@@ -473,21 +582,27 @@ impl InfrawareTerminal {
                 return Ok(false);
             }
             TerminalEvent::InputChar(c) => {
+                self.state.scroll_to_end(); // Bring prompt into view
                 self.state.insert_char(c);
             }
             TerminalEvent::DeleteChar => {
+                self.state.scroll_to_end();
                 self.state.delete_char();
             }
             TerminalEvent::MoveCursorLeft => {
+                self.state.scroll_to_end();
                 self.state.move_cursor_left();
             }
             TerminalEvent::MoveCursorRight => {
+                self.state.scroll_to_end();
                 self.state.move_cursor_right();
             }
             TerminalEvent::HistoryPrevious => {
+                self.state.scroll_to_end();
                 self.state.history_previous();
             }
             TerminalEvent::HistoryNext => {
+                self.state.scroll_to_end();
                 self.state.history_next();
             }
             TerminalEvent::ScrollUp => {
@@ -497,17 +612,21 @@ impl InfrawareTerminal {
                 self.state.scroll_down();
             }
             TerminalEvent::Submit => {
+                self.state.scroll_to_end();
                 if !self.handle_submit().await? {
                     return Ok(false); // Exit requested
                 }
             }
             TerminalEvent::TabComplete => {
+                self.state.scroll_to_end();
                 self.handle_tab_completion();
             }
             TerminalEvent::ClearScreen => {
                 self.state.output.clear();
+                self.state.scroll_to_end();
             }
             TerminalEvent::CtrlC => {
+                self.state.scroll_to_end();
                 // Poller already cancelled the token (for async interruption)
                 // Here we just clear input and conditionally reset token
                 log::info!("Ctrl+C: Clearing input (mode={:?})", self.state.mode);
@@ -535,6 +654,38 @@ impl InfrawareTerminal {
             TerminalEvent::Resize(_, _) => {
                 // Terminal resized - re-render will handle it
             }
+            TerminalEvent::MouseDown { column, row } => {
+                // Handle click on scrollbar (arrows or track)
+                if let Some(info) = &self.state.scrollbar_info {
+                    if info.is_on_scrollbar(column) {
+                        // Click on up arrow (row 0)
+                        if row == 0 {
+                            self.state.scroll_up();
+                        }
+                        // Click on down arrow (last row)
+                        else if row >= info.height.saturating_sub(1) {
+                            self.state.scroll_down();
+                        }
+                        // Click on track - jump to position
+                        else {
+                            let target = info.row_to_scroll_position(row);
+                            self.state.output.set_scroll_position(target);
+                        }
+                    }
+                }
+            }
+            TerminalEvent::MouseDrag { column, row } => {
+                // Handle drag on scrollbar (scroll to position)
+                if let Some(info) = &self.state.scrollbar_info {
+                    if info.is_on_scrollbar(column) {
+                        let target = info.row_to_scroll_position(row);
+                        self.state.output.set_scroll_position(target);
+                    }
+                }
+            }
+            TerminalEvent::MouseUp => {
+                // Mouse released - nothing special needed
+            }
             TerminalEvent::Unknown => {}
         }
 
@@ -546,14 +697,26 @@ impl InfrawareTerminal {
     async fn handle_submit(&mut self) -> Result<bool> {
         use crate::input::multiline::{is_incomplete, is_multiline_complete, join_lines};
 
-        let input = self.state.submit_input();
+        // Check if we're in password mode BEFORE submitting (to avoid adding password to history)
+        let is_password_mode = CommandOrchestrator::is_waiting_for_sudo_password(&self.state);
+        let input = self.state.submit_input(!is_password_mode);
 
         // Handle human-in-the-loop command approval mode (y/n)
         if self.state.mode == TerminalMode::AwaitingCommandApproval {
             let approved = HitlOrchestrator::parse_approval(&input);
-            self.state.add_output(MessageFormatter::command(&input));
+            // Echo just the response (prompt was already shown)
+            self.state.add_output(input.clone());
 
-            // Delegate to orchestrator for approval handling
+            // Check if this is a shell confirmation (rm on write-protected files, etc.)
+            if CommandOrchestrator::is_shell_confirmation(&self.state) {
+                // Delegate to command orchestrator for shell confirmations
+                self.command_orchestrator
+                    .handle_shell_confirmation(approved, &mut self.state)
+                    .await?;
+                return Ok(true);
+            }
+
+            // Delegate to NL orchestrator for LLM approval handling
             self.nl_orchestrator
                 .handle_approval(approved, &mut self.state, &mut self.ui)
                 .await?;
@@ -563,7 +726,28 @@ impl InfrawareTerminal {
 
         // Handle human-in-the-loop answer mode (free-form text)
         if self.state.mode == TerminalMode::AwaitingAnswer {
-            self.state.add_output(MessageFormatter::command(&input));
+            // Check if this is a sudo password prompt
+            if CommandOrchestrator::is_waiting_for_sudo_password(&self.state) {
+                // Don't echo the password!
+                self.state.add_output("Verifying...".to_string());
+
+                // Clear pending interaction
+                self.state.pending_interaction = None;
+                self.state.mode = TerminalMode::Normal;
+
+                // Force render to show "Verifying..." before blocking on sudo
+                self.ui.render(&mut self.state)?;
+
+                // Validate password (sudo has ~2s delay on wrong password for security)
+                self.command_orchestrator
+                    .validate_sudo_password(input, &mut self.state)
+                    .await?;
+
+                return Ok(true);
+            }
+
+            // Echo just the response (prompt was already shown)
+            self.state.add_output(input.clone());
 
             // Delegate to orchestrator for answer handling
             self.nl_orchestrator
@@ -609,6 +793,8 @@ impl InfrawareTerminal {
         }
 
         if input.trim().is_empty() {
+            // Reprint prompt (like bash does on Enter with empty input)
+            self.state.add_output(self.state.get_prompt());
             return Ok(true);
         }
 
@@ -639,34 +825,50 @@ impl InfrawareTerminal {
                 args,
                 original_input,
             } => {
-                // Handle exit builtin - exit immediately
+                // Handle exit builtin
                 if command == "exit" {
-                    self.state.add_output(MessageFormatter::info("Goodbye!"));
-                    self.cancellation_token_tx.borrow().cancel(); // Signal any async operations
-                    return Ok(false);
+                    if self.state.is_root_mode() {
+                        // In root mode, exit returns to normal user
+                        self.state.exit_root_mode();
+                        self.state
+                            .add_output(MessageFormatter::success("Exited root mode."));
+                        return Ok(true);
+                    } else {
+                        // In normal mode, exit quits the terminal
+                        self.state.add_output(MessageFormatter::info("Goodbye!"));
+                        self.cancellation_token_tx.borrow().cancel(); // Signal any async operations
+                        return Ok(false);
+                    }
                 }
 
                 // Handle cd builtin - must be handled by parent process
                 if command == "cd" {
-                    self.state.add_output(MessageFormatter::command(&input));
+                    // Echo prompt + command (like bash)
+                    self.state
+                        .add_output(format!("{}{}", self.state.get_prompt(), input));
                     self.handle_cd_command(&args);
                     return Ok(true);
                 }
 
                 // Don't echo input for clear command (it clears the output)
                 if command != "clear" {
-                    self.state.add_output(MessageFormatter::command(&input));
+                    // Echo prompt + command (like bash)
+                    self.state
+                        .add_output(format!("{}{}", self.state.get_prompt(), input));
                 }
                 self.handle_command(&command, &args, original_input.as_deref())
                     .await?;
             }
             InputType::NaturalLanguage(query) => {
-                self.state.add_output(MessageFormatter::command(&input));
+                // Echo prompt + query (like bash)
+                self.state
+                    .add_output(format!("{}{}", self.state.get_prompt(), input));
 
                 // Set mode BEFORE awaiting to prevent race condition with Ctrl+C
                 // If mode is set inside handle_natural_language, Ctrl+C pressed immediately
                 // after Enter will see mode=Normal and clear input instead of cancelling
                 self.state.mode = TerminalMode::WaitingLLM;
+                self.state.start_throbber();
 
                 // Clone current token (cheap Arc increment) for this operation
                 let token = self.cancellation_token_tx.borrow().clone();
@@ -684,14 +886,14 @@ impl InfrawareTerminal {
                 suggestion,
                 distance,
             } => {
-                self.state.add_output(MessageFormatter::command(&input));
+                // Echo prompt + command (like bash)
+                self.state
+                    .add_output(format!("{}{}", self.state.get_prompt(), input));
                 self.handle_command_typo(&typo_input, &suggestion, distance)
                     .await?;
             }
             InputType::Empty => {}
         }
-
-        self.state.add_output(String::new()); // Empty line for spacing
 
         // Only reset to Normal if not in a HITL waiting state
         // (handle_query_result may have set AwaitingCommandApproval or AwaitingAnswer)
@@ -712,13 +914,20 @@ impl InfrawareTerminal {
         original_input: Option<&str>,
     ) -> Result<()> {
         self.state.mode = TerminalMode::ExecutingCommand;
+        // Note: throbber animation only runs during WaitingLLM mode (not ExecutingCommand)
 
         // Handle auth-status builtin command
         if cmd == "auth-status" {
-            return self.handle_auth_status_command().await;
+            let result = self.handle_auth_status_command().await;
+            self.state.stop_throbber();
+            return result;
         }
 
-        self.command_orchestrator
+        // Clone current cancellation token for this command execution
+        let cancel_token = self.cancellation_token_tx.borrow().clone();
+
+        let result = self
+            .command_orchestrator
             .handle_command(
                 cmd,
                 args,
@@ -726,8 +935,14 @@ impl InfrawareTerminal {
                 &mut self.state,
                 &mut self.ui,
                 &self.job_manager,
+                cancel_token,
             )
-            .await
+            .await;
+
+        // Stop throbber animation when command completes
+        self.state.stop_throbber();
+
+        result
     }
 
     /// Handle the built-in "cd" command
@@ -762,6 +977,10 @@ impl InfrawareTerminal {
                     self.state
                         .add_output(MessageFormatter::success(cwd.display().to_string()));
                 }
+                // Update prompt cache and window title
+                self.state.refresh_prompt();
+                let title = self.state.get_window_title();
+                let _ = self.ui.set_window_title(&title);
             }
             Err(e) => {
                 self.state.add_output(MessageFormatter::error(format!(
@@ -894,6 +1113,9 @@ impl InfrawareTerminal {
         use crate::input::parser::CommandParser;
         match CommandParser::parse(&corrected_input) {
             Ok((command, args)) => {
+                // Clone current cancellation token for this command execution
+                let cancel_token = self.cancellation_token_tx.borrow().clone();
+
                 self.command_orchestrator
                     .handle_command(
                         &command,
@@ -902,6 +1124,7 @@ impl InfrawareTerminal {
                         &mut self.state,
                         &mut self.ui,
                         &self.job_manager,
+                        cancel_token,
                     )
                     .await
             }

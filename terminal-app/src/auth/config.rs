@@ -26,13 +26,11 @@ impl AuthConfig {
     }
 
     /// Check if both backend URL and API key are configured
-    #[allow(dead_code)] // Utility method for lib consumers
     pub fn is_configured(&self) -> bool {
         self.backend_url.is_some() && self.api_key.is_some()
     }
 
     /// Check if only backend URL is configured (missing API key)
-    #[allow(dead_code)] // Utility method for lib consumers
     pub fn has_backend_only(&self) -> bool {
         self.backend_url.is_some() && self.api_key.is_none()
     }

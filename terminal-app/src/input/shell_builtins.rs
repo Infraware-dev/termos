@@ -25,8 +25,6 @@ pub struct ShellBuiltinInfo {
     /// Whether this MUST be executed through a shell (true) or can also exist as standalone binary (false)
     pub requires_shell: bool,
     /// Whether this is Unix-only (not available on Windows)
-    /// Note: This field is used in conditional compilation for Windows targets
-    #[allow(dead_code)] // Used for platform-specific conditional execution
     pub unix_only: bool,
 }
 
@@ -313,8 +311,6 @@ impl ShellBuiltinHandler {
     }
 
     /// Check if a command is Unix-only and not available on Windows
-    /// Note: This function is used in conditional compilation for Windows targets
-    #[allow(dead_code)] // Used for platform-specific conditional execution
     pub fn is_unix_only(cmd: &str) -> bool {
         Self::builtin_info()
             .iter()

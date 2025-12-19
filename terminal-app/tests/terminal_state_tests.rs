@@ -105,7 +105,7 @@ fn test_terminal_state_submit_input() {
     state.insert_char('l');
     state.insert_char('s');
 
-    let submitted = state.submit_input();
+    let submitted = state.submit_input(true);
 
     assert_eq!(submitted, "ls");
     assert!(state.input.text().is_empty()); // Input cleared after submit
@@ -118,16 +118,16 @@ fn test_terminal_state_history_navigation() {
     // Add some commands to history
     state.insert_char('l');
     state.insert_char('s');
-    state.submit_input();
+    state.submit_input(true);
 
     state.insert_char('p');
     state.insert_char('w');
     state.insert_char('d');
-    state.submit_input();
+    state.submit_input(true);
 
     state.insert_char('c');
     state.insert_char('d');
-    state.submit_input();
+    state.submit_input(true);
 
     // Now navigate history
     state.history_previous();
@@ -157,6 +157,7 @@ fn test_terminal_state_scroll() {
 
     // Set visible lines first (simulating terminal size)
     state.set_visible_lines(20);
+    state.output.set_extra_lines(0); // No prompt in unit test
 
     // Add many lines
     for i in 0..100 {
@@ -248,7 +249,7 @@ fn test_typical_user_workflow() {
     assert_eq!(state.input.text(), "docker ps");
 
     // User submits command
-    let cmd = state.submit_input();
+    let cmd = state.submit_input(true);
     assert_eq!(cmd, "docker ps");
     assert!(state.input.text().is_empty());
 
@@ -327,12 +328,12 @@ fn test_history_empty_commands_ignored() {
     let mut state = TerminalState::new();
 
     // Submit empty command (should not be added to history)
-    state.submit_input();
+    state.submit_input(true);
 
     // Add a real command
     state.insert_char('l');
     state.insert_char('s');
-    state.submit_input();
+    state.submit_input(true);
 
     // Navigate history - should only find "ls"
     state.history_previous();
@@ -376,4 +377,379 @@ fn test_emoji_input() {
 
     state.delete_char();
     assert_eq!(state.input.text(), "😀🎉");
+}
+
+// =============================================================================
+// Root Mode Tests
+// =============================================================================
+
+#[test]
+fn test_root_mode_initial_state() {
+    let state = TerminalState::new();
+    assert!(!state.is_root_mode());
+}
+
+#[test]
+fn test_enter_root_mode() {
+    let mut state = TerminalState::new();
+
+    // Get prompt before entering root mode
+    let prompt_before = state.get_prompt();
+    assert!(prompt_before.contains('$')); // Normal user prompt
+
+    // Enter root mode
+    state.enter_root_mode();
+
+    assert!(state.is_root_mode());
+    let prompt_after = state.get_prompt();
+    assert!(prompt_after.contains('#')); // Root prompt
+}
+
+#[test]
+fn test_exit_root_mode() {
+    let mut state = TerminalState::new();
+
+    // Enter and then exit root mode
+    state.enter_root_mode();
+    assert!(state.is_root_mode());
+
+    state.exit_root_mode();
+    assert!(!state.is_root_mode());
+
+    let prompt = state.get_prompt();
+    assert!(prompt.contains('$')); // Back to normal user prompt
+}
+
+#[test]
+fn test_root_mode_toggle() {
+    let mut state = TerminalState::new();
+
+    // Toggle root mode multiple times
+    state.enter_root_mode();
+    assert!(state.is_root_mode());
+
+    state.exit_root_mode();
+    assert!(!state.is_root_mode());
+
+    state.enter_root_mode();
+    assert!(state.is_root_mode());
+}
+
+// =============================================================================
+// HITL (Human-in-the-Loop) Mode Tests
+// =============================================================================
+
+#[test]
+fn test_hitl_mode_initial() {
+    let state = TerminalState::new();
+    assert!(!state.is_in_hitl_mode());
+}
+
+#[test]
+fn test_hitl_mode_awaiting_command_approval() {
+    let mut state = TerminalState::new();
+
+    state.mode = TerminalMode::AwaitingCommandApproval;
+    assert!(state.is_in_hitl_mode());
+}
+
+#[test]
+fn test_hitl_mode_awaiting_answer() {
+    let mut state = TerminalState::new();
+
+    state.mode = TerminalMode::AwaitingAnswer;
+    assert!(state.is_in_hitl_mode());
+}
+
+#[test]
+fn test_hitl_mode_not_in_normal() {
+    let mut state = TerminalState::new();
+
+    state.mode = TerminalMode::Normal;
+    assert!(!state.is_in_hitl_mode());
+}
+
+#[test]
+fn test_hitl_mode_not_in_executing() {
+    let mut state = TerminalState::new();
+
+    state.mode = TerminalMode::ExecutingCommand;
+    assert!(!state.is_in_hitl_mode());
+}
+
+// =============================================================================
+// Multiline Mode Tests
+// =============================================================================
+
+#[test]
+fn test_multiline_mode_initial() {
+    let state = TerminalState::new();
+    assert!(!state.is_in_multiline_mode());
+    assert!(state.multiline_buffer.is_empty());
+}
+
+#[test]
+fn test_multiline_mode_awaiting_more_input() {
+    use infraware_terminal::input::IncompleteReason;
+
+    let mut state = TerminalState::new();
+
+    state.mode = TerminalMode::AwaitingMoreInput(IncompleteReason::TrailingBackslash);
+    assert!(state.is_in_multiline_mode());
+}
+
+#[test]
+fn test_cancel_multiline() {
+    use infraware_terminal::input::IncompleteReason;
+
+    let mut state = TerminalState::new();
+
+    // Set up multiline state
+    state.mode = TerminalMode::AwaitingMoreInput(IncompleteReason::UnclosedDoubleQuote);
+    state.multiline_buffer.push("echo 'hello".to_string());
+    state.pending_heredoc = Some("EOF".to_string());
+
+    // Cancel multiline
+    state.cancel_multiline();
+
+    // Verify state is cleared
+    assert_eq!(state.mode, TerminalMode::Normal);
+    assert!(state.multiline_buffer.is_empty());
+    assert!(state.pending_heredoc.is_none());
+}
+
+#[test]
+fn test_get_multiline_input() {
+    let mut state = TerminalState::new();
+
+    state.multiline_buffer.push("echo \\".to_string());
+    state.multiline_buffer.push("hello".to_string());
+
+    let joined = state.get_multiline_input();
+    // The join logic removes backslash continuation
+    assert!(joined.contains("echo"));
+    assert!(joined.contains("hello"));
+}
+
+// =============================================================================
+// Prompt Tests
+// =============================================================================
+
+#[test]
+fn test_get_prompt_contains_components() {
+    let state = TerminalState::new();
+    let prompt = state.get_prompt();
+
+    // Prompt should contain: |~| user@host:path$
+    assert!(prompt.contains("|~|"));
+    assert!(prompt.contains('@'));
+    assert!(prompt.contains(':'));
+}
+
+#[test]
+fn test_refresh_prompt() {
+    let mut state = TerminalState::new();
+
+    let prompt_before = state.get_prompt();
+    state.refresh_prompt();
+    let prompt_after = state.get_prompt();
+
+    // Prompts should be the same after refresh (in same directory)
+    assert_eq!(prompt_before, prompt_after);
+}
+
+#[test]
+fn test_get_prompt_prefix() {
+    let state = TerminalState::new();
+    let prefix = state.get_prompt_prefix();
+
+    // Should be |~| when not animating
+    assert!(prefix.starts_with('|'));
+    assert!(prefix.ends_with('|'));
+}
+
+// =============================================================================
+// Window Title Tests
+// =============================================================================
+
+#[test]
+fn test_get_window_title() {
+    let state = TerminalState::new();
+    let title = state.get_window_title();
+
+    // Title should contain current directory
+    assert!(!title.is_empty());
+}
+
+// =============================================================================
+// Visible Lines Tests
+// =============================================================================
+
+#[test]
+fn test_set_visible_lines() {
+    let mut state = TerminalState::new();
+
+    state.set_visible_lines(50);
+    assert_eq!(state.visible_lines(), 50);
+
+    state.set_visible_lines(100);
+    assert_eq!(state.visible_lines(), 100);
+}
+
+#[test]
+fn test_visible_lines_default() {
+    let state = TerminalState::new();
+    // Default is 0 - set on first render from actual terminal height
+    assert_eq!(state.visible_lines(), 0);
+}
+
+// =============================================================================
+// Throbber Tests
+// =============================================================================
+
+#[test]
+fn test_throbber_start_stop() {
+    let state = TerminalState::new();
+
+    // Start throbber
+    state.start_throbber();
+
+    // Stop throbber
+    state.stop_throbber();
+
+    // Should not panic
+}
+
+// =============================================================================
+// TerminalMode Extended Tests
+// =============================================================================
+
+#[test]
+fn test_terminal_mode_awaiting_more_input() {
+    use infraware_terminal::input::IncompleteReason;
+
+    let mode = TerminalMode::AwaitingMoreInput(IncompleteReason::TrailingBackslash);
+    let debug_str = format!("{:?}", mode);
+    assert!(debug_str.contains("AwaitingMoreInput"));
+    assert!(debug_str.contains("TrailingBackslash"));
+}
+
+#[test]
+fn test_terminal_mode_all_variants() {
+    // Test all mode variants
+    let modes = vec![
+        TerminalMode::Normal,
+        TerminalMode::ExecutingCommand,
+        TerminalMode::WaitingLLM,
+        TerminalMode::PromptingInstall,
+        TerminalMode::AwaitingCommandApproval,
+        TerminalMode::AwaitingAnswer,
+    ];
+
+    for mode in modes {
+        let debug_str = format!("{:?}", mode);
+        assert!(!debug_str.is_empty());
+    }
+}
+
+// =============================================================================
+// State Debug Tests
+// =============================================================================
+
+#[test]
+fn test_terminal_state_debug() {
+    let state = TerminalState::new();
+    let debug_str = format!("{:?}", state);
+
+    assert!(debug_str.contains("TerminalState"));
+    assert!(debug_str.contains("output"));
+    assert!(debug_str.contains("input"));
+    assert!(debug_str.contains("mode"));
+}
+
+// =============================================================================
+// Throbber Animation Mode-Awareness Tests
+// =============================================================================
+
+#[test]
+fn test_prompt_prefix_static_in_normal_mode() {
+    let state = TerminalState::new();
+    // Even if throbber is running, Normal mode shows static tilde
+    state.start_throbber();
+    std::thread::sleep(std::time::Duration::from_millis(150));
+
+    assert_eq!(state.get_prompt_prefix(), "|~|");
+    state.stop_throbber();
+}
+
+#[test]
+fn test_prompt_prefix_static_in_executing_command_mode() {
+    let mut state = TerminalState::new();
+    state.mode = TerminalMode::ExecutingCommand;
+    state.start_throbber();
+    std::thread::sleep(std::time::Duration::from_millis(150));
+
+    // ExecutingCommand mode should show static tilde
+    assert_eq!(state.get_prompt_prefix(), "|~|");
+    state.stop_throbber();
+}
+
+#[test]
+fn test_prompt_prefix_animates_in_waiting_llm_mode() {
+    let mut state = TerminalState::new();
+    state.mode = TerminalMode::WaitingLLM;
+    state.start_throbber();
+    std::thread::sleep(std::time::Duration::from_millis(150));
+
+    // WaitingLLM mode should show animated symbol
+    let prefix = state.get_prompt_prefix();
+    assert_ne!(prefix, "|~|", "WaitingLLM mode should show animated symbol");
+    assert!(prefix.starts_with('|'));
+    assert!(prefix.ends_with('|'));
+    state.stop_throbber();
+}
+
+#[test]
+fn test_prompt_prefix_static_when_throbber_not_running() {
+    let mut state = TerminalState::new();
+    state.mode = TerminalMode::WaitingLLM;
+    // Don't start throbber
+
+    // Even in WaitingLLM mode, if throbber isn't running, show static
+    assert_eq!(state.get_prompt_prefix(), "|~|");
+}
+
+#[test]
+fn test_animation_only_during_waiting_llm() {
+    let mut state = TerminalState::new();
+
+    // Start throbber
+    state.start_throbber();
+    std::thread::sleep(std::time::Duration::from_millis(150));
+
+    // Normal mode - static
+    state.mode = TerminalMode::Normal;
+    assert_eq!(state.get_prompt_prefix(), "|~|");
+
+    // ExecutingCommand mode - static
+    state.mode = TerminalMode::ExecutingCommand;
+    assert_eq!(state.get_prompt_prefix(), "|~|");
+
+    // PromptingInstall mode - static
+    state.mode = TerminalMode::PromptingInstall;
+    assert_eq!(state.get_prompt_prefix(), "|~|");
+
+    // AwaitingCommandApproval mode - static
+    state.mode = TerminalMode::AwaitingCommandApproval;
+    assert_eq!(state.get_prompt_prefix(), "|~|");
+
+    // AwaitingAnswer mode - static
+    state.mode = TerminalMode::AwaitingAnswer;
+    assert_eq!(state.get_prompt_prefix(), "|~|");
+
+    // WaitingLLM mode - animated!
+    state.mode = TerminalMode::WaitingLLM;
+    assert_ne!(state.get_prompt_prefix(), "|~|");
+
+    state.stop_throbber();
 }

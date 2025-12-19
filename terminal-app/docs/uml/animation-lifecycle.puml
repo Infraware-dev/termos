@@ -1,0 +1,114 @@
+@startuml ThrobberAnimator Lifecycle States
+!theme plain
+title "ThrobberAnimator - State Machine Lifecycle"
+
+[*] --> Created: ThrobberAnimator::new()
+
+Created: active = false\nindex = 0\nthread_handle = None
+
+Created --> Running: start()
+note on link
+  Idempotent check:
+  if active.load(SeqCst) { return; }
+
+  Then:
+  - Reset index to 0
+  - Set active to true
+  - Spawn animation thread
+end note
+
+Running: active = true\nindex >= 0\nthread_handle = Some(JoinHandle)
+note right of Running
+  Animation thread running:
+  loop {
+    sleep(100ms)
+    if active.load(Relaxed) {
+      index.fetch_add(1, Relaxed)
+    }
+  }
+
+  Render thread reading:
+  index.load(Relaxed) % symbols.len()
+  → symbol()
+end note
+
+Running --> Stopped: stop()
+note on link
+  Sets active to false (SeqCst)
+  Animation thread will exit
+  within ~100ms
+end note
+
+Running --> Running: start() [no-op]
+note on link
+  If already running,
+  start() is idempotent
+  (early return)
+end note
+
+Stopped: active = false\nindex = N\nthread_handle = Some(JoinHandle)
+note right of Stopped
+  Animation thread exited
+  (waiting for join in Drop)
+
+  symbol() returns "~"
+  is_running() returns false
+end note
+
+Stopped --> Dropped: Drop::drop()
+note on link
+  stop() called again (idempotent)
+  Join animation thread
+  Clean up resources
+end note
+
+Dropped: [cleanup]
+
+note over Created, Running
+  Start Flow:
+  1. User enters natural language query
+  2. state.mode = WaitingLLM
+  3. state.start_throbber()
+     → throbber.start() called
+  4. Animation thread spawned
+  5. Render loop displays symbol
+end note
+
+note over Running, Stopped
+  Running Flow:
+  - Main thread: render(state)
+    - Checks mode == WaitingLLM
+    - Checks throbber.is_running()
+    - Calls throbber.symbol()
+  - Animation thread: increments index
+  - Happens ~10 times per second
+  - Smooth animation visible in prompt
+end note
+
+note over Stopped, Dropped
+  Stop Flow:
+  1. LLM query completes
+  2. orchestrator.handle_query_result()
+  3. state.stop_throbber()
+     → throbber.stop() called
+  4. active flag set to false
+  5. Animation thread detects and exits
+  6. Final render shows "|~|" prompt
+  7. Terminal ready for next input
+end note
+
+note over Created, Dropped
+  Error/Cancellation Flow:
+  - If user presses Ctrl+C
+  - cancel_token fires
+  - orchestrator exits select! loop
+  - state.stop_throbber() called
+  - Animation stops gracefully
+  - state.mode = Normal
+  - Final render shows prompt
+end note
+
+state Dropped {
+}
+
+@enduml

@@ -86,14 +86,11 @@ impl CommandCache {
     pub fn is_available(command: &str) -> bool {
         // Fast path: check cache first (read lock)
         {
-            let cache = match COMMAND_CACHE.read() {
-                Ok(cache) => cache,
-                Err(poisoned) => {
-                    // Lock was poisoned, but we can still access the data
-                    log::warn!("Command cache read lock was poisoned, recovering...");
-                    poisoned.into_inner()
-                }
-            };
+            // M-PANIC-IS-STOP: Lock poisoning indicates prior panic violated invariants.
+            // Fail fast to prevent cascading failures from corrupted cache state.
+            let cache = COMMAND_CACHE
+                .read()
+                .expect("CommandCache lock poisoned - prior panic corrupted state");
 
             if cache.available.contains(command) {
                 return true;
@@ -108,13 +105,10 @@ impl CommandCache {
 
         // Update cache (write lock)
         {
-            let mut cache = match COMMAND_CACHE.write() {
-                Ok(cache) => cache,
-                Err(poisoned) => {
-                    log::warn!("Command cache write lock was poisoned, recovering...");
-                    poisoned.into_inner()
-                }
-            };
+            // M-PANIC-IS-STOP: Lock poisoning indicates prior panic violated invariants.
+            let mut cache = COMMAND_CACHE
+                .write()
+                .expect("CommandCache lock poisoned - prior panic corrupted state");
 
             if exists {
                 cache.available.insert(command.to_string());
@@ -137,30 +131,22 @@ impl CommandCache {
     /// // Check if alias exists
     /// let is_alias = CommandCache::is_alias("ll");
     /// ```
-    #[allow(dead_code)] // Public API for alias checking, used in M2/M3
     pub fn is_alias(command: &str) -> bool {
-        let cache = match COMMAND_CACHE.read() {
-            Ok(cache) => cache,
-            Err(poisoned) => {
-                log::warn!("Command cache read lock was poisoned, recovering...");
-                poisoned.into_inner()
-            }
-        };
+        // M-PANIC-IS-STOP: Lock poisoning indicates prior panic violated invariants.
+        let cache = COMMAND_CACHE
+            .read()
+            .expect("CommandCache lock poisoned - prior panic corrupted state");
         cache.aliases.contains_key(command)
     }
 
     /// Get the expanded command for an alias
     ///
     /// Returns `None` if not an alias, or `Some(expanded_command)` if found.
-    #[allow(dead_code)] // Public API for alias expansion, used in M2/M3
     pub fn get_alias_expansion(alias: &str) -> Option<String> {
-        let cache = match COMMAND_CACHE.read() {
-            Ok(cache) => cache,
-            Err(poisoned) => {
-                log::warn!("Command cache read lock was poisoned, recovering...");
-                poisoned.into_inner()
-            }
-        };
+        // M-PANIC-IS-STOP: Lock poisoning indicates prior panic violated invariants.
+        let cache = COMMAND_CACHE
+            .read()
+            .expect("CommandCache lock poisoned - prior panic corrupted state");
         cache.aliases.get(alias).cloned()
     }
 
@@ -209,13 +195,10 @@ impl CommandCache {
         }
 
         // Update cache
-        let mut cache = match COMMAND_CACHE.write() {
-            Ok(cache) => cache,
-            Err(poisoned) => {
-                log::warn!("Command cache write lock was poisoned, recovering...");
-                poisoned.into_inner()
-            }
-        };
+        // M-PANIC-IS-STOP: Lock poisoning indicates prior panic violated invariants.
+        let mut cache = COMMAND_CACHE
+            .write()
+            .expect("CommandCache lock poisoned - prior panic corrupted state");
         cache.aliases = aliases;
     }
 
@@ -268,13 +251,10 @@ impl CommandCache {
         }
 
         // Update cache - merge with existing aliases (user aliases take precedence)
-        let mut cache = match COMMAND_CACHE.write() {
-            Ok(cache) => cache,
-            Err(poisoned) => {
-                log::warn!("Command cache write lock was poisoned, recovering...");
-                poisoned.into_inner()
-            }
-        };
+        // M-PANIC-IS-STOP: Lock poisoning indicates prior panic violated invariants.
+        let mut cache = COMMAND_CACHE
+            .write()
+            .expect("CommandCache lock poisoned - prior panic corrupted state");
 
         // Merge: system aliases first, then user aliases override
         let mut merged = aliases;
@@ -305,13 +285,10 @@ impl CommandCache {
     /// assert_eq!(CommandCache::expand_alias("ll"), Some("ls -la".to_string()));
     /// ```
     pub fn expand_alias(alias_name: &str) -> Option<String> {
-        let cache = match COMMAND_CACHE.read() {
-            Ok(cache) => cache,
-            Err(poisoned) => {
-                log::warn!("Command cache read lock was poisoned, recovering...");
-                poisoned.into_inner()
-            }
-        };
+        // M-PANIC-IS-STOP: Lock poisoning indicates prior panic violated invariants.
+        let cache = COMMAND_CACHE
+            .read()
+            .expect("CommandCache lock poisoned - prior panic corrupted state");
 
         cache.aliases.get(alias_name).cloned()
     }
@@ -324,15 +301,11 @@ impl CommandCache {
     ///
     /// CommandCache::clear();
     /// ```
-    #[allow(dead_code)] // Public API for cache management, used in testing
     pub fn clear() {
-        let mut cache = match COMMAND_CACHE.write() {
-            Ok(cache) => cache,
-            Err(poisoned) => {
-                log::warn!("Command cache write lock was poisoned, recovering...");
-                poisoned.into_inner()
-            }
-        };
+        // M-PANIC-IS-STOP: Lock poisoning indicates prior panic violated invariants.
+        let mut cache = COMMAND_CACHE
+            .write()
+            .expect("CommandCache lock poisoned - prior panic corrupted state");
         cache.available.clear();
         cache.unavailable.clear();
         cache.aliases.clear();
@@ -352,28 +325,21 @@ impl CommandCache {
     /// // Now is_available() will re-check PATH
     /// ```
     pub fn clear_commands() {
-        let mut cache = match COMMAND_CACHE.write() {
-            Ok(cache) => cache,
-            Err(poisoned) => {
-                log::warn!("Command cache write lock was poisoned, recovering...");
-                poisoned.into_inner()
-            }
-        };
+        // M-PANIC-IS-STOP: Lock poisoning indicates prior panic violated invariants.
+        let mut cache = COMMAND_CACHE
+            .write()
+            .expect("CommandCache lock poisoned - prior panic corrupted state");
         cache.available.clear();
         cache.unavailable.clear();
         // Note: aliases are NOT cleared - use reload-aliases for that
     }
 
     /// Get statistics about cache contents (for debugging/monitoring)
-    #[allow(dead_code)] // Diagnostic API for cache stats, used in M2/M3
     pub fn stats() -> CacheStats {
-        let cache = match COMMAND_CACHE.read() {
-            Ok(cache) => cache,
-            Err(poisoned) => {
-                log::warn!("Command cache read lock was poisoned, recovering...");
-                poisoned.into_inner()
-            }
-        };
+        // M-PANIC-IS-STOP: Lock poisoning indicates prior panic violated invariants.
+        let cache = COMMAND_CACHE
+            .read()
+            .expect("CommandCache lock poisoned - prior panic corrupted state");
         CacheStats {
             available_count: cache.available.len(),
             unavailable_count: cache.unavailable.len(),
@@ -390,7 +356,6 @@ impl Default for CommandCache {
 
 /// Cache statistics
 #[derive(Debug, Clone)]
-#[allow(dead_code)] // Used by stats() method, available for M2/M3
 pub struct CacheStats {
     pub available_count: usize,
     pub unavailable_count: usize,

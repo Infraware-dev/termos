@@ -66,7 +66,7 @@ Structure your analysis in clear sections:
 
 2. **Detailed Metrics Table**: Organized metrics (LOC, SLOC, functions, complexity scores)
 
-3. **Complexity Hotspots**: List of functions/modules exceeding complexity thresholds with specific metrics
+3. **Complexity Hotspots**: List of functions/modules exceeding complexity thresholds with specific metrics. **Always identify the method with the highest cyclomatic complexity** in the codebase, reporting its name, file location, complexity score, and a brief explanation of why it's complex
 
 4. **Quality Assessment**: Maintainability insights, pattern adherence, identified issues
 

@@ -10,8 +10,9 @@ Infraware Terminal is a TUI-based terminal application that intelligently routes
 **Version:** 0.1.0
 **Tech Stack:** Rust + TUI (ratatui/crossterm)
 **Code Quality:** Microsoft Pragmatic Rust Guidelines compliant
+**Status:** M1 Complete + Backend Integration in Progress
 
-This is the initial project setup with the complete module structure. Implementation is following the 4-week timeline outlined in the project brief. Codebase adheres to Microsoft's enterprise-scale Rust guidelines with strict compiler/clippy lints, Debug trait implementations on all public types, and #[expect] for all lint overrides.
+The codebase is feature-complete for M1 with 224 tests passing and zero clippy warnings. Implementation follows the 4-week timeline and adheres to Microsoft's enterprise-scale Rust guidelines with strict compiler/clippy lints, Debug trait implementations on all public types, and #[expect] for all lint overrides.
 
 ## ✨ Features
 
@@ -32,12 +33,13 @@ This is the initial project setup with the complete module structure. Implementa
   - O(1) HashMap lookup for performance (<1μs expansion overhead)
   - Built-in `reload-aliases` command for runtime reloading
   - Security: Rejects dangerous patterns (rm -rf /, mkfs, dd, fork bombs, etc.)
-- ✅ **SCAN Algorithm**: Advanced input classification with 10-handler chain + alias + history expansion (<100μs avg)
+- ✅ **SCAN Algorithm**: Advanced input classification with 11-handler chain + alias + history expansion (<100μs avg)
   - Alias expansion before classification (single-level like Bash)
   - Shell builtin support (45+): `.`, `:`, `[`, `[[`, source, export, eval, exec, and more
   - Command recognition with PATH verification and caching
   - Typo detection with Levenshtein distance (e.g., "dokcer" → "docker")
   - Shell operator support (pipes, redirects, logical operators)
+  - Glob pattern expansion (`*`, `?`, `[...]`, `{...}`) with shell execution
   - Language-agnostic classification (works for any language)
 - ✅ **Command Execution**: Async shell command execution with stdout/stderr capture
 - ✅ **Background Processes**: Execute commands in the background with `&` suffix (e.g., `sleep 10 &`)
@@ -53,6 +55,7 @@ This is the initial project setup with the complete module structure. Implementa
 - ✅ **Syntax Highlighting**: Code blocks with syntax highlighting (Rust, Python, Bash, JSON)
 - ✅ **Tab Completion**: Basic command and file path completion
 - ✅ **Command History**: Navigate previous commands with arrow keys
+- ✅ **Output Scrolling**: Full scrollbar with mouse wheel and click/drag support, smart auto-scroll to keep prompt visible on user input
 - ✅ **Cross-Platform**: Windows, macOS, and Linux support with platform-specific optimizations
 - ✅ **Benchmarking Suite**: Performance benchmarks for SCAN algorithm
 - ✅ **Unicode Support**: Full Unicode support for international users (CJK, emoji, etc.) with character-count based cursor positioning
@@ -84,15 +87,15 @@ User Input → Alias Expansion → InputClassifier (9-Handler Chain)
 
 **11-Handler Chain** (executed in strict order):
 1. **EmptyInputHandler** - Fast path for empty input (<1μs)
-2. **HistoryExpansionHandler** - Bash-style history expansion: `!!`,  `!$`, `!^`, `!*` (~1-5μs)
-3. **ApplicationBuiltinHandler** - App-specific commands: clear, exit, jobs, reload-aliases, reload-commands, auth-status (<1μs)
+2. **HistoryExpansionHandler** - Bash-style history expansion: `!!`,  `!$`, `!^`, `!*` (~5μs)
+3. **ApplicationBuiltinHandler** - App-specific commands: clear, exit, jobs, history, reload-aliases, reload-commands, auth-status (<1μs)
 4. **ShellBuiltinHandler** - Shell builtins without PATH check: `.`, `:`, `[`, `[[`, source, export, eval, etc. (<1μs)
 5. **PathCommandHandler** - Executable paths: `./script.sh`, `/usr/bin/cmd`, background processes with `&` (~10μs)
 6. **KnownCommandHandler** - 60+ DevOps commands with PATH cache (<1μs hit)
 7. **PathDiscoveryHandler** - Auto-discover newly installed commands (~1-5ms)
-8. **CommandSyntaxHandler** - Language-agnostic: flags, pipes, redirects (~10μs)
-9. **TypoDetectionHandler** - Levenshtein distance ≤2: "dokcer" → "docker" (~100μs)
-10. **NaturalLanguageHandler** - Language-agnostic heuristics (universal patterns) (~0.5μs)
+8. **CommandSyntaxHandler** - Language-agnostic: flags, pipes, redirects, glob patterns (~10μs)
+9. **TypoDetectionHandler** - Levenshtein distance ≤2: "dokcer" → "docker" (~100μs, disabled by default)
+10. **NaturalLanguageHandler** - Language-agnostic heuristics (universal patterns) (~5μs)
 11. **DefaultHandler** - Fallback to LLM (<1μs)
 
 **Key Features**:
@@ -115,10 +118,11 @@ infraware-terminal/
 │   ├── main.rs                    # Entry point + event loop
 │   ├── lib.rs                     # Library exports
 │   ├── terminal/                  # TUI rendering and state
-│   │   ├── tui.rs                # ratatui rendering logic
-│   │   ├── state.rs              # Terminal state management
-│   │   ├── buffers.rs            # Buffer components (SRP) - Unicode-safe
-│   │   └── events.rs             # Keyboard event handling
+│   │   ├── tui.rs                # ratatui rendering logic with scrollbar
+│   │   ├── state.rs              # Terminal state management (modes, scrollbar info)
+│   │   ├── buffers.rs            # Buffer components (SRP) - scrollable output, Unicode-safe
+│   │   ├── events.rs             # Keyboard and mouse event handling
+│   │   └── throbber.rs           # Animated loading indicator
 │   ├── input/                     # SCAN Algorithm
 │   │   ├── classifier.rs         # InputClassifier coordinator
 │   │   ├── handler.rs            # 11-handler Chain of Responsibility
@@ -153,8 +157,11 @@ infraware-terminal/
 ├── benches/                       # Performance benchmarks
 │   └── scan_benchmark.rs         # SCAN algorithm benchmarks
 └── docs/                          # Documentation
+    ├── INDEX.md                  # Documentation index
     ├── SCAN_ARCHITECTURE.md      # SCAN algorithm details
-    └── SCAN_IMPLEMENTATION_PLAN.md
+    ├── SCROLLING_ARCHITECTURE.md # Scrollbar implementation
+    ├── INTERACTIVE_COMMANDS_ARCHITECTURE.md
+    └── uml/                      # PlantUML diagrams
 ```
 
 ## 🚀 Getting Started
@@ -232,14 +239,24 @@ Once running, you can:
    - `!$` - Use last argument: `vim !$` (if previous was `cat file.txt`)
    - `!^` - Use first argument: `echo !^` (if previous was `cat file1 file2`)
    - `!*` - Use all arguments: `find !*` (if previous was `ls -la /tmp`)
-5. **Use aliases**: Type user-defined aliases from `~/.bashrc`, `~/.bash_aliases`, `~/.zshrc` (e.g., `ll` → expands to `ls -la`)
-6. **Ask questions**: Type natural language queries (e.g., "how do I list files?")
-7. **Navigate history**: Use ↑/↓ arrow keys
-8. **Scroll output**: Navigate previous command output when it exceeds the visible area
-9. **Tab completion**: Press Tab to complete commands/paths
-10. **Reload aliases**: Type `reload-aliases` to refresh aliases from config files (useful if editing `.bashrc` during a session)
-11. **Reload commands**: Type `reload-commands` to clear the command cache (useful after installing new commands during a session)
-12. **Quit**: Press Ctrl+C or type `exit`
+5. **Use glob patterns**: Commands with `*`, `?`, `[...]`, `{...}` automatically execute through shell:
+   - `rm -rf file*` - Remove files matching pattern
+   - `ls *.txt` - List all .txt files
+   - `echo file{1..3}` - Brace expansion
+   - `find /etc/host[s]` - Bracket patterns
+6. **Use aliases**: Type user-defined aliases from `~/.bashrc`, `~/.bash_aliases`, `~/.zshrc` (e.g., `ll` → expands to `ls -la`)
+7. **Ask questions**: Type natural language queries (e.g., "how do I list files?")
+8. **View history**: Type `history` to show all commands, or `history N` to show last N commands
+9. **Navigate history**: Use ↑/↓ arrow keys
+10. **Scroll output**: Navigate previous command output when it exceeds the visible area
+    - **Mouse wheel**: Scroll up/down with scroll wheel
+    - **Scrollbar clicks**: Click scrollbar track to jump, drag thumb to navigate, click arrows for line-by-line scroll
+    - **Keyboard**: Ctrl+Home/End to jump to start/end of output, Page Up/Down to scroll (if implemented)
+    - **Auto-scroll**: When you reach the bottom of output, typing a new command automatically scrolls to show the prompt
+11. **Tab completion**: Press Tab to complete commands/paths
+12. **Reload aliases**: Type `reload-aliases` to refresh aliases from config files (useful if editing `.bashrc` during a session)
+13. **Reload commands**: Type `reload-commands` to clear the command cache (useful after installing new commands during a session)
+14. **Quit**: Press Ctrl+C or type `exit`
 
 #### Keyboard Shortcuts
 
@@ -413,9 +430,12 @@ xdg-open target/criterion/report/index.html  # Linux
 **Performance Targets**:
 - Average SCAN classification: <100μs
 - Known command (cache hit): <1μs
-- Typo detection: <100μs
+- Typo detection: <100μs (disabled by default)
+- Natural language: <5μs
+- PATH lookup (cache miss): 1-5ms
 - Background job check (read path, no jobs): <1μs
 - Job polling interval: 250ms (balances responsiveness vs lock contention)
+- LLM query throbber animation: 10 FPS (100ms render interval for smooth visual feedback)
 
 ## 📝 Development Status
 
@@ -473,14 +493,14 @@ xdg-open target/criterion/report/index.html  # Linux
 
 ### M1 Constraints (By Design)
 
-- **Interactive Commands**: 18 commands supported with full TUI suspension. Some commands that require persistent TTY sessions are blocked (ssh, tmux, screen, top, htop, python REPL, etc.)
-  - Supported: vim, nano, less, man, mc, ranger, and more (see usage section for complete list)
+- **Interactive Commands**: 28 commands supported with full TUI suspension. Some commands that require persistent TTY sessions are blocked (ssh, tmux, screen, python REPL, etc.)
+  - Supported: vim, nano, less, man, mc, ranger, top, htop, sudo, and more (see usage section for complete list)
   - Blocked: 31 commands requiring long-running sessions or network access. Use alternatives or separate terminal
   - Platform: Unix/Linux/macOS only (Windows shows error message)
 - **Alias Cache TTL**: No automatic TTL/invalidation - alias files modified externally during session require manual `reload-aliases` command to be recognized
 - **Command Cache TTL**: No automatic TTL/invalidation - commands installed during a session require `reload-commands` to be recognized
 - **Tab Completion**: Basic file and command completion only - no integration with bash/zsh completion systems
-- **Command History**: Session-only persistence - history is not saved to disk when the terminal closes
+- **Command History**: Session-only persistence - history is not saved to disk when the terminal closes (accessible via `history` command)
 - **Configuration**: Uses hardcoded defaults - no config file support yet
 - **Advanced Markdown**: Only basic formatting with syntax highlighting - tables, images deferred to M2
 
@@ -508,8 +528,8 @@ Planned configuration options:
 
 This is a 3-month contractor project. For questions or issues:
 
-1. Check the [project brief](infraware_terminal_project_brief.md)
-2. Review the architecture documentation
+1. Review `CLAUDE.md` for development guidelines
+2. Check `docs/INDEX.md` for architecture documentation
 3. Run tests to ensure your changes work
 4. Follow Rust best practices and conventions
 
