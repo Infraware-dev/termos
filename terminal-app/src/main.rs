@@ -704,8 +704,6 @@ impl InfrawareTerminal {
         // Handle human-in-the-loop command approval mode (y/n)
         if self.state.mode == TerminalMode::AwaitingCommandApproval {
             let approved = HitlOrchestrator::parse_approval(&input);
-            // Echo just the response (prompt was already shown)
-            self.state.add_output(input.clone());
 
             // Check if this is a shell confirmation (rm on write-protected files, etc.)
             if CommandOrchestrator::is_shell_confirmation(&self.state) {
