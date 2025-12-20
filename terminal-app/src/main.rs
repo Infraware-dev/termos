@@ -583,27 +583,47 @@ impl InfrawareTerminal {
             }
             TerminalEvent::InputChar(c) => {
                 self.state.scroll_to_end(); // Bring prompt into view
-                self.state.insert_char(c);
+                if self.state.mode == TerminalMode::ReverseHistorySearching {
+                    self.handle_reverse_search_char(c);
+                } else {
+                    self.state.insert_char(c);
+                }
             }
             TerminalEvent::DeleteChar => {
                 self.state.scroll_to_end();
-                self.state.delete_char();
+                if self.state.mode == TerminalMode::ReverseHistorySearching {
+                    self.handle_reverse_search_backspace();
+                } else {
+                    self.state.delete_char();
+                }
             }
             TerminalEvent::MoveCursorLeft => {
                 self.state.scroll_to_end();
-                self.state.move_cursor_left();
+                // Ignore cursor movement during reverse search (matches bash)
+                if self.state.mode != TerminalMode::ReverseHistorySearching {
+                    self.state.move_cursor_left();
+                }
             }
             TerminalEvent::MoveCursorRight => {
                 self.state.scroll_to_end();
-                self.state.move_cursor_right();
+                // Ignore cursor movement during reverse search (matches bash)
+                if self.state.mode != TerminalMode::ReverseHistorySearching {
+                    self.state.move_cursor_right();
+                }
             }
             TerminalEvent::HistoryPrevious => {
                 self.state.scroll_to_end();
-                self.state.history_previous();
+                // Ignore history navigation during reverse search (matches bash)
+                if self.state.mode != TerminalMode::ReverseHistorySearching {
+                    self.state.history_previous();
+                }
             }
             TerminalEvent::HistoryNext => {
                 self.state.scroll_to_end();
-                self.state.history_next();
+                // Ignore history navigation during reverse search (matches bash)
+                if self.state.mode != TerminalMode::ReverseHistorySearching {
+                    self.state.history_next();
+                }
             }
             TerminalEvent::ScrollUp => {
                 self.state.scroll_up();
@@ -613,13 +633,19 @@ impl InfrawareTerminal {
             }
             TerminalEvent::Submit => {
                 self.state.scroll_to_end();
-                if !self.handle_submit().await? {
+                if self.state.mode == TerminalMode::ReverseHistorySearching {
+                    self.accept_reverse_search();
+                    // Don't execute - just accept the match into input
+                } else if !self.handle_submit().await? {
                     return Ok(false); // Exit requested
                 }
             }
             TerminalEvent::TabComplete => {
                 self.state.scroll_to_end();
-                self.handle_tab_completion();
+                // Ignore tab completion during reverse search (matches bash)
+                if self.state.mode != TerminalMode::ReverseHistorySearching {
+                    self.handle_tab_completion();
+                }
             }
             TerminalEvent::ClearScreen => {
                 self.state.output.clear();
@@ -627,6 +653,13 @@ impl InfrawareTerminal {
             }
             TerminalEvent::CtrlC => {
                 self.state.scroll_to_end();
+
+                // Cancel reverse search if active
+                if self.state.mode == TerminalMode::ReverseHistorySearching {
+                    self.cancel_reverse_search();
+                    return Ok(true);
+                }
+
                 // Poller already cancelled the token (for async interruption)
                 // Here we just clear input and conditionally reset token
                 log::info!("Ctrl+C: Clearing input (mode={:?})", self.state.mode);
@@ -650,6 +683,10 @@ impl InfrawareTerminal {
                     log::info!("Ctrl+C: Resetting cancellation token");
                     let _ = self.cancellation_token_tx.send(CancellationToken::new());
                 }
+            }
+            TerminalEvent::ReverseHistorySearch => {
+                self.state.scroll_to_end();
+                self.handle_reverse_search_toggle();
             }
             TerminalEvent::Resize(_, _) => {
                 // Terminal resized - re-render will handle it
@@ -1153,6 +1190,90 @@ impl InfrawareTerminal {
     fn handle_tab_completion(&mut self) {
         self.tab_completion_handler
             .handle_tab_completion(&mut self.state);
+    }
+
+    /// Toggle or cycle through reverse history search
+    fn handle_reverse_search_toggle(&mut self) {
+        use crate::terminal::state::ReverseSearchState;
+
+        if self.state.mode == TerminalMode::ReverseHistorySearching {
+            // Already in search mode - cycle to next match using cached results
+            if let Some(search) = &mut self.state.reverse_search {
+                if !search.cached_matches.is_empty() {
+                    search.match_index = (search.match_index + 1) % search.cached_matches.len();
+                    // Update input with matched command
+                    if let Some(&idx) = search.cached_matches.get(search.match_index) {
+                        if let Some(cmd) = self.state.history.get(idx) {
+                            self.state.input.set_text(cmd.clone());
+                        }
+                    }
+                }
+            }
+        } else if self.state.mode == TerminalMode::Normal {
+            // Enter search mode
+            self.state.reverse_search = Some(ReverseSearchState {
+                query: String::new(),
+                match_index: 0,
+                original_input: self.state.input.text().to_string(),
+                cached_matches: Vec::new(),
+            });
+            self.state.mode = TerminalMode::ReverseHistorySearching;
+        }
+    }
+
+    /// Handle character input during reverse search
+    fn handle_reverse_search_char(&mut self, c: char) {
+        if let Some(search) = &mut self.state.reverse_search {
+            search.query.push(c);
+            search.match_index = 0; // Reset to first match
+            self.update_reverse_search_match();
+        }
+    }
+
+    /// Handle backspace during reverse search
+    fn handle_reverse_search_backspace(&mut self) {
+        if let Some(search) = &mut self.state.reverse_search {
+            search.query.pop();
+            search.match_index = 0;
+            self.update_reverse_search_match();
+        }
+    }
+
+    /// Update input buffer with current search match
+    /// Caches search results to avoid O(N) search on subsequent operations
+    fn update_reverse_search_match(&mut self) {
+        if let Some(search) = &mut self.state.reverse_search {
+            // Update cache only when query changes (O(N) once per keystroke)
+            search.cached_matches = self.state.history.search(&search.query);
+
+            if let Some(&idx) = search.cached_matches.get(search.match_index) {
+                if let Some(cmd) = self.state.history.get(idx) {
+                    self.state.input.set_text(cmd.clone());
+                }
+            } else if search.query.is_empty() {
+                // No query - restore original or clear
+                self.state.input.set_text(search.original_input.clone());
+            } else {
+                // No matches - keep query visible but clear input
+                self.state.input.clear();
+            }
+        }
+    }
+
+    /// Accept current search result and exit search mode
+    fn accept_reverse_search(&mut self) {
+        self.state.mode = TerminalMode::Normal;
+        self.state.reverse_search = None;
+        // Input already has the matched command
+    }
+
+    /// Cancel reverse search and restore original input
+    fn cancel_reverse_search(&mut self) {
+        if let Some(search) = &self.state.reverse_search {
+            self.state.input.set_text(search.original_input.clone());
+        }
+        self.state.mode = TerminalMode::Normal;
+        self.state.reverse_search = None;
     }
 }
 

@@ -15,6 +15,26 @@ pub enum TerminalMode {
     AwaitingCommandApproval, // Human-in-the-loop: waiting for user to approve LLM command (y/n)
     AwaitingAnswer, // Human-in-the-loop: waiting for user to answer LLM question (free text)
     AwaitingMoreInput(IncompleteReason), // Multiline: waiting for more input lines
+    ReverseHistorySearching, // Ctrl+R: reverse history search mode
+}
+
+/// State for reverse history search (Ctrl+R)
+///
+/// # Invariants
+/// - `match_index` must be < `cached_matches.len()` when `cached_matches` is non-empty
+/// - `cached_matches` contains history indices in reverse chronological order (most recent first)
+/// - `original_input` is set once when entering search mode and never modified
+#[derive(Debug, Clone, Default)]
+pub struct ReverseSearchState {
+    /// Current search query
+    pub query: String,
+    /// Index into matching results (0 = most recent match)
+    pub match_index: usize,
+    /// Original input text before search started (for restoration on cancel)
+    pub original_input: String,
+    /// Cached search results (history indices) - updated when query changes
+    /// Avoids O(N) search on every keystroke
+    pub cached_matches: Vec<usize>,
 }
 
 /// Type of shell confirmation being requested
@@ -154,6 +174,8 @@ pub struct TerminalState {
     is_root_mode: bool,
     /// Scrollbar position info for mouse interaction (updated during render)
     pub scrollbar_info: Option<ScrollbarInfo>,
+    /// Reverse history search state (Ctrl+R)
+    pub reverse_search: Option<ReverseSearchState>,
 }
 
 impl TerminalState {
@@ -172,6 +194,7 @@ impl TerminalState {
             throbber: ThrobberAnimator::new(),
             is_root_mode: false,
             scrollbar_info: None,
+            reverse_search: None,
         };
         state.cached_prompt = state.build_prompt();
         state
@@ -419,5 +442,61 @@ impl TerminalState {
 impl Default for TerminalState {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_reverse_search_state_default() {
+        let state = ReverseSearchState::default();
+        assert!(state.query.is_empty());
+        assert_eq!(state.match_index, 0);
+        assert!(state.original_input.is_empty());
+        assert!(state.cached_matches.is_empty());
+    }
+
+    #[test]
+    fn test_reverse_search_state_with_cached_matches() {
+        let state = ReverseSearchState {
+            query: "git".to_string(),
+            match_index: 1,
+            original_input: "ls -la".to_string(),
+            cached_matches: vec![5, 3, 1], // indices in history
+        };
+        assert_eq!(state.query, "git");
+        assert_eq!(state.match_index, 1);
+        assert_eq!(state.original_input, "ls -la");
+        assert_eq!(state.cached_matches, vec![5, 3, 1]);
+    }
+
+    #[test]
+    fn test_scrollbar_info_is_on_scrollbar() {
+        let info = ScrollbarInfo {
+            column: 79,
+            height: 24,
+            total_lines: 100,
+            visible_lines: 24,
+        };
+        assert!(info.is_on_scrollbar(79));
+        assert!(!info.is_on_scrollbar(78));
+        assert!(!info.is_on_scrollbar(80));
+    }
+
+    #[test]
+    fn test_scrollbar_info_row_to_scroll_position() {
+        let info = ScrollbarInfo {
+            column: 79,
+            height: 24,
+            total_lines: 100,
+            visible_lines: 24,
+        };
+        // max_scroll = 100 - 24 = 76
+        // Top arrow -> 0
+        assert_eq!(info.row_to_scroll_position(0), 0);
+        // Bottom arrow -> max_scroll
+        assert_eq!(info.row_to_scroll_position(23), 76);
     }
 }

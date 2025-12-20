@@ -21,6 +21,9 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::state::{ScrollbarInfo, TerminalMode, TerminalState};
 
+/// Prompt format for reverse history search mode (matches bash Ctrl+R behavior)
+const REVERSE_SEARCH_PROMPT_FORMAT: &str = "(reverse-i-search)`{}': ";
+
 /// TUI wrapper for the terminal
 pub struct TerminalUI {
     terminal: Terminal<CrosstermBackend<io::Stdout>>,
@@ -348,6 +351,7 @@ fn get_prompt_color(mode: &TerminalMode) -> Color {
         TerminalMode::AwaitingCommandApproval => Color::Cyan,
         TerminalMode::AwaitingAnswer => Color::Cyan,
         TerminalMode::AwaitingMoreInput(_) => Color::Magenta,
+        TerminalMode::ReverseHistorySearching => Color::Yellow,
     }
 }
 
@@ -361,6 +365,15 @@ fn build_prompt_text(state: &TerminalState) -> String {
         } else {
             false
         };
+
+    // Handle reverse history search mode
+    if state.mode == TerminalMode::ReverseHistorySearching {
+        let search = state
+            .reverse_search
+            .as_ref()
+            .expect("ReverseHistorySearching mode requires reverse_search state");
+        return REVERSE_SEARCH_PROMPT_FORMAT.replace("{}", &search.query);
+    }
 
     if state.pending_interaction.is_some() {
         match state.mode {
