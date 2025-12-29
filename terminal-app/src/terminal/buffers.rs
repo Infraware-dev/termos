@@ -523,6 +523,33 @@ impl CommandHistory {
     pub fn all(&self) -> &[String] {
         &self.history
     }
+
+    /// Search history for commands containing the query (reverse order - most recent first)
+    /// Returns indices of matching commands. Search is case-insensitive (matches bash behavior).
+    ///
+    /// # Performance
+    /// O(N × M) where N = history size, M = average command length.
+    /// Called once per keystroke during reverse search (results are cached in `ReverseSearchState`).
+    ///
+    /// TODO(M2): Consider early termination after K matches for very large histories (10k+).
+    pub fn search(&self, query: &str) -> Vec<usize> {
+        if query.is_empty() {
+            return Vec::new();
+        }
+        let query_lower = query.to_lowercase();
+        self.history
+            .iter()
+            .enumerate()
+            .rev() // Most recent first
+            .filter(|(_, cmd)| cmd.to_lowercase().contains(&query_lower))
+            .map(|(idx, _)| idx)
+            .collect()
+    }
+
+    /// Get command at specific index
+    pub fn get(&self, index: usize) -> Option<&String> {
+        self.history.get(index)
+    }
 }
 
 impl Default for CommandHistory {
@@ -802,5 +829,74 @@ mod tests {
         buffer.add_line("line 4".to_string());
         assert_eq!(buffer.scroll_position(), 0); // Position preserved
         assert!(!buffer.is_at_bottom()); // Still not at bottom
+    }
+
+    // === Reverse History Search Tests ===
+
+    #[test]
+    fn test_command_history_search_basic() {
+        let mut history = CommandHistory::new();
+        history.add("ls -la".to_string());
+        history.add("cd /home".to_string());
+        history.add("git status".to_string());
+        history.add("ls -lh".to_string());
+
+        // Search for "ls" should find both ls commands
+        let matches = history.search("ls");
+        assert_eq!(matches.len(), 2);
+        // Most recent first
+        assert_eq!(matches[0], 3); // "ls -lh"
+        assert_eq!(matches[1], 0); // "ls -la"
+    }
+
+    #[test]
+    fn test_command_history_search_case_insensitive() {
+        let mut history = CommandHistory::new();
+        history.add("Git Status".to_string());
+        history.add("GIT PUSH".to_string());
+        history.add("git pull".to_string());
+
+        // Lowercase query should find all git commands
+        let matches = history.search("git");
+        assert_eq!(matches.len(), 3);
+
+        // Uppercase query should also find all
+        let matches = history.search("GIT");
+        assert_eq!(matches.len(), 3);
+
+        // Mixed case should work too
+        let matches = history.search("Git");
+        assert_eq!(matches.len(), 3);
+    }
+
+    #[test]
+    fn test_command_history_search_empty_query() {
+        let mut history = CommandHistory::new();
+        history.add("ls".to_string());
+        history.add("cd".to_string());
+
+        let matches = history.search("");
+        assert!(matches.is_empty());
+    }
+
+    #[test]
+    fn test_command_history_search_no_matches() {
+        let mut history = CommandHistory::new();
+        history.add("ls".to_string());
+        history.add("cd".to_string());
+
+        let matches = history.search("nonexistent");
+        assert!(matches.is_empty());
+    }
+
+    #[test]
+    fn test_command_history_get() {
+        let mut history = CommandHistory::new();
+        history.add("cmd1".to_string());
+        history.add("cmd2".to_string());
+
+        assert_eq!(history.get(0), Some(&"cmd1".to_string()));
+        assert_eq!(history.get(1), Some(&"cmd2".to_string()));
+        assert_eq!(history.get(2), None);
     }
 }

@@ -81,6 +81,7 @@ Chain of Responsibility with 11 handlers. **Order enforced by `HandlerPosition` 
 | Modify mouse input handling | `src/terminal/events.rs` → mouse event handlers |
 | Modify throbber animation | `src/terminal/throbber.rs` (change `ANIMATION_INTERVAL_MS` constant) |
 | Modify LLM render loop | `src/orchestrators/natural_language.rs` (change `RENDER_INTERVAL_MS` constant) |
+| Modify reverse history search | `src/main.rs` → `handle_reverse_search_*()` methods; `src/terminal/tui.rs` → `REVERSE_SEARCH_PROMPT_FORMAT` |
 | Add package manager | `src/executor/package_manager.rs` |
 | Add shell confirmation | `src/orchestrators/command.rs` → `ConfirmationType` enum |
 | Handle multiline input (heredoc) | `src/input/multiline.rs` |
@@ -130,6 +131,18 @@ Tests are in `tests/` directory:
 
 ### History Expansion
 `!!` (previous cmd), `!$` (last arg), `!^` (first arg), `!*` (all args). Thread-safe via `Arc<RwLock<Vec<String>>>`. Uses get-second-to-last semantics (current input already in history when classified).
+
+### Reverse History Search
+Ctrl+R activates interactive bash-like reverse history search:
+- **Entry**: Press Ctrl+R to enter `ReverseHistorySearching` mode
+- **Search**: Type characters to search through history (case-insensitive)
+- **Cycle Matches**: Press Ctrl+R again to cycle through matches (most recent first)
+- **Accept Match**: Press Enter to accept current match into input buffer and return to Normal mode
+- **Modify Query**: Press Backspace to modify search query (matches recalculated with caching)
+- **Cancel Search**: Press Ctrl+C to cancel search and restore original input
+- **Disabled Keys**: Arrow keys, history navigation (Up/Down), and Tab completion are disabled during search to match bash behavior
+- **Prompt Format**: Shows `(reverse-i-search)'query': current-match` with animation support
+- **Performance**: Uses `ReverseSearchState` with cached matches vector to avoid O(N) search on every keystroke
 
 ### Aliases
 System files loaded first, then user files (`~/.bashrc`, `~/.bash_aliases`, `~/.zshrc`). Single-level expansion, O(1) lookup. `is_safe_alias()` rejects dangerous patterns. Runtime reload: `reload-aliases`.
@@ -225,7 +238,7 @@ See `.claude/skills/microsoft-rust-guidelines.md` for full details.
 `Command { command, args, original_input }`, `NaturalLanguage(String)`, `Empty`, `CommandTypo { input, suggestion, distance }`
 
 ### TerminalMode Enum
-`Normal` (default), `AwaitingCommandApproval` (shell confirmations like `rm -i`), `AwaitingLLMApproval` (LLM command execution), `AwaitingLLMQuestion` (LLM clarification), `AwaitingInput` (multiline heredoc).
+`Normal` (default), `AwaitingCommandApproval` (shell confirmations like `rm -i`), `AwaitingAnswer` (LLM clarification), `AwaitingMoreInput` (multiline heredoc), `ExecutingCommand` (running command), `WaitingLLM` (querying LLM), `PromptingInstall` (missing command install), `ReverseHistorySearching` (Ctrl+R reverse search mode).
 
 ### Output Scrolling & Scrollbar
 

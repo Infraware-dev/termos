@@ -68,6 +68,8 @@ impl EventHandler {
             (KeyCode::Char('c'), KeyModifiers::CONTROL) => TerminalEvent::CtrlC,
             // Ctrl+L - Clear screen
             (KeyCode::Char('l'), KeyModifiers::CONTROL) => TerminalEvent::ClearScreen,
+            // Ctrl+R - Reverse history search
+            (KeyCode::Char('r'), KeyModifiers::CONTROL) => TerminalEvent::ReverseHistorySearch,
 
             // Enter - Submit input
             (KeyCode::Enter, _) => TerminalEvent::Submit,
@@ -134,6 +136,8 @@ pub enum TerminalEvent {
     ClearScreen,
     /// Ctrl+C pressed - context-aware handler
     CtrlC,
+    /// Reverse history search (Ctrl+R)
+    ReverseHistorySearch,
     /// Quit application
     Quit,
     /// Terminal resized (width, height) - M2/M3 feature

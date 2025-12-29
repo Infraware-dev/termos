@@ -54,7 +54,8 @@ The codebase is feature-complete for M1 with 224 tests passing and zero clippy w
 - ✅ **LLM Integration**: Mock client ready, route natural language queries to AI backend
 - ✅ **Syntax Highlighting**: Code blocks with syntax highlighting (Rust, Python, Bash, JSON)
 - ✅ **Tab Completion**: Basic command and file path completion
-- ✅ **Command History**: Navigate previous commands with arrow keys
+- ✅ **Command History**: Navigate previous commands with arrow keys, reverse search with Ctrl+R
+- ✅ **Reverse History Search**: Interactive bash-like history search (Ctrl+R) with case-insensitive matching, cached search results, and match cycling
 - ✅ **Output Scrolling**: Full scrollbar with mouse wheel and click/drag support, smart auto-scroll to keep prompt visible on user input
 - ✅ **Cross-Platform**: Windows, macOS, and Linux support with platform-specific optimizations
 - ✅ **Benchmarking Suite**: Performance benchmarks for SCAN algorithm
@@ -247,16 +248,22 @@ Once running, you can:
 6. **Use aliases**: Type user-defined aliases from `~/.bashrc`, `~/.bash_aliases`, `~/.zshrc` (e.g., `ll` → expands to `ls -la`)
 7. **Ask questions**: Type natural language queries (e.g., "how do I list files?")
 8. **View history**: Type `history` to show all commands, or `history N` to show last N commands
-9. **Navigate history**: Use ↑/↓ arrow keys
-10. **Scroll output**: Navigate previous command output when it exceeds the visible area
+9. **Navigate history**: Use ↑/↓ arrow keys, or press Ctrl+R for reverse search
+10. **Reverse search history**: Press Ctrl+R to search interactively through command history
+    - Type characters to search (case-insensitive)
+    - Press Ctrl+R again to cycle to the next match (most recent first)
+    - Press Enter to accept the match
+    - Press Ctrl+C to cancel and restore your original input
+    - Press Backspace to modify the search query
+11. **Scroll output**: Navigate previous command output when it exceeds the visible area
     - **Mouse wheel**: Scroll up/down with scroll wheel
     - **Scrollbar clicks**: Click scrollbar track to jump, drag thumb to navigate, click arrows for line-by-line scroll
     - **Keyboard**: Ctrl+Home/End to jump to start/end of output, Page Up/Down to scroll (if implemented)
     - **Auto-scroll**: When you reach the bottom of output, typing a new command automatically scrolls to show the prompt
-11. **Tab completion**: Press Tab to complete commands/paths
-12. **Reload aliases**: Type `reload-aliases` to refresh aliases from config files (useful if editing `.bashrc` during a session)
-13. **Reload commands**: Type `reload-commands` to clear the command cache (useful after installing new commands during a session)
-14. **Quit**: Press Ctrl+C or type `exit`
+12. **Tab completion**: Press Tab to complete commands/paths
+13. **Reload aliases**: Type `reload-aliases` to refresh aliases from config files (useful if editing `.bashrc` during a session)
+14. **Reload commands**: Type `reload-commands` to clear the command cache (useful after installing new commands during a session)
+15. **Quit**: Press Ctrl+C or type `exit`
 
 #### Keyboard Shortcuts
 
@@ -270,6 +277,8 @@ Once running, you can:
 | **History Navigation** | | |
 | Previous command | ↑ | Navigate to previous command in history |
 | Next command | ↓ | Navigate to next command in history |
+| Reverse history search | Ctrl+R | Search through history interactively (bash-like) |
+| Cycle through matches | Ctrl+R | While searching, press again to cycle to next match |
 | **Output Scrolling** | | |
 | Scroll up | PageUp | Scroll output up one page |
 | Scroll down | PageDown | Scroll output down one page |
@@ -278,7 +287,7 @@ Once running, you can:
 | **Other** | | |
 | Tab completion | Tab | Complete command or file path |
 | Clear screen | Ctrl+L | Clear terminal output buffer |
-| Quit/Cancel | Ctrl+C | Context-aware: cancel operations or clear input |
+| Quit/Cancel | Ctrl+C | Context-aware: cancel operations, clear input, or exit reverse search |
 
 **Note**: The visual scrollbar appears on the right side of the output area when the content exceeds the visible space, showing your position in the output history.
 
