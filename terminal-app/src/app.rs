@@ -237,6 +237,8 @@ impl InfrawareApp {
                         for byte in bytes {
                             self.vte_parser.advance(&mut self.terminal_handler, byte);
                         }
+                        // Auto-scroll to bottom when new output arrives
+                        self.terminal_handler.grid_mut().scroll_to_bottom();
                     }
                     Err(mpsc::TryRecvError::Empty) => break,
                     Err(mpsc::TryRecvError::Disconnected) => {
@@ -656,29 +658,41 @@ impl InfrawareApp {
     /// Render terminal grid using custom paint.
     fn render_terminal(&mut self, ui: &mut egui::Ui) {
         let available = ui.available_size();
-        let grid = self.terminal_handler.grid();
-        let (rows, cols) = grid.size();
-        let cells = grid.cells();
-        let (cursor_row, cursor_col) = grid.cursor_position();
-        let cursor_visible = grid.cursor_visible();
 
         // Calculate character dimensions
         let font_id = FontId::new(14.0, FontFamily::Monospace);
 
-        // Allocate space for painting
+        // Allocate space for painting with scroll support
         let size = Vec2::new(available.x, available.y);
-        let (response, painter) = ui.allocate_painter(size, Sense::click());
+        let (response, painter) = ui.allocate_painter(size, Sense::click().union(Sense::drag()));
         let rect = response.rect;
+
+        // Handle mouse wheel scrolling
+        let scroll_delta = ui.input(|i| i.smooth_scroll_delta.y);
+        if scroll_delta != 0.0 {
+            let lines = (scroll_delta / self.char_height).round() as i32;
+            let grid = self.terminal_handler.grid_mut();
+            if lines > 0 {
+                grid.scroll_view_up(lines as usize);
+            } else if lines < 0 {
+                grid.scroll_view_down((-lines) as usize);
+            }
+        }
+
+        // Get grid info for rendering
+        let grid = self.terminal_handler.grid();
+        let (_rows, cols) = grid.size();
+        let visible_rows = grid.visible_rows();
+        let (cursor_row, cursor_col) = grid.cursor_position();
+        let cursor_visible = grid.cursor_visible();
+        let scroll_offset = grid.scroll_offset();
+        let max_scroll = grid.max_scroll_offset();
 
         // Fill background
         painter.rect_filled(rect, 0.0, self.theme.background);
 
-        // Render each cell
-        for (row_idx, row) in cells.iter().enumerate() {
-            if row_idx >= rows as usize {
-                break;
-            }
-
+        // Render each visible row (includes scrollback if scrolled up)
+        for (row_idx, row) in visible_rows.iter().enumerate() {
             for (col_idx, cell) in row.iter().enumerate() {
                 if col_idx >= cols as usize {
                     break;
@@ -758,8 +772,8 @@ impl InfrawareApp {
             }
         }
 
-        // Draw cursor (only after shell is initialized, with blink)
-        if cursor_visible && self.shell_initialized && self.cursor_blink_visible {
+        // Draw cursor (only when at bottom/live view, after shell init, with blink)
+        if cursor_visible && self.shell_initialized && self.cursor_blink_visible && scroll_offset == 0 {
             let cursor_x = rect.left() + cursor_col as f32 * self.char_width;
             let cursor_y = rect.top() + cursor_row as f32 * self.char_height;
 
@@ -769,6 +783,32 @@ impl InfrawareApp {
                 Vec2::new(2.0, self.char_height),
             );
             painter.rect_filled(bar_rect, 0.0, self.theme.cursor);
+        }
+
+        // Draw scrollbar if there's scrollback content
+        if max_scroll > 0 {
+            let scrollbar_width = 8.0;
+            let scrollbar_x = rect.right() - scrollbar_width - 2.0;
+
+            // Calculate thumb position and size
+            let total_lines = max_scroll + visible_rows.len();
+            let thumb_height = (visible_rows.len() as f32 / total_lines as f32 * rect.height()).max(20.0);
+            let scroll_range = rect.height() - thumb_height;
+            let thumb_y = rect.top() + (1.0 - scroll_offset as f32 / max_scroll as f32) * scroll_range;
+
+            // Draw scrollbar track
+            let track_rect = Rect::from_min_size(
+                Pos2::new(scrollbar_x, rect.top()),
+                Vec2::new(scrollbar_width, rect.height()),
+            );
+            painter.rect_filled(track_rect, 4.0, Color32::from_gray(40));
+
+            // Draw scrollbar thumb
+            let thumb_rect = Rect::from_min_size(
+                Pos2::new(scrollbar_x, thumb_y),
+                Vec2::new(scrollbar_width, thumb_height),
+            );
+            painter.rect_filled(thumb_rect, 4.0, Color32::from_gray(100));
         }
     }
 }
