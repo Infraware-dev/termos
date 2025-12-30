@@ -199,10 +199,14 @@ impl InfrawareApp {
         self.shell_initialized = true;
 
         // Clear the terminal and set custom PS1 with colors
-        // \e[32m = green, \e[0m = reset
+        // \e[32m = green, \e[1;31m = bold red, \e[0m = reset
         // Format: |~| (green) user@host:path$ (reset)
+        // Alias sudo to pass red PS1 into root shell (workaround for env reset)
         let init_commands = concat!(
-            "export PS1='\\[\\e[32m\\]|~| \\u@\\h:\\w\\$\\[\\e[0m\\] '\n",
+            // PS1 verde per utente normale
+            "export PS1='\\[\\e[32m\\]|~| \\u@\\h:\\w\\$ \\[\\e[0m\\]'\n",
+            // Alias sudo che trasporta PS1 rosso nella shell root
+            "alias sudo='sudo PS1=\"\\[\\e[1;31m\\]|~| \\u@\\h:\\w# \\[\\e[0m\\]\"'\n",
             "clear\n"
         );
 
