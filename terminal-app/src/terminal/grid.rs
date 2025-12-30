@@ -434,12 +434,16 @@ impl TerminalGrid {
                 self.erase_line(1);
             }
             2 | 3 => {
-                // Erase entire screen
+                // Erase entire screen and scrollback
+                // Mode 2: erase screen (we also clear scrollback for better UX)
+                // Mode 3: erase screen + scrollback (xterm extension)
                 for row in &mut self.cells {
                     for cell in row.iter_mut() {
                         cell.reset();
                     }
                 }
+                self.scrollback.clear();
+                self.scroll_offset = 0;
             }
             _ => {}
         }
