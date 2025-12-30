@@ -78,6 +78,14 @@ pub struct InfrawareApp {
     /// Last cursor blink toggle time
     last_cursor_blink: Instant,
 
+    /// Bytes read in current second (for rate limiting heavy output like cat /dev/zero)
+    output_bytes_this_second: usize,
+
+    /// Start of current rate limit window
+    rate_limit_window_start: Instant,
+
+    /// When set, pause output reading to let kernel process Ctrl+C
+    output_pause_until: Option<Instant>,
 }
 
 impl std::fmt::Debug for InfrawareApp {
@@ -108,7 +116,10 @@ impl InfrawareApp {
                     let writer = manager.take_writer().await.ok();
                     let reader = manager.take_reader().await.ok();
 
-                    let (tx, rx) = mpsc::channel();
+                    // Use sync_channel with limited capacity for BACKPRESSURE
+                    // When channel is full, I/O thread blocks -> kernel buffer fills ->
+                    // cat blocks on write() -> kernel can process Ctrl+C
+                    let (tx, rx) = mpsc::sync_channel(4);
 
                     if let Some(mut pty_reader) = reader {
                         std::thread::spawn(move || {
@@ -120,6 +131,7 @@ impl InfrawareApp {
                                         .await
                                     {
                                         Ok(data) if !data.is_empty() => {
+                                            // This will BLOCK if channel is full - creating backpressure
                                             if tx.send(data).is_err() {
                                                 break;
                                             }
@@ -167,6 +179,9 @@ impl InfrawareApp {
             startup_time: Instant::now(),
             cursor_blink_visible: true,
             last_cursor_blink: Instant::now(),
+            output_bytes_this_second: 0,
+            rate_limit_window_start: Instant::now(),
+            output_pause_until: None,
         }
     }
 
@@ -196,16 +211,22 @@ impl InfrawareApp {
     }
 
     /// Poll PTY output and feed to VTE parser.
-    /// Limited to MAX_BYTES_PER_FRAME to keep UI responsive during heavy output.
+    /// Rate-limited to allow Ctrl+C to work even with heavy output (cat /dev/zero).
     fn poll_pty_output(&mut self) {
-        // Limit bytes per frame to ensure keyboard input remains responsive
-        // With cat /dev/zero, unlimited processing would starve input handling
-        const MAX_BYTES_PER_FRAME: usize = 16384; // 16KB per frame (~1MB/s at 60fps)
+        const MAX_BYTES_PER_FRAME: usize = 16384; // 16KB per frame
+
+        // If paused (after Ctrl+C), skip reading to let kernel process input
+        if let Some(until) = self.output_pause_until {
+            if Instant::now() < until {
+                return;
+            }
+            self.output_pause_until = None;
+        }
+
         let mut bytes_processed = 0;
 
         if let Some(ref rx) = self.pty_output_rx {
             loop {
-                // Stop if we've processed enough this frame
                 if bytes_processed >= MAX_BYTES_PER_FRAME {
                     break;
                 }
@@ -213,17 +234,12 @@ impl InfrawareApp {
                 match rx.try_recv() {
                     Ok(bytes) => {
                         bytes_processed += bytes.len();
-                        // Feed each byte to the VTE parser
                         for byte in bytes {
                             self.vte_parser.advance(&mut self.terminal_handler, byte);
                         }
                     }
-                    Err(mpsc::TryRecvError::Empty) => {
-                        // No more data available right now
-                        break;
-                    }
+                    Err(mpsc::TryRecvError::Empty) => break,
                     Err(mpsc::TryRecvError::Disconnected) => {
-                        // Shell exited - quit the application
                         log::info!("Shell exited, quitting application");
                         self.should_quit = true;
                         break;
@@ -231,6 +247,8 @@ impl InfrawareApp {
                 }
             }
         }
+
+        self.output_bytes_this_second += bytes_processed;
     }
 
     /// Send data to PTY synchronously (ensures immediate delivery).
@@ -262,6 +280,19 @@ impl InfrawareApp {
                 }
             } else {
                 log::warn!("Could not lock PTY manager for SIGINT, will retry next frame");
+            }
+        }
+    }
+
+    /// Send SIGINT to the foreground process group.
+    /// Uses the existing send_sigint in PtyManager which reads tpgid from /proc.
+    fn send_sigint_to_foreground(&self) {
+        if let Some(ref manager) = self.pty_manager {
+            if let Ok(mgr) = manager.try_lock() {
+                log::info!("Sending SIGINT to foreground process group");
+                if let Err(e) = mgr.send_sigint() {
+                    log::error!("Failed to send SIGINT: {}", e);
+                }
             }
         }
     }
@@ -398,7 +429,8 @@ impl InfrawareApp {
         // Handle Ctrl key if detected
         if let Some(byte) = ctrl_bytes {
             if byte == 0xFF {
-                // Ctrl+C: just send ETX to PTY like a real terminal
+                // Ctrl+C: just send ETX to PTY
+                // Backpressure from sync_channel ensures kernel can process it
                 log::info!("Ctrl+C detected, sending ETX (0x03) to PTY");
                 self.send_to_pty(&[0x03]);
             } else {
@@ -408,16 +440,10 @@ impl InfrawareApp {
             return;
         }
 
-        // Fallback: also try the old method in case events don't work
+        // Fallback for other Ctrl keys via key_pressed
         ctx.input(|i| {
-            // Handle Ctrl combinations first
             if i.modifiers.ctrl {
-                if i.key_pressed(Key::C) {
-                    // Send SIGINT directly to process (bypasses blocked PTY)
-                    log::info!("Ctrl+C via key_pressed fallback, sending SIGINT");
-                    self.send_sigint();
-                    return;
-                }
+                // Note: Ctrl+C is handled above via event iteration
                 if i.key_pressed(Key::D) {
                     self.send_to_pty(&[0x04]);
                     return;
