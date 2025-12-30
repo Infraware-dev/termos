@@ -13,10 +13,22 @@ mod ui;
 
 use app::InfrawareApp;
 use eframe::egui::ViewportBuilder;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Global flag set when SIGINT (Ctrl+C) is received from the system
+pub static SIGINT_RECEIVED: AtomicBool = AtomicBool::new(false);
 
 fn main() -> eframe::Result<()> {
     // Initialize logging
     env_logger::init();
+
+    // Set up Ctrl+C handler - intercepts SIGINT and sets flag
+    // This works even when egui doesn't receive the key event
+    ctrlc::set_handler(|| {
+        log::info!("SIGINT received from system");
+        SIGINT_RECEIVED.store(true, Ordering::SeqCst);
+    })
+    .expect("Error setting Ctrl+C handler");
 
     // Window options
     let options = eframe::NativeOptions {

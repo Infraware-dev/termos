@@ -196,11 +196,23 @@ impl InfrawareApp {
     }
 
     /// Poll PTY output and feed to VTE parser.
+    /// Limited to MAX_BYTES_PER_FRAME to keep UI responsive during heavy output.
     fn poll_pty_output(&mut self) {
+        // Limit bytes per frame to ensure keyboard input remains responsive
+        // With cat /dev/zero, unlimited processing would starve input handling
+        const MAX_BYTES_PER_FRAME: usize = 16384; // 16KB per frame (~1MB/s at 60fps)
+        let mut bytes_processed = 0;
+
         if let Some(ref rx) = self.pty_output_rx {
             loop {
+                // Stop if we've processed enough this frame
+                if bytes_processed >= MAX_BYTES_PER_FRAME {
+                    break;
+                }
+
                 match rx.try_recv() {
                     Ok(bytes) => {
+                        bytes_processed += bytes.len();
                         // Feed each byte to the VTE parser
                         for byte in bytes {
                             self.vte_parser.advance(&mut self.terminal_handler, byte);
@@ -237,6 +249,21 @@ impl InfrawareApp {
     /// Send string to PTY.
     fn send_string_to_pty(&self, s: &str) {
         self.send_to_pty(s.as_bytes());
+    }
+
+    /// Send SIGINT to the foreground process group (non-blocking).
+    /// This bypasses PTY buffers and directly signals the process.
+    fn send_sigint(&self) {
+        if let Some(ref manager) = self.pty_manager {
+            // Use try_lock to avoid blocking - if locked, skip this frame
+            if let Ok(mgr) = manager.try_lock() {
+                if let Err(e) = mgr.send_sigint() {
+                    log::error!("Failed to send SIGINT: {}", e);
+                }
+            } else {
+                log::warn!("Could not lock PTY manager for SIGINT, will retry next frame");
+            }
+        }
     }
 
     /// Resize PTY to match window size.
@@ -340,33 +367,44 @@ impl InfrawareApp {
                         key, pressed, modifiers.ctrl, modifiers.alt, modifiers.shift);
                 }
 
-                // Handle Ctrl combinations on EITHER press or release
-                // Linux/X11 often only sends the release event for Ctrl+C
-                if let egui::Event::Key { key, modifiers, .. } = event {
+                // Handle Ctrl combinations - Ctrl+C accepts EITHER press OR release
+                // because Linux/X11/Wayland often only sends release for Ctrl+C
+                if let egui::Event::Key { key, pressed, modifiers, .. } = event {
                     if modifiers.ctrl && ctrl_bytes.is_none() {
-                        log::info!("Ctrl+{:?} detected via event iteration", key);
-                        ctrl_bytes = match key {
-                            Key::C => Some(0x03), // SIGINT
-                            Key::D => Some(0x04), // EOF
-                            Key::L => Some(0x0C), // Clear screen
-                            Key::A => Some(0x01), // Beginning of line
-                            Key::E => Some(0x05), // End of line
-                            Key::K => Some(0x0B), // Kill to end of line
-                            Key::U => Some(0x15), // Kill to beginning of line
-                            Key::W => Some(0x17), // Delete word backward
-                            Key::R => Some(0x12), // Reverse search
-                            Key::Z => Some(0x1A), // Suspend
-                            _ => None,
-                        };
+                        // Ctrl+C: accept either press or release (Linux quirk)
+                        // Other Ctrl keys: only accept press to avoid double-fire
+                        let is_ctrl_c = *key == Key::C;
+                        if is_ctrl_c || *pressed {
+                            log::info!("Ctrl+{:?} detected (pressed={})", key, pressed);
+                            ctrl_bytes = match key {
+                                Key::C => Some(0xFF), // Special marker for SIGINT
+                                Key::D => Some(0x04), // EOF
+                                Key::L => Some(0x0C), // Clear screen
+                                Key::A => Some(0x01), // Beginning of line
+                                Key::E => Some(0x05), // End of line
+                                Key::K => Some(0x0B), // Kill to end of line
+                                Key::U => Some(0x15), // Kill to beginning of line
+                                Key::W => Some(0x17), // Delete word backward
+                                Key::R => Some(0x12), // Reverse search
+                                Key::Z => Some(0x1A), // Suspend
+                                _ => None,
+                            };
+                        }
                     }
                 }
             }
         });
 
-        // Send the Ctrl byte if detected
+        // Handle Ctrl key if detected
         if let Some(byte) = ctrl_bytes {
-            log::info!("Sending Ctrl byte 0x{:02X} to PTY", byte);
-            self.send_to_pty(&[byte]);
+            if byte == 0xFF {
+                // Ctrl+C: just send ETX to PTY like a real terminal
+                log::info!("Ctrl+C detected, sending ETX (0x03) to PTY");
+                self.send_to_pty(&[0x03]);
+            } else {
+                log::info!("Sending Ctrl byte 0x{:02X} to PTY", byte);
+                self.send_to_pty(&[byte]);
+            }
             return;
         }
 
@@ -375,9 +413,9 @@ impl InfrawareApp {
             // Handle Ctrl combinations first
             if i.modifiers.ctrl {
                 if i.key_pressed(Key::C) {
-                    // Send ETX (0x03) - bash will echo ^C and show new prompt
-                    log::info!("Ctrl+C via key_pressed fallback, sending 0x03 to PTY");
-                    self.send_to_pty(&[0x03]);
+                    // Send SIGINT directly to process (bypasses blocked PTY)
+                    log::info!("Ctrl+C via key_pressed fallback, sending SIGINT");
+                    self.send_sigint();
                     return;
                 }
                 if i.key_pressed(Key::D) {
@@ -729,7 +767,17 @@ impl eframe::App for InfrawareApp {
             self.last_cursor_blink = Instant::now();
         }
 
-        // Poll PTY output and feed to VTE parser
+        // Check for SIGINT (Ctrl+C) from system signal handler
+        // This works even when egui doesn't receive the key event
+        if crate::SIGINT_RECEIVED.swap(false, std::sync::atomic::Ordering::SeqCst) {
+            log::info!("System SIGINT received, sending to process group");
+            self.send_sigint();
+        }
+
+        // Handle keyboard FIRST - ensures Ctrl+C works even during heavy output
+        self.handle_keyboard(ctx);
+
+        // Poll PTY output and feed to VTE parser (limited per frame)
         self.poll_pty_output();
 
         // Initialize shell with custom prompt after startup delay
@@ -739,9 +787,6 @@ impl eframe::App for InfrawareApp {
         if self.mode == AppMode::WaitingLLM {
             self.poll_llm_response();
         }
-
-        // Handle keyboard
-        self.handle_keyboard(ctx);
 
         // Render UI
         egui::CentralPanel::default()

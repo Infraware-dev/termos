@@ -108,4 +108,10 @@ impl PtyManager {
     pub async fn kill(&self) -> Result<()> {
         self.session.kill().await
     }
+
+    /// Send SIGINT to the shell's process group (non-blocking).
+    /// This interrupts the foreground process without waiting for PTY buffers.
+    pub fn send_sigint(&self) -> Result<()> {
+        self.session.send_sigint()
+    }
 }

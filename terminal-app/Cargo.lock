@@ -1386,6 +1386,7 @@ dependencies = [
  "hostname",
  "libc",
  "log",
+ "nix 0.30.1",
  "portable-pty",
  "reqwest",
  "serde",

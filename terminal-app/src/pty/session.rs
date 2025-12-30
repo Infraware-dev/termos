@@ -193,6 +193,102 @@ impl PtySession {
         let child = self.child.lock().await;
         child.process_id()
     }
+
+    /// Send SIGINT to the foreground process group.
+    /// Uses tcgetpgrp() on the PTY master to get the correct foreground group,
+    /// which may differ from the shell's process group.
+    #[cfg(unix)]
+    pub fn send_sigint(&self) -> Result<()> {
+        use nix::sys::signal::{kill, Signal};
+        use nix::unistd::{tcgetpgrp, Pid};
+        use std::os::fd::BorrowedFd;
+
+        // First try to get the foreground process group via portable_pty's method
+        let fg_pgid = {
+            match self.master.try_lock() {
+                Ok(master) => {
+                    // Try process_group_leader() first (portable_pty's method)
+                    if let Some(leader) = master.process_group_leader() {
+                        log::debug!("process_group_leader() returned: {}", leader);
+                        Some(Pid::from_raw(leader as i32))
+                    } else {
+                        // Fallback to tcgetpgrp via raw fd
+                        let raw_fd = master.as_raw_fd();
+                        log::debug!("PTY master as_raw_fd() returned: {:?}", raw_fd);
+                        raw_fd.and_then(|fd| {
+                            let borrowed = unsafe { BorrowedFd::borrow_raw(fd) };
+                            match tcgetpgrp(borrowed) {
+                                Ok(pgid) => {
+                                    log::debug!("tcgetpgrp({}) returned pgid={}", fd, pgid);
+                                    Some(pgid)
+                                }
+                                Err(e) => {
+                                    log::warn!("tcgetpgrp({}) failed: {}", fd, e);
+                                    None
+                                }
+                            }
+                        })
+                    }
+                }
+                Err(_) => None,
+            }
+        };
+
+        if let Some(pgid) = fg_pgid {
+            log::info!("Sending SIGINT to foreground process group {} (via tcgetpgrp)", pgid);
+            kill(Pid::from_raw(-(pgid.as_raw())), Signal::SIGINT)
+                .context("Failed to send SIGINT to foreground process group")?;
+            return Ok(());
+        }
+
+        // Fallback: try to get foreground pgid from /proc/<pid>/stat
+        let shell_pid = {
+            match self.child.try_lock() {
+                Ok(child) => child.process_id(),
+                Err(_) => {
+                    log::warn!("Could not lock child to get PID, skipping SIGINT");
+                    return Ok(());
+                }
+            }
+        };
+
+        if let Some(pid) = shell_pid {
+            // Try to read foreground pgid from /proc/<pid>/stat (field 8 is tpgid)
+            if let Ok(stat) = std::fs::read_to_string(format!("/proc/{}/stat", pid)) {
+                // Format: pid (comm) state ppid pgrp session tty_nr tpgid ...
+                // Find closing paren of comm field (comm can contain spaces)
+                if let Some(comm_end) = stat.rfind(')') {
+                    let after_comm = &stat[comm_end + 1..];
+                    let fields: Vec<&str> = after_comm.split_whitespace().collect();
+                    // After comm: state(0) ppid(1) pgrp(2) session(3) tty_nr(4) tpgid(5)
+                    if fields.len() > 5 {
+                        if let Ok(tpgid) = fields[5].parse::<i32>() {
+                            if tpgid > 0 {
+                                log::info!("Sending SIGINT to foreground pgid {} (from /proc)", tpgid);
+                                kill(Pid::from_raw(-tpgid), Signal::SIGINT)
+                                    .context("Failed to send SIGINT to foreground pgid")?;
+                                return Ok(());
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Ultimate fallback: send to shell's process group
+            let pgid = Pid::from_raw(-(pid as i32));
+            log::info!("Sending SIGINT to shell process group {} (ultimate fallback)", pid);
+            kill(pgid, Signal::SIGINT).context("Failed to send SIGINT to process group")?;
+        }
+        Ok(())
+    }
+
+    #[cfg(not(unix))]
+    pub fn send_sigint(&self) -> Result<()> {
+        // On non-Unix, fall back to kill
+        log::warn!("SIGINT not supported on this platform, using kill");
+        // Can't use async here, so just log warning
+        Ok(())
+    }
 }
 
 #[cfg(test)]

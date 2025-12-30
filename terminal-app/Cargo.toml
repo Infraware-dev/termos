@@ -49,6 +49,7 @@ which = "8.0"
 hostname = "0.4"
 vte = "0.13"
 ctrlc = { version = "3.5.1", features = ["termination"] }
+nix = { version = "0.30.1", features = ["signal", "term", "process"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
