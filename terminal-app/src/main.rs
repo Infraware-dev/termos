@@ -8,6 +8,7 @@ mod app;
 mod llm;
 mod pty;
 mod state;
+mod terminal;
 mod ui;
 
 use app::InfrawareApp;

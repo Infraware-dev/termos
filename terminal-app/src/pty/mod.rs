@@ -91,6 +91,12 @@ impl Pty {
         builder.env("COLUMNS", size.cols.to_string());
         builder.env("LINES", size.rows.to_string());
 
+        // Set custom prompt with |~| prefix
+        // Format: |~| user@host:path$
+        builder.env("PS1", "|~| \\u@\\h:\\w\\$ ");
+        // Also set PROMPT for zsh
+        builder.env("PROMPT", "|~| %n@%m:%~%# ");
+
         let child = pair.slave.spawn_command(builder)?;
 
         Ok(PtySession::new(pair, child))

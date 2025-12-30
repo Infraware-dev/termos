@@ -99,11 +99,15 @@ impl PtyReader {
     }
 
     /// Read with timeout - waits up to the specified duration for data.
+    /// Returns error if the channel is closed (shell exited).
     pub async fn read_with_timeout(&mut self, timeout: std::time::Duration) -> Result<Vec<u8>> {
         match tokio::time::timeout(timeout, self.receiver.recv()).await {
             Ok(Some(data)) => Ok(data),
-            Ok(None) => Ok(Vec::new()), // Channel closed
-            Err(_) => Ok(Vec::new()),   // Timeout
+            Ok(None) => {
+                // Channel closed - shell exited
+                anyhow::bail!("PTY channel closed - shell exited")
+            }
+            Err(_) => Ok(Vec::new()), // Timeout - no data yet
         }
     }
 
