@@ -86,6 +86,9 @@ pub struct InfrawareApp {
 
     /// When set, pause output reading to let kernel process Ctrl+C
     output_pause_until: Option<Instant>,
+
+    /// Track window focus state to detect focus gain
+    had_window_focus: bool,
 }
 
 impl std::fmt::Debug for InfrawareApp {
@@ -182,6 +185,7 @@ impl InfrawareApp {
             output_bytes_this_second: 0,
             rate_limit_window_start: Instant::now(),
             output_pause_until: None,
+            had_window_focus: false,
         }
     }
 
@@ -198,17 +202,11 @@ impl InfrawareApp {
 
         self.shell_initialized = true;
 
-        // Clear the terminal and set custom PS1 with colors
-        // \e[32m = green, \e[1;31m = bold red, \e[0m = reset
-        // Format: |~| (green) user@host:path$ (reset)
-        // Alias sudo to pass red PS1 into root shell (workaround for env reset)
-        let init_commands = concat!(
-            // PS1 verde per utente normale
-            "export PS1='\\[\\e[32m\\]|~| \\u@\\h:\\w\\$ \\[\\e[0m\\]'\n",
-            // Alias sudo che trasporta PS1 rosso nella shell root
-            "alias sudo='sudo PS1=\"\\[\\e[1;31m\\]|~| \\u@\\h:\\w# \\[\\e[0m\\]\"'\n",
-            "clear\n"
-        );
+        // Set custom prompt with |~| prefix (green)
+        let init_commands = r#"
+export PS1='\[\e[32m\]|~| \u@\h:\w\$ \[\e[0m\] '
+clear
+"#;
 
         self.send_to_pty(init_commands.as_bytes());
         log::info!("Shell initialized with custom prompt");
@@ -238,9 +236,8 @@ impl InfrawareApp {
                 match rx.try_recv() {
                     Ok(bytes) => {
                         bytes_processed += bytes.len();
-                        for byte in bytes {
-                            self.vte_parser.advance(&mut self.terminal_handler, byte);
-                        }
+                        // VTE 0.15+ takes &[u8] slice instead of single byte
+                        self.vte_parser.advance(&mut self.terminal_handler, &bytes);
                         // Auto-scroll to bottom when new output arrives
                         self.terminal_handler.grid_mut().scroll_to_bottom();
                     }
@@ -349,9 +346,7 @@ impl InfrawareApp {
                     Ok(LLMQueryResult::Complete(response)) => {
                         // Send LLM response to terminal as output
                         let output = format!("\r\n{}\r\n", response);
-                        for byte in output.bytes() {
-                            self.vte_parser.advance(&mut self.terminal_handler, byte);
-                        }
+                        self.vte_parser.advance(&mut self.terminal_handler, output.as_bytes());
                         self.mode = AppMode::Normal;
                     }
                     Ok(LLMQueryResult::CommandApproval { command, message }) => {
@@ -359,9 +354,7 @@ impl InfrawareApp {
                             "\r\n{}\r\n    command: {}\r\n    Execute? (y/n): ",
                             message, command
                         );
-                        for byte in output.bytes() {
-                            self.vte_parser.advance(&mut self.terminal_handler, byte);
-                        }
+                        self.vte_parser.advance(&mut self.terminal_handler, output.as_bytes());
                         self.pending_approval = Some(command.clone());
                         self.mode = AppMode::AwaitingApproval { command, message };
                     }
@@ -372,16 +365,12 @@ impl InfrawareApp {
                                 output.push_str(&format!("  {}: {}\r\n", i + 1, opt));
                             }
                         }
-                        for byte in output.bytes() {
-                            self.vte_parser.advance(&mut self.terminal_handler, byte);
-                        }
+                        self.vte_parser.advance(&mut self.terminal_handler, output.as_bytes());
                         self.mode = AppMode::AwaitingAnswer { question, options };
                     }
                     Err(e) => {
                         let output = format!("\r\nError: {}\r\n", e);
-                        for byte in output.bytes() {
-                            self.vte_parser.advance(&mut self.terminal_handler, byte);
-                        }
+                        self.vte_parser.advance(&mut self.terminal_handler, output.as_bytes());
                         self.mode = AppMode::Normal;
                     }
                 }
@@ -666,10 +655,18 @@ impl InfrawareApp {
         // Calculate character dimensions
         let font_id = FontId::new(14.0, FontFamily::Monospace);
 
+        // Use fixed ID for terminal to enable focus from update()
+        let terminal_id = egui::Id::new("terminal_main_area");
+
         // Allocate space for painting with scroll support
         let size = Vec2::new(available.x, available.y);
         let (response, painter) = ui.allocate_painter(size, Sense::click().union(Sense::drag()));
         let rect = response.rect;
+
+        // Request keyboard focus when terminal is clicked
+        if response.clicked() {
+            ui.memory_mut(|mem| mem.request_focus(terminal_id));
+        }
 
         // Handle mouse wheel scrolling
         let scroll_delta = ui.input(|i| i.smooth_scroll_delta.y);
@@ -786,7 +783,11 @@ impl InfrawareApp {
                 Pos2::new(cursor_x, cursor_y),
                 Vec2::new(2.0, self.char_height),
             );
-            painter.rect_filled(bar_rect, 0.0, self.theme.cursor);
+
+            // Only draw cursor when window is focused
+            if ui.input(|i| i.focused) {
+                painter.rect_filled(bar_rect, 0.0, self.theme.cursor);
+            }
         }
 
         // Draw scrollbar if there's scrollback content
@@ -819,11 +820,28 @@ impl InfrawareApp {
 
 impl eframe::App for InfrawareApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Apply theme once
+        // Apply theme once on startup
         if !self.theme_applied {
             self.theme.apply(ctx);
             self.theme_applied = true;
         }
+
+        // Handle window focus - request terminal focus when window becomes active
+        let has_focus = ctx.input(|i| i.focused);
+        let terminal_id = egui::Id::new("terminal_main_area");
+
+        if has_focus && !self.had_window_focus {
+            // Window just gained focus - force egui to focus the terminal widget
+            ctx.memory_mut(|mem| mem.request_focus(terminal_id));
+        }
+
+        // If window has focus but terminal doesn't, claim it
+        // This ensures keyboard input always goes to the terminal
+        if has_focus && !ctx.memory(|mem| mem.has_focus(terminal_id)) {
+            ctx.memory_mut(|mem| mem.request_focus(terminal_id));
+        }
+
+        self.had_window_focus = has_focus;
 
         // Check for quit
         if self.should_quit {
@@ -831,10 +849,15 @@ impl eframe::App for InfrawareApp {
             return;
         }
 
-        // Update cursor blink (530ms interval like typical terminals)
-        if self.last_cursor_blink.elapsed() > Duration::from_millis(530) {
-            self.cursor_blink_visible = !self.cursor_blink_visible;
-            self.last_cursor_blink = Instant::now();
+        // Update cursor blink only when window has focus (530ms interval)
+        if has_focus {
+            if self.last_cursor_blink.elapsed() > Duration::from_millis(530) {
+                self.cursor_blink_visible = !self.cursor_blink_visible;
+                self.last_cursor_blink = Instant::now();
+            }
+        } else {
+            // When unfocused, keep cursor visible but static (will render as hollow)
+            self.cursor_blink_visible = true;
         }
 
         // Check for SIGINT (Ctrl+C) from system signal handler
@@ -860,7 +883,7 @@ impl eframe::App for InfrawareApp {
 
         // Render UI
         egui::CentralPanel::default()
-            .frame(egui::Frame::none().fill(self.theme.background))
+            .frame(egui::Frame::NONE.fill(self.theme.background))
             .show(ctx, |ui| {
                 // Calculate terminal size based on available space
                 let available = ui.available_size();
