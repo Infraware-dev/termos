@@ -44,13 +44,15 @@ cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info
 
 ```
 User Input → Alias Expansion → InputClassifier → [Command | NaturalLanguage]
-                              (11-handler chain)      ↓            ↓
+                              (10-handler chain)      ↓            ↓
                                                CommandExecutor  LLMClient
+                                                    ↓
+                                              PTY (ssh, tmux, REPLs)
 ```
 
 ### SCAN Algorithm (Shell-Command And Natural-language)
 
-Chain of Responsibility with 11 handlers. **Order enforced by `HandlerPosition` enum** - do not reorder without understanding performance implications (fast paths first).
+Chain of Responsibility with 10 handlers. **Order enforced by `HandlerPosition` enum** - do not reorder without understanding performance implications (fast paths first).
 
 | Position | Handler | Target Time |
 |----------|---------|-------------|
@@ -59,20 +61,19 @@ Chain of Responsibility with 11 handlers. **Order enforced by `HandlerPosition` 
 | 3 | ApplicationBuiltinHandler (cd, clear, exit, jobs, history) | <1μs |
 | 4 | ShellBuiltinHandler (45+ builtins) | <1μs |
 | 5 | PathCommandHandler (./script, /usr/bin/cmd, `&` suffix) | ~10μs |
-| 6 | KnownCommandHandler (60+ DevOps commands + cache) | <1μs hit |
-| 7 | PathDiscoveryHandler (newly installed commands) | 1-5ms |
-| 8 | CommandSyntaxHandler (flags, pipes, redirects) | ~10μs |
-| 9 | TypoDetectionHandler (Levenshtein ≤2, disabled) | ~100μs |
-| 10 | NaturalLanguageHandler (universal patterns) | <5μs |
-| 11 | DefaultHandler (LLM fallback) | <1μs |
+| 6 | PathDiscoveryHandler (commands in PATH + cache) | 1-5ms miss, <1μs hit |
+| 7 | CommandSyntaxHandler (flags, pipes, redirects) | ~10μs |
+| 8 | TypoDetectionHandler (Levenshtein ≤2, disabled) | ~100μs |
+| 9 | NaturalLanguageHandler (universal patterns) | <5μs |
+| 10 | DefaultHandler (LLM fallback) | <1μs |
 
 ### Quick Reference: Where to Find X
 
 | Task | Location |
 |------|----------|
-| Add known command | `src/input/known_commands.rs` |
 | Add app builtin | `src/input/application_builtins.rs` |
 | Add shell builtin | `src/input/shell_builtins.rs` |
+| Add PTY-required command | `src/pty/mod.rs` → `REQUIRES_PTY` array |
 | Add keyboard shortcut | `src/terminal/events.rs` → `EventHandler::map_key_event()` |
 | Add terminal event | `src/terminal/events.rs` → `TerminalEvent` enum |
 | Modify TUI rendering | `src/terminal/tui.rs` |
@@ -98,6 +99,7 @@ Chain of Responsibility with 11 handlers. **Order enforced by `HandlerPosition` 
 | `input/` | SCAN: `classifier.rs` (coordinator), `handler.rs` (chain), `patterns.rs` (regex), `multiline.rs` (heredoc) |
 | `executor/` | Execution: `command.rs` (async batch), `job_manager.rs` (background `&`) |
 | `orchestrators/` | Workflows: `command.rs`, `natural_language.rs`, `tab_completion.rs`, `hitl.rs` (human-in-the-loop) |
+| `pty/` | PTY support: `mod.rs` (PTY wrapper + REQUIRES_PTY list), `session.rs` (session management), `io.rs` (async I/O) |
 | `llm/` | LLM: `client.rs` (Mock/HTTP with HITL), `renderer.rs` (syntax highlighting) |
 | `auth/` | Auth: `authenticator.rs`, `config.rs`, `models.rs` |
 | `config/` | Config: `language.rs` (multilingual patterns from TOML) |
@@ -238,7 +240,7 @@ See `.claude/skills/microsoft-rust-guidelines.md` for full details.
 `Command { command, args, original_input }`, `NaturalLanguage(String)`, `Empty`, `CommandTypo { input, suggestion, distance }`
 
 ### TerminalMode Enum
-`Normal` (default), `AwaitingCommandApproval` (shell confirmations like `rm -i`), `AwaitingAnswer` (LLM clarification), `AwaitingMoreInput` (multiline heredoc), `ExecutingCommand` (running command), `WaitingLLM` (querying LLM), `PromptingInstall` (missing command install), `ReverseHistorySearching` (Ctrl+R reverse search mode).
+`Normal` (default), `ExecutingCommand` (running shell command), `WaitingLLM` (querying LLM), `PromptingInstall` (M2/M3 auto-install), `AwaitingCommandApproval` (HITL: y/n for LLM command, also shell confirmations like `rm -i`), `AwaitingAnswer` (HITL: free text for LLM question), `AwaitingMoreInput(IncompleteReason)` (multiline heredoc), `ReverseHistorySearching` (Ctrl+R search).
 
 ### Output Scrolling & Scrollbar
 

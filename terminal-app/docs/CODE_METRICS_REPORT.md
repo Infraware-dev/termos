@@ -49,7 +49,7 @@
 ### Module-Level Analysis
 
 **Input Module** (3,800 LOC):
-- **Purpose**: SCAN algorithm implementation (11-handler chain)
+- **Purpose**: SCAN algorithm implementation (10-handler chain)
 - **Key Files**: `classifier.rs` (11 functions), `handler.rs` (54 functions)
 - **Complexity**: Medium-High due to pattern matching and heuristics
 - **Comment Ratio**: ~20% (good documentation)
@@ -335,7 +335,7 @@ The method follows a **clear guard clause pattern** where each condition is a se
 ### Design Patterns Identified
 
 1. **Chain of Responsibility** (input/handler.rs)
-   - **Implementation**: 11 handlers in position-enforced chain
+   - **Implementation**: 10 handlers in position-enforced chain
    - **Quality**: Excellent - HandlerPosition enum prevents reordering
    - **Benefit**: Fast-path optimization (EmptyInputHandler <1μs)
 
