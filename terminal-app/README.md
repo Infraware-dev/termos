@@ -33,7 +33,7 @@ The codebase is feature-complete for M1 with 224 tests passing and zero clippy w
   - O(1) HashMap lookup for performance (<1μs expansion overhead)
   - Built-in `reload-aliases` command for runtime reloading
   - Security: Rejects dangerous patterns (rm -rf /, mkfs, dd, fork bombs, etc.)
-- ✅ **SCAN Algorithm**: Advanced input classification with 11-handler chain + alias + history expansion (<100μs avg)
+- ✅ **SCAN Algorithm**: Advanced input classification with 10-handler chain + alias + history expansion (<100μs avg)
   - Alias expansion before classification (single-level like Bash)
   - Shell builtin support (45+): `.`, `:`, `[`, `[[`, source, export, eval, exec, and more
   - Command recognition with PATH verification and caching
@@ -86,18 +86,17 @@ User Input → Alias Expansion → InputClassifier (9-Handler Chain)
                           Shell Exec Suggest LLM Backend
 ```
 
-**11-Handler Chain** (executed in strict order):
+**10-Handler Chain** (executed in strict order):
 1. **EmptyInputHandler** - Fast path for empty input (<1μs)
 2. **HistoryExpansionHandler** - Bash-style history expansion: `!!`,  `!$`, `!^`, `!*` (~5μs)
 3. **ApplicationBuiltinHandler** - App-specific commands: clear, exit, jobs, history, reload-aliases, reload-commands, auth-status (<1μs)
 4. **ShellBuiltinHandler** - Shell builtins without PATH check: `.`, `:`, `[`, `[[`, source, export, eval, etc. (<1μs)
 5. **PathCommandHandler** - Executable paths: `./script.sh`, `/usr/bin/cmd`, background processes with `&` (~10μs)
-6. **KnownCommandHandler** - 60+ DevOps commands with PATH cache (<1μs hit)
-7. **PathDiscoveryHandler** - Auto-discover newly installed commands (~1-5ms)
-8. **CommandSyntaxHandler** - Language-agnostic: flags, pipes, redirects, glob patterns (~10μs)
-9. **TypoDetectionHandler** - Levenshtein distance ≤2: "dokcer" → "docker" (~100μs, disabled by default)
-10. **NaturalLanguageHandler** - Language-agnostic heuristics (universal patterns) (~5μs)
-11. **DefaultHandler** - Fallback to LLM (<1μs)
+6. **PathDiscoveryHandler** - Auto-discover PATH commands with caching (~1-5ms miss, <1μs hit)
+7. **CommandSyntaxHandler** - Language-agnostic: flags, pipes, redirects, glob patterns (~10μs)
+8. **TypoDetectionHandler** - Levenshtein distance ≤2: "dokcer" → "docker" (~100μs, disabled by default)
+9. **NaturalLanguageHandler** - Language-agnostic heuristics (universal patterns) (~5μs)
+10. **DefaultHandler** - Fallback to LLM (<1μs)
 
 **Key Features**:
 - Average classification: <100μs
@@ -126,15 +125,18 @@ infraware-terminal/
 │   │   └── throbber.rs           # Animated loading indicator
 │   ├── input/                     # SCAN Algorithm
 │   │   ├── classifier.rs         # InputClassifier coordinator
-│   │   ├── handler.rs            # 11-handler Chain of Responsibility
+│   │   ├── handler.rs            # 10-handler Chain of Responsibility
 │   │   ├── history_expansion.rs  # Bash-style history expansion (!!, !$, !^, !*)
 │   │   ├── shell_builtins.rs     # Shell builtin recognition (., :, [, [[, etc.)
 │   │   ├── application_builtins.rs # Application builtins (clear, exit, jobs, etc.)
 │   │   ├── patterns.rs           # Precompiled RegexSet patterns
 │   │   ├── discovery.rs          # PATH-aware command cache
-│   │   ├── known_commands.rs     # Single source of truth for 60+ DevOps commands
 │   │   ├── typo_detection.rs     # Levenshtein distance typo detection
 │   │   └── parser.rs             # Shell command parsing
+│   ├── pty/                       # PTY support for interactive commands
+│   │   ├── mod.rs                # PTY wrapper + REQUIRES_PTY list
+│   │   ├── session.rs            # Session management
+│   │   └── io.rs                 # Async I/O wrappers
 │   ├── executor/                  # Command execution
 │   │   ├── command.rs            # Async command execution + background processes (&)
 │   │   ├── job_manager.rs        # Background job tracking with JobManager
