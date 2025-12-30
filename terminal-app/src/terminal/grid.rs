@@ -2,11 +2,18 @@
 
 use super::cell::{Cell, CellAttrs, Color, NamedColor};
 
+/// Maximum lines in scrollback buffer
+const MAX_SCROLLBACK: usize = 10_000;
+
 /// Terminal grid containing cells, cursor position, and state.
 #[derive(Debug)]
 pub struct TerminalGrid {
-    /// Grid of cells [row][col].
+    /// Grid of cells [row][col] - visible screen only.
     cells: Vec<Vec<Cell>>,
+    /// Scrollback buffer - lines that scrolled off the top.
+    scrollback: Vec<Vec<Cell>>,
+    /// Current scroll offset (0 = bottom/live, >0 = scrolled up).
+    scroll_offset: usize,
     /// Cursor row (0-indexed).
     cursor_row: u16,
     /// Cursor column (0-indexed).
@@ -71,6 +78,8 @@ impl TerminalGrid {
 
         Self {
             cells,
+            scrollback: Vec::new(),
+            scroll_offset: 0,
             cursor_row: 0,
             cursor_col: 0,
             cursor_visible: true,
@@ -120,9 +129,75 @@ impl TerminalGrid {
         self.cursor_visible = visible;
     }
 
-    /// Get cells for rendering.
+    /// Get cells for rendering (current screen only).
     pub fn cells(&self) -> &[Vec<Cell>] {
         &self.cells
+    }
+
+    /// Get scrollback buffer.
+    pub fn scrollback(&self) -> &[Vec<Cell>] {
+        &self.scrollback
+    }
+
+    /// Get current scroll offset (0 = live view, >0 = scrolled up).
+    pub fn scroll_offset(&self) -> usize {
+        self.scroll_offset
+    }
+
+    /// Get total scrollable lines (scrollback + visible).
+    pub fn total_lines(&self) -> usize {
+        self.scrollback.len() + self.cells.len()
+    }
+
+    /// Maximum scroll offset.
+    pub fn max_scroll_offset(&self) -> usize {
+        self.scrollback.len()
+    }
+
+    /// Scroll up by n lines (into scrollback).
+    pub fn scroll_view_up(&mut self, n: usize) {
+        self.scroll_offset = (self.scroll_offset + n).min(self.max_scroll_offset());
+    }
+
+    /// Scroll down by n lines (towards live view).
+    pub fn scroll_view_down(&mut self, n: usize) {
+        self.scroll_offset = self.scroll_offset.saturating_sub(n);
+    }
+
+    /// Scroll to bottom (live view).
+    pub fn scroll_to_bottom(&mut self) {
+        self.scroll_offset = 0;
+    }
+
+    /// Check if at bottom (live view).
+    pub fn is_at_bottom(&self) -> bool {
+        self.scroll_offset == 0
+    }
+
+    /// Get visible rows for rendering, combining scrollback and current screen.
+    /// Returns rows from (scrollback + cells) based on scroll_offset.
+    pub fn visible_rows(&self) -> Vec<&[Cell]> {
+        let total = self.scrollback.len() + self.cells.len();
+        let visible_count = self.rows as usize;
+
+        // Calculate start position in combined buffer
+        let end = total.saturating_sub(self.scroll_offset);
+        let start = end.saturating_sub(visible_count);
+
+        let mut result = Vec::with_capacity(visible_count);
+
+        for i in start..end {
+            if i < self.scrollback.len() {
+                result.push(self.scrollback[i].as_slice());
+            } else {
+                let screen_idx = i - self.scrollback.len();
+                if screen_idx < self.cells.len() {
+                    result.push(self.cells[screen_idx].as_slice());
+                }
+            }
+        }
+
+        result
     }
 
     /// Check if alternate screen is active.
@@ -280,7 +355,17 @@ impl TerminalGrid {
 
         for _ in 0..n {
             if top < bottom && bottom < self.cells.len() {
-                self.cells.remove(top);
+                // Save the line going off the top to scrollback (only if scroll region is full screen)
+                if top == 0 {
+                    let removed_line = self.cells.remove(top);
+                    self.scrollback.push(removed_line);
+                    // Trim scrollback if too large
+                    if self.scrollback.len() > MAX_SCROLLBACK {
+                        self.scrollback.remove(0);
+                    }
+                } else {
+                    self.cells.remove(top);
+                }
                 let new_row = (0..self.cols).map(|_| Cell::default()).collect();
                 self.cells.insert(bottom, new_row);
             }
