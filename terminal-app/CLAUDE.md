@@ -4,14 +4,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**Infraware Terminal** is a hybrid command interpreter with AI assistance for DevOps operations. It routes user input to either shell execution or an LLM backend.
+**Infraware Terminal** is a VTE-based terminal emulator built with egui. It provides full terminal emulation with PTY support for running interactive shell sessions.
 
-**Tech Stack**: Rust + TUI (ratatui/crossterm)
-**Status**: M1 Complete (0 clippy warnings, Microsoft Pragmatic Rust Guidelines compliant)
+**Tech Stack**: Rust + egui/eframe + VTE + portable-pty
+**Status**: Terminal Emulator Complete (0 clippy warnings, Microsoft Pragmatic Rust Guidelines compliant)
 
 **Prerequisites** (Linux): `sudo apt install -y pkg-config libssl-dev`
-
-**Environment Variables**: `INFRAWARE_BACKEND_URL` (backend endpoint), `BACKEND_API_KEY` (LLM auth)
 
 ## Commands
 
@@ -23,15 +21,9 @@ cargo check                          # Fast type check
 LOG_LEVEL=debug cargo run            # With debug logging
 
 # Testing
-cargo test                           # All tests
-cargo test --test classifier_tests   # SCAN algorithm tests
+cargo test                           # All tests (21 tests)
 cargo test test_name                 # Single test
 cargo test -- --nocapture            # With output
-cargo test -- --test-threads=1       # For tests with shared state
-
-# Benchmarking
-cargo bench scan_individual_handlers # Handler isolation
-cargo bench scan_full_classification # Full pipeline
 
 # Pre-commit (required)
 cargo fmt && cargo clippy            # CI enforces both
@@ -43,161 +35,164 @@ cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info
 ## Architecture
 
 ```
-User Input → Alias Expansion → InputClassifier → [Command | NaturalLanguage]
-                              (10-handler chain)      ↓            ↓
-                                               CommandExecutor  LLMClient
-                                                    ↓
-                                              PTY (ssh, tmux, REPLs)
+User Input (egui) → KeyboardHandler → PTY writer → Shell (bash/zsh)
+                                           ↓
+                          PTY reader → VTE parser → Terminal grid
+                                           ↓
+                          egui renderer (backgrounds, text, scrollbar)
 ```
 
-### SCAN Algorithm (Shell-Command And Natural-language)
+### Core Components
 
-Chain of Responsibility with 10 handlers. **Order enforced by `HandlerPosition` enum** - do not reorder without understanding performance implications (fast paths first).
-
-| Position | Handler | Target Time |
-|----------|---------|-------------|
-| 1 | EmptyInputHandler | <1μs |
-| 2 | HistoryExpansionHandler (`!!`, `!$`, `!^`, `!*`) | ~5μs |
-| 3 | ApplicationBuiltinHandler (cd, clear, exit, jobs, history) | <1μs |
-| 4 | ShellBuiltinHandler (45+ builtins) | <1μs |
-| 5 | PathCommandHandler (./script, /usr/bin/cmd, `&` suffix) | ~10μs |
-| 6 | PathDiscoveryHandler (commands in PATH + cache) | 1-5ms miss, <1μs hit |
-| 7 | CommandSyntaxHandler (flags, pipes, redirects) | ~10μs |
-| 8 | TypoDetectionHandler (Levenshtein ≤2, disabled) | ~100μs |
-| 9 | NaturalLanguageHandler (universal patterns) | <5μs |
-| 10 | DefaultHandler (LLM fallback) | <1μs |
+| Component | Purpose |
+|-----------|---------|
+| **VTE Parser** | Parses ANSI escape sequences (CSI, SGR, cursor control) |
+| **Terminal Grid** | 2D cell array with scrollback buffer |
+| **PTY Session** | Bidirectional I/O with shell process |
+| **egui Renderer** | Single-pass rendering with text batching |
 
 ### Quick Reference: Where to Find X
 
 | Task | Location |
 |------|----------|
-| Add app builtin | `src/input/application_builtins.rs` |
-| Add shell builtin | `src/input/shell_builtins.rs` |
-| Add PTY-required command | `src/pty/mod.rs` → `REQUIRES_PTY` array |
-| Add keyboard shortcut | `src/terminal/events.rs` → `EventHandler::map_key_event()` |
-| Add terminal event | `src/terminal/events.rs` → `TerminalEvent` enum |
-| Modify TUI rendering | `src/terminal/tui.rs` |
-| Modify output scrolling | `src/terminal/buffers.rs` → `OutputBuffer` methods |
-| Modify scrollbar behavior | `src/terminal/state.rs` → `ScrollbarInfo` struct |
-| Modify mouse input handling | `src/terminal/events.rs` → mouse event handlers |
-| Modify throbber animation | `src/terminal/throbber.rs` (change `ANIMATION_INTERVAL_MS` constant) |
-| Modify LLM render loop | `src/orchestrators/natural_language.rs` (change `RENDER_INTERVAL_MS` constant) |
-| Modify reverse history search | `src/main.rs` → `handle_reverse_search_*()` methods; `src/terminal/tui.rs` → `REVERSE_SEARCH_PROMPT_FORMAT` |
-| Add package manager | `src/executor/package_manager.rs` |
-| Add shell confirmation | `src/orchestrators/command.rs` → `ConfirmationType` enum |
-| Handle multiline input (heredoc) | `src/input/multiline.rs` |
-| Modify splash screen | `src/terminal/splash.rs` |
-| HITL (Human-in-the-Loop) orchestration | `src/orchestrators/hitl.rs` |
-| Language patterns | `config/language.toml` |
-| Precompiled regex | `src/input/patterns.rs` |
+| Add keyboard shortcut | `src/input/keyboard.rs` → `process_ctrl_keys()` or `process_other_keys()` |
+| Modify terminal rendering | `src/app.rs` → `render_terminal()` |
+| Modify scrollbar | `src/ui/renderer.rs` → `render_scrollbar()` |
+| Change cursor blink rate | `src/config.rs` → `timing::CURSOR_BLINK_INTERVAL` |
+| Modify PTY spawn | `src/pty/mod.rs` → `Pty::spawn()` |
+| Add VTE escape handler | `src/terminal/handler.rs` → `csi_dispatch()` |
+| Modify cell attributes | `src/terminal/cell.rs` → `CellAttrs` |
+| Change theme colors | `src/ui/theme.rs` → `Theme` struct |
+| Add app mode | `src/state.rs` → `AppMode` enum |
 
 ### Key Modules
 
 | Directory | Purpose |
 |-----------|---------|
-| `terminal/` | TUI: `tui.rs` (rendering/suspend/resume), `buffers.rs` (output buffer with scrolling), `events.rs` (keyboard/mouse), `state.rs` (modes/root/scrollbar), `throbber.rs` (animation thread), `splash.rs` (startup splash) |
-| `input/` | SCAN: `classifier.rs` (coordinator), `handler.rs` (chain), `patterns.rs` (regex), `multiline.rs` (heredoc) |
-| `executor/` | Execution: `command.rs` (async batch), `job_manager.rs` (background `&`) |
-| `orchestrators/` | Workflows: `command.rs`, `natural_language.rs`, `tab_completion.rs`, `hitl.rs` (human-in-the-loop) |
-| `pty/` | PTY support: `mod.rs` (PTY wrapper + REQUIRES_PTY list), `session.rs` (session management), `io.rs` (async I/O) |
-| `llm/` | LLM: `client.rs` (Mock/HTTP with HITL), `renderer.rs` (syntax highlighting) |
-| `auth/` | Auth: `authenticator.rs`, `config.rs`, `models.rs` |
-| `config/` | Config: `language.rs` (multilingual patterns from TOML) |
-| `logging.rs` | Log4rs setup with size rotation |
+| `terminal/` | VTE: `grid.rs` (terminal grid + scrollback), `cell.rs` (cell attributes), `handler.rs` (escape sequence handler) |
+| `pty/` | PTY: `manager.rs` (coordinator), `session.rs` (session lifecycle), `io.rs` (async reader/writer), `traits.rs` (DI traits) |
+| `input/` | Input: `keyboard.rs` (keyboard event mapping) |
+| `ui/` | UI: `renderer.rs` (egui helpers), `theme.rs` (colors), `prompt.rs` (placeholder) |
+| `llm/` | LLM: `client.rs` (placeholder for future LLM integration) |
+| `app.rs` | Main egui application with rendering loop |
+| `state.rs` | Application state machine (AppMode, transitions) |
+| `config.rs` | Configuration constants (timing, rendering, sizes) |
 
 ### Design Patterns
-- **Chain of Responsibility**: `input/handler.rs` (position-enforced)
-- **Strategy Pattern**: `executor/package_manager.rs`
-- **Dependency Injection**: `ClassifierContext` (cache, patterns, language config)
+- **State Machine**: `state.rs` (AppMode with validated transitions)
+- **Dependency Injection**: `pty/traits.rs` (PtyWrite, PtyControl traits for testing)
+- **Single-Pass Rendering**: `app.rs` (batched backgrounds, text, decorations)
+
+## Keyboard Shortcuts (Active)
+
+| Shortcut | Action | Bytes Sent |
+|----------|--------|------------|
+| `Ctrl+C` | Interrupt (SIGINT) | 0x03 |
+| `Ctrl+D` | EOF | 0x04 |
+| `Ctrl+L` | Clear screen | 0x0C |
+| `Ctrl+A` | Start of line | 0x01 |
+| `Ctrl+E` | End of line | 0x05 |
+| `Ctrl+K` | Kill to end | 0x0B |
+| `Ctrl+U` | Kill to start | 0x15 |
+| `Ctrl+W` | Delete word | 0x17 |
+| `Ctrl+R` | Reverse search | 0x12 |
+| `Ctrl+Z` | Suspend | 0x1A |
+| `Alt+B` | Back word | ESC-b |
+| `Alt+F` | Forward word | ESC-f |
+| `Alt+D` | Delete word | ESC-d |
+| Arrow keys | Navigation | VT100 codes |
+| Page Up/Down | Scroll viewport | VT100 codes |
+| Home/End | Line edges | VT100 codes |
+| F1-F12 | Function keys | VT100 codes |
+
+## Feature Status
+
+### Active Features
+- Full VTE terminal emulation (ANSI escape sequences)
+- Terminal grid with scrollback buffer
+- Mouse wheel scrolling with visual scrollbar
+- Cursor blinking (530ms interval)
+- 256-color and RGB color support
+- Cell attributes (bold, dim, underline, reverse, strikethrough)
+- Alternate screen buffer (for vim, less, etc.)
+- PTY with async I/O and backpressure
+- SIGINT propagation to foreground process
+- Reactive repaint (CPU <5% when idle)
+
+### Placeholder (Code Ready, Not Active)
+- **LLM Client** (`llm/client.rs`): Complete HTTP client, marked `#[allow(dead_code)]`
+- **AppMode variants**: WaitingLLM, AwaitingApproval, AwaitingAnswer (state machine ready)
+- **Prompt rendering** (`ui/prompt.rs`): Placeholder module
+
+### Not Implemented
+- Command classification (SCAN algorithm)
+- Shell builtins recognition
+- History expansion (!!, !$)
+- Alias expansion
+- Background job management
+- Command confirmations (rm -i)
+- Multilingual patterns
+
+## Configuration Constants
+
+All in `src/config.rs`:
+
+```rust
+// Timing
+CURSOR_BLINK_INTERVAL: 530ms
+SHELL_INIT_DELAY: 500ms
+RESIZE_DEBOUNCE: 100ms
+BACKGROUND_REPAINT: 500ms
+
+// Rendering
+MAX_BYTES_PER_FRAME: 4096
+FONT_SIZE: 14.0
+CHAR_WIDTH: 8.4
+CHAR_HEIGHT: 16.0
+
+// Size
+DEFAULT_ROWS: 24
+DEFAULT_COLS: 80
+
+// PTY
+CHANNEL_CAPACITY: 4 (for backpressure)
+```
 
 ## Development Guidelines
 
-### Adding New Handlers
-1. Implement `InputHandler` trait in `handler.rs`
-2. Add position to `HandlerPosition` enum (ORDER MATTERS - fast paths first)
-3. Add to chain in `InputClassifier::new()`
-4. Use precompiled patterns from `patterns.rs` - NEVER compile regex in handlers
-5. Access shared state via `ClassifierContext` (no global state)
-6. Run `cargo bench scan_individual_handlers` to verify performance
+### Adding Keyboard Shortcuts
+1. Edit `src/input/keyboard.rs`
+2. Add to `process_ctrl_keys()` for Ctrl combinations
+3. Add to `process_other_keys()` for special keys
+4. Return `KeyboardAction::SendBytes(vec![...])` with appropriate bytes
 
-### Testing with Shared State
-Use `#[serial_test::serial]` for tests modifying `CommandCache` or aliases to prevent flaky tests.
+### Adding VTE Escape Sequences
+1. Edit `src/terminal/handler.rs`
+2. Add match arm in `csi_dispatch()` for CSI sequences
+3. Add match arm in `esc_dispatch()` for ESC sequences
+4. Update grid state via `self.grid` methods
 
-### Test Organization
-Tests are in `tests/` directory:
-- `classifier_tests.rs` - SCAN algorithm and handler tests
-- `executor_tests.rs` - Command execution tests
-- `integration_tests.rs` - End-to-end workflows
-- `interactive_command_test.rs` - TUI suspend/resume tests
-- `terminal_state_tests.rs` - State management tests
+### Testing PTY Operations
+Use the DI traits in `src/pty/traits.rs`:
+```rust
+// Create mock for testing
+struct MockPtyWriter { ... }
+impl PtyWrite for MockPtyWriter {
+    fn write_bytes(&self, data: &[u8]) -> Result<usize> { ... }
+}
+```
 
-### History Expansion
-`!!` (previous cmd), `!$` (last arg), `!^` (first arg), `!*` (all args). Thread-safe via `Arc<RwLock<Vec<String>>>`. Uses get-second-to-last semantics (current input already in history when classified).
-
-### Reverse History Search
-Ctrl+R activates interactive bash-like reverse history search:
-- **Entry**: Press Ctrl+R to enter `ReverseHistorySearching` mode
-- **Search**: Type characters to search through history (case-insensitive)
-- **Cycle Matches**: Press Ctrl+R again to cycle through matches (most recent first)
-- **Accept Match**: Press Enter to accept current match into input buffer and return to Normal mode
-- **Modify Query**: Press Backspace to modify search query (matches recalculated with caching)
-- **Cancel Search**: Press Ctrl+C to cancel search and restore original input
-- **Disabled Keys**: Arrow keys, history navigation (Up/Down), and Tab completion are disabled during search to match bash behavior
-- **Prompt Format**: Shows `(reverse-i-search)'query': current-match` with animation support
-- **Performance**: Uses `ReverseSearchState` with cached matches vector to avoid O(N) search on every keystroke
-
-### Aliases
-System files loaded first, then user files (`~/.bashrc`, `~/.bash_aliases`, `~/.zshrc`). Single-level expansion, O(1) lookup. `is_safe_alias()` rejects dangerous patterns. Runtime reload: `reload-aliases`.
-
-### Interactive Commands
-28 commands suspend TUI (vim, nano, less, etc.), 31 blocked with suggestions (ssh, tmux, python REPL). Implementation: `TerminalUI::suspend()` → run → `resume()` with RAII `TuiGuard` for panic safety. Unix only.
-
-**Event polling**: Paused during interactive command execution to prevent input lag in editors like vim/nano.
-
-### Command Execution & Cancellation
-- **SIGINT handling**: Ctrl+C propagates to child processes via cancellation token
-- **Output timeout**: 500ms timeout after SIGINT prevents blocking on process output
-- **Graceful shutdown**: Commands receive SIGINT before forced termination
-
-### Shell Command Confirmations
-Matches native shell behavior for interactive flags (`-i`, `-I`):
-- `rm -i`: Per-file confirmation ("rm: remove 'file'?")
-- `rm -I`: Bulk confirmation (>3 files or recursive)
-- `rm` on write-protected files: Automatic prompt (matches native rm)
-- `cp -i`, `mv -i`, `ln -i`: Overwrite/replace confirmation
-
-Implementation in `orchestrators/command.rs`. Uses `ConfirmationType` enum and `AwaitingCommandApproval` terminal mode. `y`/`n` response handling with proper file iteration for multi-file operations.
-
-### Root Mode
-Terminal detects `sudo su`, `su`, `su -` commands and enters root mode:
-- Prompt symbol changes from `$` to `#`
-- Tracks `is_root_mode` state in `TerminalState`
-- `enter_root_mode()` / `exit_root_mode()` methods
-- Also checks actual root user via UID=0
-
-### Background Processes
-`&` suffix → `JobManager` with `Arc<RwLock>`. 250ms polling interval. Lock poisoning triggers fail-fast per Microsoft guidelines.
-
-### LLM Integration (HITL)
-`HttpLLMClient` with SSE streaming. `LLMQueryResult` enum: `Complete`, `CommandApproval`, `Question`. Resume via `resume_run()` or `resume_with_answer()`. Animated throbber during LLM wait state:
-- **Throbber Animation**: 10 FPS (100ms `ANIMATION_INTERVAL_MS` in `throbber.rs`)
-- **Render Loop**: `NaturalLanguageOrchestrator::handle_query()` renders at 10 FPS via `RENDER_INTERVAL_MS` (100ms)
-- **Visual States**: Animated braille symbols (⠘⠙⠚⠒) in `WaitingLLM` mode; static `|~|` in other modes
-- **Controls**: `start_throbber()` / `stop_throbber()` in `TerminalState`
-- **Prompt Prefix**: `get_prompt_prefix()` returns animated symbol only when `WaitingLLM` mode active
-
-### Error Handling
-Use `anyhow::Result`. Display user-friendly messages, never crash.
-
-### Logging
-`log4rs` with size rotation. `LOG_LEVEL=debug cargo run`. HTTP prefixes: `[HTTP-OUT]`, `[HTTP-IN]`.
+### Performance Optimization
+- `render_terminal()` uses single-pass rendering - don't add extra iterations
+- Pre-allocate buffers outside loops (see `bg_rects`, `text_runs`, `decorations`)
+- Use `column_x_coords` cache for X position lookups
+- Limit PTY output to `MAX_BYTES_PER_FRAME` per frame
 
 ## Constraints
 
 ### CI/CD
 - `cargo fmt --all --check` and `cargo clippy -- -D warnings` must pass
-- 75% test coverage minimum
-- Multi-platform: Ubuntu, Windows, macOS
+- Multi-platform: Linux (primary), Windows, macOS
 
 ### Git Commits
 - Use conventional commit format: `<type>: <description>`
@@ -209,93 +204,40 @@ Use `anyhow::Result`. Display user-friendly messages, never crash.
 ### Code Style
 - Safe indexing (`.first()`, `.get()`) - no `parts[0]` or `.unwrap()` on arrays
 - Prefer zero-copy and CoW over clone
-- No dead code
+- No dead code (use `#[allow(dead_code)]` with comment for intentional placeholders)
 
 ### Microsoft Pragmatic Rust Guidelines
 
-See `.claude/skills/microsoft-rust-guidelines.md` for full details.
-
 **Key requirements:**
 - All public types implement `Debug` (custom impl for sensitive data)
-- Use `#[expect]` instead of `#[allow]` for lint overrides
-- Lock poisoning triggers fail-fast (M-PANIC-IS-STOP)
+- Use `#[expect]` instead of `#[allow]` when lint suppression should be revisited
+- Lock poisoning triggers fail-fast with `.expect()` (M-PANIC-IS-STOP)
 
-### Multilingual Support
+### Error Handling
+Use `anyhow::Result`. Display user-friendly messages, never crash.
 
-`config/language.toml` contains language-specific patterns. Priority: `./config/language.toml` → `~/.config/infraware-terminal/language.toml` → English defaults. Add languages via `[languages.xx]` sections.
+### Logging
+Standard `log` crate. `LOG_LEVEL=debug cargo run` for debug output.
 
-### M1 Limitations (Deferred)
-- Auto-install prompts only, no execution
-- Session-only history (not persisted)
-- No cache TTL (use `reload-commands` after installing)
+## State Machine (AppMode)
 
-## Common Patterns
+```rust
+pub enum AppMode {
+    Normal,                           // Default state
+    WaitingLLM,                       // Querying LLM (placeholder)
+    AwaitingApproval { command, message },  // LLM command approval (placeholder)
+    AwaitingAnswer { question, options },   // LLM question (placeholder)
+}
+```
 
-### Adding a TerminalEvent
-1. Add variant to `TerminalEvent` in `events.rs`
-2. Handle in `EventHandler::poll_event()`
-3. Implement in `InfrawareTerminal::handle_event()` in `main.rs`
-
-### InputType Enum
-`Command { command, args, original_input }`, `NaturalLanguage(String)`, `Empty`, `CommandTypo { input, suggestion, distance }`
-
-### TerminalMode Enum
-`Normal` (default), `ExecutingCommand` (running shell command), `WaitingLLM` (querying LLM), `PromptingInstall` (M2/M3 auto-install), `AwaitingCommandApproval` (HITL: y/n for LLM command, also shell confirmations like `rm -i`), `AwaitingAnswer` (HITL: free text for LLM question), `AwaitingMoreInput(IncompleteReason)` (multiline heredoc), `ReverseHistorySearching` (Ctrl+R search).
-
-### Output Scrolling & Scrollbar
-
-The terminal features a sophisticated scrolling system with visual scrollbar and mouse support:
-
-**Core Components** (`src/terminal/buffers.rs`):
-- `OutputBuffer`: Manages scrollable output with `scroll_position` field tracking current viewport
-- `visible_window(visible_lines)`: Returns slice of lines visible in current viewport
-- `scroll_position()`, `scroll_up()`, `scroll_down()`: Direct scroll control
-- `set_scroll_position(position)`: Jump to arbitrary position (clamped to valid range)
-- `scroll_to_end()`: Auto-scroll to bottom when user types (keep prompt visible)
-- `is_at_bottom()`: Check if currently viewing bottom of output
-- `auto_scroll_to_bottom()`: Smart auto-scroll only if already at bottom (Linux/Mac terminal behavior)
-- `set_visible_lines(count)`: Update viewport height (called on terminal resize)
-- `set_extra_lines(count)`: Track prompt/interaction lines for scroll calculations
-
-**Scrollbar Info** (`src/terminal/state.rs`):
-- `ScrollbarInfo`: Struct containing `column`, `height`, `total_lines`, `visible_lines`
-- `is_on_scrollbar(column)`: Check if mouse is on scrollbar column
-- `row_to_scroll_position(row)`: Convert mouse row to output scroll position (handles top/bottom arrow clicks)
-- Stored in `TerminalState::scrollbar_info` (updated during render)
-
-**Mouse Events** (`src/terminal/events.rs`):
-- `MouseDown { column, row }`: Left mouse button pressed (initiate scroll drag)
-- `MouseDrag { column, row }`: Mouse movement with button held (drag to position)
-- `MouseUp`: Button released (end drag)
-- Mouse wheel scroll: Uses `Scroll(Direction)` event
-- Handlers in `main.rs` check `ScrollbarInfo` to determine if click is on scrollbar or content
-
-**Rendering** (`src/terminal/tui.rs`):
-- Split `render_unified_content()` into separate output and prompt areas
-- Use `Paragraph.scroll()` for viewport control (instead of manual slicing)
-- Render scrollbar on same area as output using ratatui's `Scrollbar` widget
-- Update `scrollbar_info` in `TerminalState` during render for subsequent mouse event handling
-
-**Scroll Behavior**:
-- Scroll wheel and arrow keys scroll the output buffer
-- Typing any character auto-scrolls to bottom if already at bottom (keeps prompt visible)
-- Manual scroll up suspends auto-scroll until user re-reaches bottom
-- Scrollbar thumb position calculated as: `(scroll_position / max_scroll) * scrollbar_height`
-- Reserved lines for prompt/interactions prevent unreachable content when scrolled up
-
-### ClassifierContext (Dependency Injection)
-Provides `Arc<RwLock<CommandCache>>`, `Arc<CompiledPatterns>`, and language patterns to handlers. Enables testability and avoids global state.
-
-## Performance Targets
-
-| Operation | Target |
-|-----------|--------|
-| Average classification | <100μs |
-| Known command (cache hit) | <1μs |
-| PATH lookup (cache miss) | 1-5ms |
-| Job polling interval | 250ms |
-
-Run `cargo bench scan_` to verify.
+Valid transitions:
+- `Normal → WaitingLLM` (QueryLLM event)
+- `WaitingLLM → Normal` (LLMCompleted event)
+- `WaitingLLM → AwaitingApproval` (LLMRequestsApproval event)
+- `WaitingLLM → AwaitingAnswer` (LLMAsksQuestion event)
+- `AwaitingApproval → Normal` (UserResponded event)
+- `AwaitingAnswer → Normal` (UserAnswered event)
+- `Any → Normal` (Cancel event)
 
 ## Claude Code Agents
 
@@ -310,10 +252,21 @@ Agents in `.claude/agents/` are invoked automatically when appropriate:
 | `git-committer` | Create commits (no emojis, no Co-Author) |
 | `uml-diagram-generator` | Generate PlantUML diagrams for code structure |
 
+## Code Metrics Summary
+
+| Metric | Value |
+|--------|-------|
+| Total LOC | ~4,350 |
+| Source files | 21 |
+| Functions | 202 |
+| Tests | 21 |
+| Largest file | `terminal/grid.rs` (744 LOC) |
+| Highest complexity | `render_terminal()` (CC ~28) |
+
 ## Platform Notes
 
-**Windows**: Filter `KeyEventKind::Press` only in `events.rs`. Use `cmd /C` for shell execution. Interactive commands not supported.
+**Linux**: Primary platform. Full PTY support.
 
-**Resources**:
-- Ratatui concepts for TUI code: https://ratatui.rs/concepts/
-- Async/blocking concepts (Alice Ryhl): https://ryhl.io/blog/async-what-is-blocking/
+**Windows**: PTY via ConPTY. Some escape sequences may differ.
+
+**macOS**: Full PTY support. Similar to Linux.
