@@ -4,6 +4,7 @@
 //! and the child process.
 
 use crate::pty::io::{PtyReader, PtyWriter};
+use crate::pty::traits::PtyControl;
 use anyhow::{Context, Result};
 use portable_pty::{Child, ExitStatus, MasterPty, PtyPair, PtySize};
 use std::collections::HashMap;
@@ -250,6 +251,40 @@ impl PtySession {
         log::warn!("SIGINT not supported on this platform, using kill");
         // Can't use async here, so just log warning
         Ok(())
+    }
+
+    /// Synchronous resize using try_lock (for trait implementation).
+    ///
+    /// This is a non-blocking version that fails if the lock is held.
+    /// For guaranteed resize, use the async `resize()` method instead.
+    fn resize_sync(&self, rows: u16, cols: u16) -> Result<()> {
+        let master = self
+            .master
+            .try_lock()
+            .map_err(|_| anyhow::anyhow!("Master PTY lock held, resize deferred"))?;
+        master
+            .resize(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .context("Failed to resize PTY")
+    }
+}
+
+/// Implement PtyControl trait for dependency injection support.
+///
+/// Note: resize uses try_lock and may fail if the async lock is held.
+/// For production code, prefer the async resize() method.
+impl PtyControl for PtySession {
+    fn resize(&self, rows: u16, cols: u16) -> Result<()> {
+        self.resize_sync(rows, cols)
+    }
+
+    fn send_sigint(&self) -> Result<()> {
+        // Delegate to the inherent method
+        PtySession::send_sigint(self)
     }
 }
 

@@ -2,7 +2,7 @@
 
 use crate::config::{pty as pty_config, rendering, size, timing};
 use crate::input::{KeyboardAction, KeyboardHandler};
-use crate::pty::{PtyManager, PtyWriter};
+use crate::pty::{PtyManager, PtyWrite, PtyWriter};
 use crate::state::AppMode;
 use crate::terminal::{Color, TerminalHandler};
 use crate::ui::{render_backgrounds, render_cursor, render_decorations, render_scrollbar, render_text_runs, Theme};
@@ -243,10 +243,13 @@ clear
     }
 
     /// Send data to PTY synchronously (ensures immediate delivery).
+    ///
+    /// Uses the `PtyWrite` trait for dependency injection support.
     fn send_to_pty(&self, data: &[u8]) {
         if let Some(ref writer) = self.pty_writer {
             log::debug!("Writing {} bytes to PTY: {:?}", data.len(), data);
-            match writer.write_sync(data) {
+            // Use trait method for DI compatibility
+            match writer.write_bytes(data) {
                 Ok(n) => log::debug!("Wrote {} bytes to PTY", n),
                 Err(e) => log::error!("Failed to write to PTY: {}", e),
             }

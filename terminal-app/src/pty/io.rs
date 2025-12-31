@@ -3,6 +3,7 @@
 //! Provides async wrappers around the synchronous PTY reader/writer,
 //! using a dedicated reader thread with channels for non-blocking operation.
 
+use super::traits::PtyWrite;
 use anyhow::{Context, Result};
 use std::fmt;
 use std::io::{Read, Write};
@@ -211,6 +212,13 @@ impl PtyWriter {
     /// Send Ctrl+Z (SIGTSTP - suspend) to the PTY.
     pub async fn send_suspend(&self) -> Result<()> {
         self.send_byte(0x1A).await
+    }
+}
+
+/// Implement PtyWrite trait for dependency injection support.
+impl PtyWrite for PtyWriter {
+    fn write_bytes(&self, data: &[u8]) -> Result<usize> {
+        self.write_sync(data)
     }
 }
 
