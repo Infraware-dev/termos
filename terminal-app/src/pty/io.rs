@@ -34,7 +34,7 @@ impl Drop for PtyReader {
     }
 }
 
-#[allow(dead_code)]
+#[expect(dead_code, reason = "Public API - reader methods used by PtyManager")]
 impl PtyReader {
     /// Create a new async PTY reader with a background reading thread.
     pub fn new(mut reader: Box<dyn Read + Send>) -> Self {
@@ -147,7 +147,7 @@ impl fmt::Debug for PtyWriter {
     }
 }
 
-#[allow(dead_code)]
+#[expect(dead_code, reason = "Public API - writer methods used by InfrawareApp")]
 impl PtyWriter {
     /// Create a new PTY writer.
     pub fn new(writer: Box<dyn Write + Send>) -> Self {
@@ -168,11 +168,14 @@ impl PtyWriter {
     ///
     /// This is a blocking write that can be safely called from inside
     /// `tokio::task::block_in_place` or other synchronous contexts.
+    ///
+    /// # Panics
+    /// Panics if the writer lock is poisoned (indicates unrecoverable corruption).
     pub fn write_sync(&self, data: &[u8]) -> Result<usize> {
         let mut writer = self
             .inner
             .lock()
-            .map_err(|e| anyhow::anyhow!("PTY writer lock poisoned: {}", e))?;
+            .expect("PTY writer lock poisoned - unrecoverable state corruption");
         writer
             .write_all(data)
             .context("Failed to write to PTY")?;
@@ -247,5 +250,18 @@ mod tests {
 
         let n = writer.write_str("test").await.unwrap();
         assert_eq!(n, 4);
+    }
+
+    #[test]
+    fn test_pty_writer_trait_object() {
+        // Test that PtyWriter works via trait object (for DI)
+        let cursor = Cursor::new(Vec::new());
+        let writer = PtyWriter::new(Box::new(cursor));
+
+        // Use via trait object to ensure dynamic dispatch works
+        let trait_obj: &dyn PtyWrite = &writer;
+        let result = trait_obj.write_bytes(b"hello");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 5);
     }
 }

@@ -10,6 +10,7 @@ use anyhow::{bail, Result};
 /// The state machine enforces valid transitions between modes.
 /// Invalid transitions return an error.
 #[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)] // Variants used when LLM integration is active
 pub enum AppMode {
     /// Normal operation - waiting for user input
     Normal,
@@ -35,7 +36,7 @@ impl Default for AppMode {
 
 /// Events that trigger state transitions.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
+#[expect(dead_code, reason = "State machine events - used conditionally based on LLM responses")]
 pub enum AppModeEvent {
     /// User submitted a query that requires LLM
     QueryLLM,
@@ -56,6 +57,7 @@ pub enum AppModeEvent {
     Cancel,
 }
 
+#[allow(dead_code)] // State machine API used when LLM integration is active
 impl AppMode {
     /// Get the name of the current state (for logging).
     #[must_use]
@@ -81,7 +83,6 @@ impl AppMode {
     /// - AwaitingAnswer → WaitingLLM (resume with answer)
     /// - Any → Normal (cancel)
     #[must_use]
-    #[allow(dead_code)] // Public API for validation, used in tests
     pub fn can_transition_to(&self, target: &Self) -> bool {
         match (self, target) {
             // From Normal
@@ -100,8 +101,11 @@ impl AppMode {
             (Self::AwaitingAnswer { .. }, Self::Normal) => true,
             (Self::AwaitingAnswer { .. }, Self::WaitingLLM) => true,
 
-            // Same state (idempotent)
-            (a, b) if std::mem::discriminant(a) == std::mem::discriminant(b) => true,
+            // Same state (idempotent transitions are valid)
+            (Self::Normal, Self::Normal)
+            | (Self::WaitingLLM, Self::WaitingLLM)
+            | (Self::AwaitingApproval { .. }, Self::AwaitingApproval { .. })
+            | (Self::AwaitingAnswer { .. }, Self::AwaitingAnswer { .. }) => true,
 
             // All others invalid
             _ => false,
@@ -110,29 +114,24 @@ impl AppMode {
 
     /// Attempt to transition to a new state based on an event.
     ///
+    /// Consumes both self and event to avoid unnecessary cloning.
     /// Returns the new state if the transition is valid, or an error otherwise.
-    #[allow(dead_code)]
-    pub fn transition(&self, event: AppModeEvent) -> Result<Self> {
-        let new_state = match (&self, &event) {
+    #[must_use = "state transitions must be handled - ignoring may cause state desynchronization"]
+    pub fn transition(self, event: AppModeEvent) -> Result<Self> {
+        let from_name = self.name();
+
+        let new_state = match (self, event) {
             // Normal state transitions
             (Self::Normal, AppModeEvent::QueryLLM) => Self::WaitingLLM,
 
             // WaitingLLM state transitions
             (Self::WaitingLLM, AppModeEvent::LLMCompleted) => Self::Normal,
-            (
-                Self::WaitingLLM,
-                AppModeEvent::LLMRequestsApproval { command, message },
-            ) => Self::AwaitingApproval {
-                command: command.clone(),
-                message: message.clone(),
-            },
-            (
-                Self::WaitingLLM,
-                AppModeEvent::LLMAsksQuestion { question, options },
-            ) => Self::AwaitingAnswer {
-                question: question.clone(),
-                options: options.clone(),
-            },
+            (Self::WaitingLLM, AppModeEvent::LLMRequestsApproval { command, message }) => {
+                Self::AwaitingApproval { command, message }
+            }
+            (Self::WaitingLLM, AppModeEvent::LLMAsksQuestion { question, options }) => {
+                Self::AwaitingAnswer { question, options }
+            }
 
             // AwaitingApproval state transitions
             (Self::AwaitingApproval { .. }, AppModeEvent::UserResponded) => Self::Normal,
@@ -144,20 +143,19 @@ impl AppMode {
             (_, AppModeEvent::Cancel) => Self::Normal,
 
             // Invalid transition
-            _ => {
+            (state, event) => {
                 bail!(
                     "Invalid state transition: {} + {:?}",
-                    self.name(),
+                    state.name(),
                     event
                 );
             }
         };
 
         log::debug!(
-            "State transition: {} -> {} (event: {:?})",
-            self.name(),
-            new_state.name(),
-            event
+            "State transition: {} -> {}",
+            from_name,
+            new_state.name()
         );
 
         Ok(new_state)
@@ -217,8 +215,8 @@ mod tests {
     fn test_transition_with_event() {
         let state = AppMode::Normal;
 
-        // Valid transition
-        let new_state = state.transition(AppModeEvent::QueryLLM).unwrap();
+        // Valid transition (clone state for second test)
+        let new_state = state.clone().transition(AppModeEvent::QueryLLM).unwrap();
         assert_eq!(new_state, AppMode::WaitingLLM);
 
         // Invalid transition (Normal + UserResponded)
@@ -255,5 +253,24 @@ mod tests {
             "AwaitingApproval"
         );
     }
-}
 
+    #[test]
+    fn test_transition_moves_data() {
+        // Test that event data is moved, not cloned
+        let state = AppMode::WaitingLLM;
+        let event = AppModeEvent::LLMRequestsApproval {
+            command: "rm -rf /".to_string(),
+            message: "Are you sure?".to_string(),
+        };
+
+        let new_state = state.transition(event).unwrap();
+
+        match new_state {
+            AppMode::AwaitingApproval { command, message } => {
+                assert_eq!(command, "rm -rf /");
+                assert_eq!(message, "Are you sure?");
+            }
+            _ => panic!("Expected AwaitingApproval state"),
+        }
+    }
+}
