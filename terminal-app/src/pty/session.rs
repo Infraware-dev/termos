@@ -14,7 +14,7 @@ use tokio::sync::Mutex;
 
 /// Configuration for spawning a PTY session.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
+#[allow(dead_code)] // Builder pattern API for future PTY spawn customization
 pub struct PtySessionConfig {
     /// Command to execute
     pub command: String,
@@ -28,7 +28,7 @@ pub struct PtySessionConfig {
     pub size: PtySize,
 }
 
-#[allow(dead_code)]
+#[allow(dead_code)] // Builder pattern API for future PTY spawn customization
 impl PtySessionConfig {
     /// Create a new configuration with default settings.
     #[must_use]
@@ -104,7 +104,7 @@ impl std::fmt::Debug for PtySession {
     }
 }
 
-#[allow(dead_code)]
+#[expect(dead_code, reason = "Public API - session methods used by PtyManager and tests")]
 impl PtySession {
     /// Create a new PTY session from a PTY pair and child process.
     pub(crate) fn new(pair: PtyPair, child: Box<dyn Child + Send + Sync>) -> Self {
@@ -255,13 +255,17 @@ impl PtySession {
 
     /// Synchronous resize using try_lock (for trait implementation).
     ///
-    /// This is a non-blocking version that fails if the lock is held.
+    /// This is a non-blocking version that returns an error if the lock is held.
     /// For guaranteed resize, use the async `resize()` method instead.
+    ///
+    /// # Note
+    /// Uses `tokio::sync::Mutex` which doesn't have lock poisoning (unlike `std::sync::Mutex`).
+    /// The only failure case is when the lock is currently held by another task.
     fn resize_sync(&self, rows: u16, cols: u16) -> Result<()> {
-        let master = self
-            .master
-            .try_lock()
-            .map_err(|_| anyhow::anyhow!("Master PTY lock held, resize deferred"))?;
+        let master = self.master.try_lock().map_err(|_| {
+            log::debug!("PTY resize deferred - async lock held by another operation");
+            anyhow::anyhow!("Master PTY lock held, resize deferred")
+        })?;
         master
             .resize(PtySize {
                 rows,
