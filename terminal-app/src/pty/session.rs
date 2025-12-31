@@ -116,17 +116,20 @@ impl PtySession {
         }
     }
 
-    /// Get a reader for the PTY output.
+    /// Get a reader for the PTY output that sends to the provided channel.
     ///
     /// Note: This takes ownership of the reader. Only call once.
     /// Returns an error if the reader has already been taken.
-    pub async fn reader(&mut self) -> Result<PtyReader> {
+    ///
+    /// # Arguments
+    /// * `sender` - Sync channel sender where PTY output will be sent
+    pub async fn reader(&mut self, sender: std::sync::mpsc::SyncSender<Vec<u8>>) -> Result<PtyReader> {
         if self.reader.is_none() {
             let master = self.master.lock().await;
             let reader = master
                 .try_clone_reader()
                 .context("Failed to clone PTY reader")?;
-            self.reader = Some(PtyReader::new(reader));
+            self.reader = Some(PtyReader::new(reader, sender));
         }
         self.reader
             .take()
@@ -336,14 +339,16 @@ mod tests {
             .spawn("echo", &["hello PTY"], crate::pty::DEFAULT_PTY_SIZE)
             .expect("Failed to spawn PTY");
 
-        let mut reader = session.reader().await.expect("Failed to get reader");
+        // Create sync channel for PTY output
+        let (tx, rx) = std::sync::mpsc::sync_channel(4);
+        let _reader = session.reader(tx).await.expect("Failed to get reader");
 
         // Read output - wait for data from background thread
         let mut all_output = Vec::new();
         let start = std::time::Instant::now();
         while start.elapsed() < std::time::Duration::from_secs(2) {
-            // Use read_with_timeout for blocking wait with timeout
-            match reader.read_with_timeout(std::time::Duration::from_millis(100)).await {
+            // Use recv_timeout for blocking wait with timeout
+            match rx.recv_timeout(std::time::Duration::from_millis(100)) {
                 Ok(bytes) if !bytes.is_empty() => {
                     all_output.extend_from_slice(&bytes);
                 }
@@ -352,7 +357,7 @@ mod tests {
 
             if session.try_wait().await.ok().flatten().is_some() {
                 // Process exited, drain remaining output
-                while let Ok(bytes) = reader.read_available().await {
+                while let Ok(bytes) = rx.try_recv() {
                     if bytes.is_empty() {
                         break;
                     }

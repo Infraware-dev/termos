@@ -2,7 +2,7 @@
 
 use crate::config::{pty as pty_config, rendering, size, timing};
 use crate::input::{KeyboardAction, KeyboardHandler};
-use crate::pty::{PtyManager, PtyWrite, PtyWriter};
+use crate::pty::{PtyManager, PtyReader, PtyWrite, PtyWriter};
 use crate::state::AppMode;
 use crate::terminal::{Color, TerminalHandler};
 use crate::ui::{render_backgrounds, render_cursor, render_decorations, render_scrollbar, render_text_runs, Theme};
@@ -32,6 +32,10 @@ pub struct InfrawareApp {
 
     /// PTY output receiver channel
     pty_output_rx: Option<mpsc::Receiver<Vec<u8>>>,
+
+    /// PTY reader (must be kept alive to keep reader thread running)
+    #[expect(dead_code, reason = "Held to keep reader thread alive via Drop")]
+    pty_reader: Option<PtyReader>,
 
     /// PTY manager for resize
     pty_manager: Option<Arc<TokioMutex<PtyManager>>>,
@@ -109,51 +113,29 @@ impl InfrawareApp {
         // Default terminal size from config
         let (rows, cols) = (size::DEFAULT_ROWS, size::DEFAULT_COLS);
 
-        // Initialize PTY
-        let (pty_writer, pty_output_rx, pty_manager) = runtime.block_on(async {
+        // Initialize PTY with consolidated channel (FASE 2 optimization)
+        // Single sync_channel instead of double channel eliminates async overhead
+        let (pty_writer, pty_output_rx, pty_reader, pty_manager) = runtime.block_on(async {
             match PtyManager::new().await {
                 Ok(mut manager) => {
                     log::info!("PTY initialized with shell: {}", manager.shell());
 
-                    let writer = manager.take_writer().await.ok();
-                    let reader = manager.take_reader().await.ok();
-
-                    // Use sync_channel with limited capacity for BACKPRESSURE
-                    // When channel is full, I/O thread blocks -> kernel buffer fills ->
+                    // Create sync_channel with limited capacity for BACKPRESSURE
+                    // When channel is full, reader thread blocks -> kernel buffer fills ->
                     // cat blocks on write() -> kernel can process Ctrl+C
                     let (tx, rx) = mpsc::sync_channel(pty_config::CHANNEL_CAPACITY);
 
-                    if let Some(mut pty_reader) = reader {
-                        std::thread::spawn(move || {
-                            let rt = Runtime::new().unwrap();
-                            rt.block_on(async {
-                                loop {
-                                    // BLOCKING READ: Thread sleeps until PTY has data
-                                    // This eliminates 62.5 Hz polling overhead when idle
-                                    match pty_reader.read().await {
-                                        Ok(data) if !data.is_empty() => {
-                                            // This will BLOCK if channel is full - creating backpressure
-                                            if tx.send(data).is_err() {
-                                                break;
-                                            }
-                                        }
-                                        Ok(_) => {
-                                            // Empty read shouldn't happen with blocking read
-                                            // but handle gracefully
-                                        }
-                                        Err(_) => break, // Channel closed - shell exited
-                                    }
-                                }
-                            });
-                        });
-                    }
+                    let writer = manager.take_writer().await.ok();
+                    // PERFORMANCE: Reader sends directly to sync_channel (no bridge thread)
+                    // IMPORTANT: Reader must be kept alive to keep reader thread running
+                    let reader = manager.take_reader(tx).await.ok();
 
                     let manager = Arc::new(TokioMutex::new(manager));
-                    (writer, Some(rx), Some(manager))
+                    (writer, Some(rx), reader, Some(manager))
                 }
                 Err(e) => {
                     log::error!("Failed to initialize PTY: {}", e);
-                    (None, None, None)
+                    (None, None, None, None)
                 }
             }
         });
@@ -165,6 +147,7 @@ impl InfrawareApp {
             terminal_handler: TerminalHandler::new(rows, cols),
             pty_writer,
             pty_output_rx,
+            pty_reader,
             pty_manager,
             terminal_size: (cols, rows),
             should_quit: false,

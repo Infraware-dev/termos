@@ -1,22 +1,21 @@
-//! Async I/O for PTY operations.
+//! PTY I/O operations.
 //!
-//! Provides async wrappers around the synchronous PTY reader/writer,
-//! using a dedicated reader thread with channels for non-blocking operation.
+//! Provides wrappers around the synchronous PTY reader/writer,
+//! using a dedicated reader thread with sync channel for non-blocking operation.
 
 use super::traits::PtyWrite;
 use anyhow::{Context, Result};
 use std::fmt;
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::SyncSender;
 use std::sync::Arc;
 
-/// Async reader for PTY output.
+/// Reader for PTY output.
 ///
 /// Uses a dedicated background thread for reading to avoid blocking.
-/// Data is sent via a channel for async consumption.
+/// Data is sent via a sync channel for direct consumption without async overhead.
 pub struct PtyReader {
-    /// Receiver for data from the reader thread
-    receiver: tokio::sync::mpsc::Receiver<Vec<u8>>,
     /// Flag to signal the reader thread to stop
     stop_flag: Arc<AtomicBool>,
 }
@@ -37,9 +36,15 @@ impl Drop for PtyReader {
 
 #[expect(dead_code, reason = "Public API - reader methods used by PtyManager")]
 impl PtyReader {
-    /// Create a new async PTY reader with a background reading thread.
-    pub fn new(mut reader: Box<dyn Read + Send>) -> Self {
-        let (tx, rx) = tokio::sync::mpsc::channel(32);
+    /// Create a new PTY reader that sends data to the provided channel.
+    ///
+    /// Spawns a background thread that reads from the PTY and sends data
+    /// directly to the sync channel. This avoids double-channel overhead.
+    ///
+    /// # Arguments
+    /// * `reader` - The raw PTY reader (file descriptor)
+    /// * `sender` - Sync channel sender for PTY output data
+    pub fn new(mut reader: Box<dyn Read + Send>, sender: SyncSender<Vec<u8>>) -> Self {
         let stop_flag = Arc::new(AtomicBool::new(false));
         let stop_flag_clone = stop_flag.clone();
 
@@ -62,8 +67,9 @@ impl PtyReader {
                     }
                     Ok(n) => {
                         let data = buf[..n].to_vec();
-                        // Send data through channel
-                        if tx.blocking_send(data).is_err() {
+                        // PERFORMANCE: Send directly to sync channel (no async overhead)
+                        // This will BLOCK if channel is full - creating backpressure
+                        if sender.send(data).is_err() {
                             // Channel closed, stop reading
                             break;
                         }
@@ -81,55 +87,10 @@ impl PtyReader {
             log::debug!("PTY reader thread exiting");
         });
 
-        Self {
-            receiver: rx,
-            stop_flag,
-        }
+        Self { stop_flag }
     }
 
-    /// Read available data from the PTY without blocking.
-    ///
-    /// Returns data if available, or empty Vec if no data ready.
-    pub async fn read_available(&mut self) -> Result<Vec<u8>> {
-        // Try to receive data from the channel without blocking
-        match self.receiver.try_recv() {
-            Ok(data) => Ok(data),
-            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => Ok(Vec::new()),
-            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
-                // Reader thread has stopped
-                Ok(Vec::new())
-            }
-        }
-    }
-
-    /// Read with timeout - waits up to the specified duration for data.
-    /// Returns error if the channel is closed (shell exited).
-    pub async fn read_with_timeout(&mut self, timeout: std::time::Duration) -> Result<Vec<u8>> {
-        match tokio::time::timeout(timeout, self.receiver.recv()).await {
-            Ok(Some(data)) => Ok(data),
-            Ok(None) => {
-                // Channel closed - shell exited
-                anyhow::bail!("PTY channel closed - shell exited")
-            }
-            Err(_) => Ok(Vec::new()), // Timeout - no data yet
-        }
-    }
-
-    /// Blocking read - waits indefinitely for data from PTY.
-    /// This is more efficient than polling with timeout as the thread sleeps
-    /// until data is actually available.
-    /// Returns error if the channel is closed (shell exited).
-    pub async fn read(&mut self) -> Result<Vec<u8>> {
-        match self.receiver.recv().await {
-            Some(data) => Ok(data),
-            None => {
-                // Channel closed - shell exited
-                anyhow::bail!("PTY channel closed - shell exited")
-            }
-        }
-    }
-
-    /// Check if the reader channel is still open.
+    /// Check if the reader thread is still running.
     pub fn is_alive(&self) -> bool {
         // Acquire ordering: consistent with the reader thread's load
         !self.stop_flag.load(Ordering::Acquire)
@@ -232,17 +193,19 @@ impl PtyWrite for PtyWriter {
 mod tests {
     use super::*;
     use std::io::Cursor;
+    use std::sync::mpsc;
 
-    #[tokio::test]
-    async fn test_pty_reader_creation() {
+    #[test]
+    fn test_pty_reader_creation() {
         let data = b"Hello, PTY!";
         let cursor = Cursor::new(data.to_vec());
-        let mut reader = PtyReader::new(Box::new(cursor));
+        let (tx, rx) = mpsc::sync_channel(4);
+        let _reader = PtyReader::new(Box::new(cursor), tx);
 
         // Wait a bit for the reader thread to read the data
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        std::thread::sleep(std::time::Duration::from_millis(50));
 
-        let result = reader.read_available().await.unwrap();
+        let result = rx.try_recv().unwrap();
         assert_eq!(&result, data);
     }
 

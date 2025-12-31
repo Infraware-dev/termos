@@ -19,7 +19,7 @@ mod manager;
 mod session;
 mod traits;
 
-pub use io::PtyWriter;
+pub use io::{PtyReader, PtyWriter};
 pub use manager::PtyManager;
 pub use session::PtySession;
 

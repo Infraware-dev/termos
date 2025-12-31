@@ -71,11 +71,14 @@ impl PtyManager {
         self.current_size
     }
 
-    /// Get a reader for PTY output.
+    /// Get a reader for PTY output that sends to the provided channel.
     ///
     /// Note: Can only be called once (takes ownership).
-    pub async fn take_reader(&mut self) -> Result<PtyReader> {
-        self.session.reader().await
+    ///
+    /// # Arguments
+    /// * `sender` - Sync channel sender where PTY output will be sent
+    pub async fn take_reader(&mut self, sender: std::sync::mpsc::SyncSender<Vec<u8>>) -> Result<PtyReader> {
+        self.session.reader(sender).await
     }
 
     /// Get a writer for PTY input.
