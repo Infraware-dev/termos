@@ -1,0 +1,201 @@
+@startuml "Data Flow - Sequence Diagram"
+
+!theme plain
+skinparam backgroundColor #ffffff
+skinparam defaultFontName monospace
+skinparam defaultFontSize 10
+skinparam sequenceArrowColor #333333
+skinparam actorBackgroundColor #e0e0ff
+skinparam participantBackgroundColor #fffacd
+
+title "Data Flow - Keyboard Input to PTY and Shell Output to Display"
+
+participant User
+participant "egui::Context" as EguiCtx
+participant "KeyboardHandler" as KeyHandler
+participant "InfrawareApp" as App
+participant "PtyWriter" as Writer
+participant "PTY Kernel" as PTY
+participant "Shell\n(bash/zsh)" as Shell
+participant "Command\nProcess" as Cmd
+
+User -> EguiCtx : keyboard event\n(key press)
+activate EguiCtx
+
+EguiCtx -> KeyHandler : process(ctx)
+activate KeyHandler
+KeyHandler -> KeyHandler : process_ctrl_keys(ctx)
+KeyHandler -> KeyHandler : extract egui::Key event
+KeyHandler -> KeyHandler : check modifiers (Ctrl/Shift/Alt)
+
+alt Ctrl+C detected
+    KeyHandler -> KeyHandler : return KeyboardAction::SendSigInt
+else Other key
+    KeyHandler -> KeyHandler : process_text_input(ctx)
+    KeyHandler -> KeyHandler : return KeyboardAction::SendBytes(vec)
+end
+
+KeyHandler -> App : Vec<KeyboardAction>
+deactivate KeyHandler
+activate App
+
+loop for each action
+    alt SendSigInt
+        App -> App : send_sigint()
+        App -> Writer : (direct write 0x03)
+    else SendBytes
+        App -> Writer : write_bytes(data)
+    end
+end
+
+deactivate App
+deactivate EguiCtx
+
+Writer -> PTY : write(bytes) via file descriptor
+activate PTY
+
+PTY -> Shell : input data in terminal
+activate Shell
+Shell -> Shell : parse input
+Shell -> Cmd : spawn command if needed
+activate Cmd
+
+Cmd -> Cmd : generate output
+Cmd -> PTY : write(output) via file descriptor
+
+PTY -> PTY : buffer output
+
+PTY -[#blue]-> App : output available in channel
+activate App
+note right of App
+    Main thread polls:
+    poll_pty_output()
+    → rx.try_recv()
+    Blocks up to MAX_BYTES_PER_FRAME
+end note
+
+' Output processing
+App -> App : for each byte chunk received
+App -> "vte::Parser" : advance(&mut self, bytes)
+activate "vte::Parser"
+note right of "vte::Parser"
+    VTE 0.15+ parses escape sequences:
+    - Regular text → print(ch)
+    - ESC [ m → CSI SGR colors
+    - ESC ] 0 ; title BEL → OSC title
+end note
+
+"vte::Parser" -> "TerminalHandler" : calls Perform methods\n(execute, print, csi_dispatch)
+activate "TerminalHandler"
+note right of "TerminalHandler"
+    Implements vte::Perform:
+    - print(ch) → put_char()
+    - csi_dispatch() → handle control
+    - SGR codes → update colors/attrs
+end note
+
+"TerminalHandler" -> "TerminalHandler" : process_sgr(params)
+"TerminalHandler" -> "TerminalGrid" : put_char(ch)
+activate "TerminalGrid"
+
+"TerminalGrid" -> "TerminalGrid" : update cell at cursor
+"TerminalGrid" -> "TerminalGrid" : advance cursor
+"TerminalGrid" -> "TerminalGrid" : handle wrap/newline
+
+deactivate "TerminalGrid"
+deactivate "TerminalHandler"
+deactivate "vte::Parser"
+
+' Scrolling
+App -> "TerminalGrid" : scroll_to_bottom()
+activate "TerminalGrid"
+"TerminalGrid" -> "TerminalGrid" : scroll_offset = 0
+deactivate "TerminalGrid"
+
+App -> App : poll_pty_output() returns true
+
+' Rendering
+App -> "egui::Context" : egui::CentralPanel::show()
+activate EguiCtx
+App -> App : calculate terminal size\nfrom available space
+
+App -> "TerminalGrid" : grid()\nfor rendering data
+
+App -> App : render_terminal(ui)
+activate App as App2
+note right of App2
+    **Single-pass rendering:**
+    For each visible row:
+      - Iterate cells once
+      - Batch backgrounds (same color)
+      - Batch text runs (same color)
+      - Collect decorations
+
+    Then render in z-order:
+      - Backgrounds
+      - Text runs
+      - Decorations
+      - Cursor (if visible + focused)
+      - Scrollbar (if scrollback)
+end note
+
+App2 -> App2 : for each visible row
+App2 -> "Painter" : render_backgrounds(...)
+App2 -> "Painter" : render_text_runs(...)
+App2 -> "Painter" : render_decorations(...)
+
+App2 -> "Painter" : render_cursor(...)\n(conditional: focused + at bottom)
+
+App2 -> "Painter" : render_scrollbar(...)\n(if scrollback available)
+deactivate App2
+
+EguiCtx -> User : display frame
+deactivate EguiCtx
+
+' Cleanup
+deactivate Cmd
+deactivate Shell
+deactivate PTY
+deactivate Writer
+
+note over User, App
+    **Performance Optimizations:**
+
+    1. **Keyboard Input:**
+       - Direct text input via event() (not raw bytes)
+       - Ctrl+key detection via event iteration
+       - Single pass through keyboard handler
+
+    2. **PTY Output:**
+       - Blocking read in dedicated thread (no polling)
+       - Backpressure via sync_channel (capacity 32)
+       - Rate-limited: MAX_BYTES_PER_FRAME per frame
+       - Pausable after Ctrl+C (500ms delay)
+
+    3. **VTE Parsing:**
+       - Chunked parsing (byte slice not byte-by-byte)
+       - Lazy compilation (not in handlers)
+
+    4. **Terminal Grid:**
+       - Efficient scrollback (max 10K lines)
+       - O(1) cursor operations
+       - Copy-on-write attributes
+
+    5. **Rendering:**
+       - Single-pass iteration (not 3x)
+       - Batched backgrounds/text (reduce draw calls)
+       - Pre-calculated column X coordinates
+       - Cached font ID per frame
+       - Smart repaint: only if changed
+
+    6. **Reactive Repaint:**
+       - Repaint only if:
+         • PTY had data (pty_had_data)
+         • User interacted (keyboard/mouse)
+         • Cursor needs blink
+       - Idle: schedule repaint for next blink
+       - Unfocused: 2 Hz (low power)
+
+end note
+
+@enduml
