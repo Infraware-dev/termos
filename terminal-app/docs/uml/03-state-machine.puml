@@ -1,0 +1,148 @@
+@startuml "Application State Machine - Diagram"
+
+!theme plain
+skinparam backgroundColor #ffffff
+skinparam defaultFontName monospace
+skinparam defaultFontSize 11
+skinparam stateBorderColor #333333
+skinparam stateBackgroundColor #fff4e6
+skinparam arrowColor #333333
+
+title "Application State Machine (AppMode)"
+
+state "Normal" as Normal {
+    Idle state
+    Ready for user input
+    Terminal display live
+}
+
+state "WaitingLLM" as WaitingLLM {
+    Querying LLM backend
+    Terminal frozen
+    Animated throbber
+}
+
+state "AwaitingApproval" as AwaitingApproval {
+    LLM provided command
+    Waiting for y/n response
+    Command displayed
+}
+
+state "AwaitingAnswer" as AwaitingAnswer {
+    LLM asked question
+    Waiting for text input
+    Question displayed
+}
+
+' From Normal
+Normal --> WaitingLLM : QueryLLM\n(user typed unknown command)
+
+' From WaitingLLM
+WaitingLLM --> Normal : LLMCompleted\n(LLM returned final result)
+
+WaitingLLM --> AwaitingApproval : LLMRequestsApproval\n{ command, message }\n(LLM suggests dangerous cmd)
+
+WaitingLLM --> AwaitingAnswer : LLMAsksQuestion\n{ question, options }\n(LLM needs clarification)
+
+' From AwaitingApproval
+AwaitingApproval --> Normal : UserResponded\n(user pressed y/n)
+
+AwaitingApproval --> WaitingLLM : (resume with approval)\n[deferred - future feature]
+
+' From AwaitingAnswer
+AwaitingAnswer --> Normal : UserAnswered\n(user typed answer + Enter)
+
+AwaitingAnswer --> WaitingLLM : (resume with answer)\n[deferred - future feature]
+
+' From Any (Cancel)
+Normal --> Normal : Cancel\n(idempotent)
+WaitingLLM --> Normal : Cancel\n(Ctrl+C - abort LLM query)
+AwaitingApproval --> Normal : Cancel\n(Ctrl+C - reject command)
+AwaitingAnswer --> Normal : Cancel\n(Ctrl+C - abort question)
+
+note right of Normal
+    **Default state:**
+    - User can type commands
+    - PTY output displayed
+    - Cursor visible
+    - All input modes available
+end note
+
+note right of WaitingLLM
+    **LLM Query in Progress:**
+    - Terminal output frozen
+    - Animated throbber shows wait state
+    - User can press Ctrl+C to cancel
+    - Streaming response display (future)
+end note
+
+note right of AwaitingApproval
+    **Command Approval Needed:**
+    - LLM command shown
+    - Explanation/warning displayed
+    - Waiting for y/n/Ctrl+C
+    - Example: dangerous rm/dd commands
+end note
+
+note right of AwaitingAnswer
+    **LLM Question Needs Answer:**
+    - Question displayed
+    - Free-text or multiple choice
+    - Waiting for user input + Enter
+    - Example: "Which file?"
+end note
+
+note bottom
+    **State Machine Properties:**
+
+    1. **Valid Transitions Only:**
+       - can_transition_to(target) checks validity
+       - Invalid transitions return error
+       - Prevents corrupted state
+
+    2. **Atomic Transitions:**
+       - transition(event) consumes self + event
+       - Returns new state or error
+       - No intermediate states
+
+    3. **Idempotent Same-State:**
+       - Normal → Normal is valid (idempotent)
+       - Allows safe retries
+
+    4. **Cancel from Any State:**
+       - Cancel event always → Normal
+       - Provides user escape hatch
+       - Ctrl+C triggers cancel
+
+    5. **Direct Transitions Only:**
+       - No chaining (Normal → AwaitingApproval forbidden)
+       - Must go through WaitingLLM
+       - Prevents accidental state bypass
+
+    **Implementation:**
+    AppMode enum variants store data:
+    - AwaitingApproval { command, message }
+    - AwaitingAnswer { question, options }
+    Data consumed on transition (no clone)
+end note
+
+' Show state data
+note left of AwaitingApproval
+    pub enum AppMode {
+        Normal,
+
+        WaitingLLM,
+
+        AwaitingApproval {
+            command: String,
+            message: String,
+        },
+
+        AwaitingAnswer {
+            question: String,
+            options: Option<Vec<String>>,
+        },
+    }
+end note
+
+@enduml
