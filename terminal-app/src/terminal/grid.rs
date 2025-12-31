@@ -1,6 +1,7 @@
 //! Terminal grid for storing and manipulating terminal state.
 
 use super::cell::{Cell, CellAttrs, Color, NamedColor};
+use std::collections::VecDeque;
 
 /// Maximum lines in scrollback buffer
 const MAX_SCROLLBACK: usize = 10_000;
@@ -11,7 +12,8 @@ pub struct TerminalGrid {
     /// Grid of cells [row][col] - visible screen only.
     cells: Vec<Vec<Cell>>,
     /// Scrollback buffer - lines that scrolled off the top.
-    scrollback: Vec<Vec<Cell>>,
+    /// Uses VecDeque for O(1) pop_front when trimming.
+    scrollback: VecDeque<Vec<Cell>>,
     /// Current scroll offset (0 = bottom/live, >0 = scrolled up).
     scroll_offset: usize,
     /// Cursor row (0-indexed).
@@ -79,7 +81,7 @@ impl TerminalGrid {
 
         Self {
             cells,
-            scrollback: Vec::new(),
+            scrollback: VecDeque::new(),
             scroll_offset: 0,
             cursor_row: 0,
             cursor_col: 0,
@@ -136,7 +138,7 @@ impl TerminalGrid {
     }
 
     /// Get scrollback buffer.
-    pub fn scrollback(&self) -> &[Vec<Cell>] {
+    pub fn scrollback(&self) -> &VecDeque<Vec<Cell>> {
         &self.scrollback
     }
 
@@ -359,10 +361,10 @@ impl TerminalGrid {
                 // Save the line going off the top to scrollback (only if scroll region is full screen)
                 if top == 0 {
                     let removed_line = self.cells.remove(top);
-                    self.scrollback.push(removed_line);
-                    // Trim scrollback if too large
+                    self.scrollback.push_back(removed_line);
+                    // Trim scrollback if too large - O(1) with VecDeque
                     if self.scrollback.len() > MAX_SCROLLBACK {
-                        self.scrollback.remove(0);
+                        self.scrollback.pop_front();
                     }
                 } else {
                     self.cells.remove(top);

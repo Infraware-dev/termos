@@ -30,7 +30,8 @@ impl fmt::Debug for PtyReader {
 impl Drop for PtyReader {
     fn drop(&mut self) {
         // Signal the reader thread to stop
-        self.stop_flag.store(true, Ordering::SeqCst);
+        // Release ordering: ensures all writes before this store are visible to the reader
+        self.stop_flag.store(true, Ordering::Release);
     }
 }
 
@@ -48,7 +49,8 @@ impl PtyReader {
 
             loop {
                 // Check if we should stop
-                if stop_flag_clone.load(Ordering::SeqCst) {
+                // Acquire ordering: sees all writes before the Release store
+                if stop_flag_clone.load(Ordering::Acquire) {
                     break;
                 }
 
@@ -129,7 +131,8 @@ impl PtyReader {
 
     /// Check if the reader channel is still open.
     pub fn is_alive(&self) -> bool {
-        !self.stop_flag.load(Ordering::SeqCst)
+        // Acquire ordering: consistent with the reader thread's load
+        !self.stop_flag.load(Ordering::Acquire)
     }
 }
 

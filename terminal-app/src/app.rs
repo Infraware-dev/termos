@@ -81,6 +81,14 @@ pub struct InfrawareApp {
 
     /// Keyboard input handler (extracted for testability)
     keyboard_handler: KeyboardHandler,
+
+    // === PERFORMANCE: Reusable render buffers (avoid per-frame allocations) ===
+    /// Background rectangles buffer (reused each frame with .clear())
+    render_bg_rects: Vec<(f32, f32, egui::Color32)>,
+    /// Text runs buffer (reused each frame with .clear())
+    render_text_runs: Vec<(f32, String, egui::Color32)>,
+    /// Decorations buffer (reused each frame with .clear())
+    render_decorations: Vec<(f32, bool, bool, egui::Color32)>,
 }
 
 impl std::fmt::Debug for InfrawareApp {
@@ -174,6 +182,10 @@ impl InfrawareApp {
             font_id: FontId::new(rendering::FONT_SIZE, FontFamily::Monospace),
             column_x_coords: (0..cols).map(|c| c as f32 * rendering::CHAR_WIDTH).collect(),
             keyboard_handler: KeyboardHandler::new(),
+            // Pre-allocate render buffers (reused each frame to avoid allocations)
+            render_bg_rects: Vec::with_capacity(32),
+            render_text_runs: Vec::with_capacity(32),
+            render_decorations: Vec::with_capacity(8),
         }
     }
 
@@ -327,7 +339,8 @@ clear
     }
 
     /// Render terminal grid using custom paint.
-    fn render_terminal(&mut self, ui: &mut egui::Ui) {
+    /// `has_focus` is passed to avoid redundant ctx.input() calls.
+    fn render_terminal(&mut self, ui: &mut egui::Ui, has_focus: bool) {
         let available = ui.available_size();
 
         // Use cached font (avoids per-frame allocation)
@@ -374,18 +387,17 @@ clear
         // then draw in correct z-order (backgrounds → text → decorations).
         // This reduces from 3 iterations to 1 iteration per row.
 
-        // Pre-allocate buffers outside the loop to avoid per-row allocations
-        let mut bg_rects: Vec<(f32, f32, Color32)> = Vec::with_capacity(16);
-        let mut text_runs: Vec<(f32, String, Color32)> = Vec::with_capacity(16);
-        let mut decorations: Vec<(f32, bool, bool, Color32)> = Vec::with_capacity(4);
+        // PERFORMANCE: Use struct-level buffers to avoid per-frame allocations.
+        // These are cleared per-row but memory is reused across frames.
+        // (Vec::clear() is O(1) and doesn't deallocate)
 
         for (row_idx, row) in visible_rows.iter().enumerate() {
             let y = rect.top() + row_idx as f32 * self.char_height;
 
-            // Clear buffers for this row (reuse allocations)
-            bg_rects.clear();
-            text_runs.clear();
-            decorations.clear();
+            // Clear buffers for this row (O(1), reuses allocations)
+            self.render_bg_rects.clear();
+            self.render_text_runs.clear();
+            self.render_decorations.clear();
 
             // State for batching
             let mut bg_start: Option<(usize, Color32)> = None;
@@ -413,7 +425,7 @@ clear
                             // Flush previous background run
                             let start_x = self.column_x_coords.get(start).copied().unwrap_or(start as f32 * self.char_width);
                             let width = (col_idx - start) as f32 * self.char_width;
-                            bg_rects.push((start_x, width, color));
+                            self.render_bg_rects.push((start_x, width, color));
                             bg_start = Some((col_idx, bg));
                         }
                         None => {
@@ -423,7 +435,7 @@ clear
                 } else if let Some((start, color)) = bg_start.take() {
                     let start_x = self.column_x_coords.get(start).copied().unwrap_or(start as f32 * self.char_width);
                     let width = (col_idx - start) as f32 * self.char_width;
-                    bg_rects.push((start_x, width, color));
+                    self.render_bg_rects.push((start_x, width, color));
                 }
 
                 // --- Text batching ---
@@ -431,7 +443,7 @@ clear
                     if let Some((start, color)) = run_start.take() {
                         if !text_run.is_empty() {
                             let start_x = self.column_x_coords.get(start).copied().unwrap_or(start as f32 * self.char_width);
-                            text_runs.push((start_x, std::mem::take(&mut text_run), color));
+                            self.render_text_runs.push((start_x, std::mem::take(&mut text_run), color));
                         }
                     }
                 } else {
@@ -452,7 +464,7 @@ clear
                         Some((start, color)) => {
                             if !text_run.is_empty() {
                                 let start_x = self.column_x_coords.get(start).copied().unwrap_or(start as f32 * self.char_width);
-                                text_runs.push((start_x, std::mem::take(&mut text_run), color));
+                                self.render_text_runs.push((start_x, std::mem::take(&mut text_run), color));
                             }
                             run_start = Some((col_idx, fg));
                             text_run.push(cell.ch);
@@ -471,7 +483,7 @@ clear
                     } else {
                         self.color_to_egui(cell.fg)
                     };
-                    decorations.push((x, cell.attrs.underline, cell.attrs.strikethrough, fg));
+                    self.render_decorations.push((x, cell.attrs.underline, cell.attrs.strikethrough, fg));
                 }
             }
 
@@ -479,32 +491,28 @@ clear
             if let Some((start, color)) = bg_start {
                 let start_x = self.column_x_coords.get(start).copied().unwrap_or(start as f32 * self.char_width);
                 let width = (row_len - start) as f32 * self.char_width;
-                bg_rects.push((start_x, width, color));
+                self.render_bg_rects.push((start_x, width, color));
             }
 
-            // Flush remaining text
+            // Flush remaining text (use std::mem::take to avoid clone)
             if let Some((start, color)) = run_start {
                 if !text_run.is_empty() {
                     let start_x = self.column_x_coords.get(start).copied().unwrap_or(start as f32 * self.char_width);
-                    text_runs.push((start_x, text_run.clone(), color));
+                    self.render_text_runs.push((start_x, std::mem::take(&mut text_run), color));
                 }
             }
 
             // --- DRAW PHASE: Render in correct z-order using helper functions ---
-            render_backgrounds(&painter, rect, y, self.char_height, &bg_rects);
-            render_text_runs(&painter, rect, y, font_id, &text_runs);
-            render_decorations(&painter, rect, y, self.char_width, self.char_height, &decorations);
+            render_backgrounds(&painter, rect, y, self.char_height, &self.render_bg_rects);
+            render_text_runs(&painter, rect, y, font_id, &self.render_text_runs);
+            render_decorations(&painter, rect, y, self.char_width, self.char_height, &self.render_decorations);
         }
 
-        // Draw cursor (only when at bottom/live view, after shell init, with blink)
-        if cursor_visible && self.shell_initialized && self.cursor_blink_visible && scroll_offset == 0 {
+        // Draw cursor (only when at bottom/live view, after shell init, with blink, and focused)
+        if cursor_visible && self.shell_initialized && self.cursor_blink_visible && scroll_offset == 0 && has_focus {
             let cursor_x = rect.left() + self.column_x_coords.get(cursor_col as usize).copied().unwrap_or(cursor_col as f32 * self.char_width);
             let cursor_y = rect.top() + cursor_row as f32 * self.char_height;
-
-            // Only draw cursor when window is focused
-            if ui.input(|i| i.focused) {
-                render_cursor(&painter, cursor_x, cursor_y, self.char_height, self.theme.cursor);
-            }
+            render_cursor(&painter, cursor_x, cursor_y, self.char_height, self.theme.cursor);
         }
 
         // Draw scrollbar if there's scrollback content
@@ -572,7 +580,7 @@ impl eframe::App for InfrawareApp {
         // Initialize shell with custom prompt after startup delay
         self.initialize_shell();
 
-        // Render UI
+        // Render UI (pass has_focus to avoid redundant ctx.input() calls)
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(self.theme.background))
             .show(ctx, |ui| {
@@ -582,7 +590,7 @@ impl eframe::App for InfrawareApp {
                 let rows = ((available.y / self.char_height) as u16).max(5);
                 self.resize_pty(cols, rows);
 
-                self.render_terminal(ui);
+                self.render_terminal(ui, has_focus);
             });
 
         // REACTIVE REPAINT: Only request repaint when something actually changed
