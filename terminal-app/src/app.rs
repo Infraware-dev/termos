@@ -5,7 +5,10 @@ use crate::input::{KeyboardAction, KeyboardHandler};
 use crate::pty::{PtyManager, PtyReader, PtyWrite, PtyWriter};
 use crate::state::AppMode;
 use crate::terminal::{Color, TerminalHandler};
-use crate::ui::{render_backgrounds, render_cursor, render_decorations, render_scrollbar, render_text_runs, Theme};
+use crate::ui::{
+    render_backgrounds, render_cursor, render_decorations, render_scrollbar, render_text_runs,
+    Theme,
+};
 use egui::{Color32, FontFamily, FontId, Sense, Vec2, ViewportCommand};
 use std::sync::mpsc;
 use std::sync::Arc;
@@ -163,7 +166,9 @@ impl InfrawareApp {
             output_pause_until: None,
             had_window_focus: false,
             font_id: FontId::new(rendering::FONT_SIZE, FontFamily::Monospace),
-            column_x_coords: (0..cols).map(|c| c as f32 * rendering::CHAR_WIDTH).collect(),
+            column_x_coords: (0..cols)
+                .map(|c| c as f32 * rendering::CHAR_WIDTH)
+                .collect(),
             keyboard_handler: KeyboardHandler::new(),
             // Pre-allocate render buffers (reused each frame to avoid allocations)
             render_bg_rects: Vec::with_capacity(32),
@@ -186,10 +191,15 @@ impl InfrawareApp {
         self.shell_initialized = true;
 
         // Set custom prompt with |~| prefix (green)
-        let init_commands = r#"
-export PS1='\[\e[32m\]|~| \u@\h:\w\$ \[\e[0m\] '
-clear
-"#;
+        // Use $'...' for bash escape interpretation and %{...%} for zsh
+        // The shell-specific syntax is handled by detecting which shell is running
+        let init_commands = if std::env::var("SHELL").unwrap_or_default().contains("zsh") {
+            // zsh: use %{ %} for non-printing chars and %F/%f for colors
+            "export PROMPT='%F{green}|~| %n@%m:%~%# %f'\nclear\n"
+        } else {
+            // bash: use $'...' for escape interpretation, \[...\] for non-printing
+            "export PS1=$'\\[\\e[32m\\]|~| \\u@\\h:\\w\\$ \\[\\e[0m\\]'\nclear\n"
+        };
 
         self.send_to_pty(init_commands.as_bytes());
         log::info!("Shell initialized with custom prompt");
@@ -199,7 +209,6 @@ clear
     /// Rate-limited to allow Ctrl+C to work even with heavy output (cat /dev/zero).
     /// Returns true if any output was processed (for smart repaint).
     fn poll_pty_output(&mut self) -> bool {
-
         // If paused (after Ctrl+C), skip reading to let kernel process input
         if let Some(until) = self.output_pause_until {
             if Instant::now() < until {
@@ -270,7 +279,9 @@ clear
 
     /// Resize PTY to match window size.
     fn resize_pty(&mut self, cols: u16, rows: u16) {
-        if self.terminal_size != (cols, rows) && self.last_resize.elapsed() > timing::RESIZE_DEBOUNCE {
+        if self.terminal_size != (cols, rows)
+            && self.last_resize.elapsed() > timing::RESIZE_DEBOUNCE
+        {
             self.terminal_size = (cols, rows);
             self.last_resize = Instant::now();
 
@@ -435,7 +446,11 @@ clear
                 if cell.ch == ' ' || cell.attrs.hidden {
                     if let Some((start, color)) = run_start.take() {
                         if !text_run.is_empty() {
-                            self.render_text_runs.push((col_x(start), std::mem::take(&mut text_run), color));
+                            self.render_text_runs.push((
+                                col_x(start),
+                                std::mem::take(&mut text_run),
+                                color,
+                            ));
                         }
                     }
                 } else {
@@ -455,7 +470,11 @@ clear
                         }
                         Some((start, color)) => {
                             if !text_run.is_empty() {
-                                self.render_text_runs.push((col_x(start), std::mem::take(&mut text_run), color));
+                                self.render_text_runs.push((
+                                    col_x(start),
+                                    std::mem::take(&mut text_run),
+                                    color,
+                                ));
                             }
                             run_start = Some((col_idx, fg));
                             text_run.push(cell.ch);
@@ -474,7 +493,12 @@ clear
                     } else {
                         self.color_to_egui(cell.fg)
                     };
-                    self.render_decorations.push((x, cell.attrs.underline, cell.attrs.strikethrough, fg));
+                    self.render_decorations.push((
+                        x,
+                        cell.attrs.underline,
+                        cell.attrs.strikethrough,
+                        fg,
+                    ));
                 }
             }
 
@@ -487,32 +511,61 @@ clear
             // Flush remaining text (use std::mem::take to avoid clone)
             if let Some((start, color)) = run_start {
                 if !text_run.is_empty() {
-                    self.render_text_runs.push((col_x(start), std::mem::take(&mut text_run), color));
+                    self.render_text_runs.push((
+                        col_x(start),
+                        std::mem::take(&mut text_run),
+                        color,
+                    ));
                 }
             }
 
             // --- DRAW PHASE: Render in correct z-order using helper functions ---
             render_backgrounds(&painter, rect, y, self.char_height, &self.render_bg_rects);
             render_text_runs(&painter, rect, y, font_id, &self.render_text_runs);
-            render_decorations(&painter, rect, y, self.char_width, self.char_height, &self.render_decorations);
+            render_decorations(
+                &painter,
+                rect,
+                y,
+                self.char_width,
+                self.char_height,
+                &self.render_decorations,
+            );
         }
 
         // Draw cursor (only when at bottom/live view, after shell init, with blink, and focused)
-        if cursor_visible && self.shell_initialized && self.cursor_blink_visible && scroll_offset == 0 && has_focus {
+        if cursor_visible
+            && self.shell_initialized
+            && self.cursor_blink_visible
+            && scroll_offset == 0
+            && has_focus
+        {
             // Direct indexing with bounds check (cursor_col comes from grid, should be < cols)
             let cursor_col_idx = cursor_col as usize;
-            let cursor_x = rect.left() + if cursor_col_idx < self.column_x_coords.len() {
-                self.column_x_coords[cursor_col_idx]
-            } else {
-                cursor_col as f32 * self.char_width
-            };
+            let cursor_x = rect.left()
+                + if cursor_col_idx < self.column_x_coords.len() {
+                    self.column_x_coords[cursor_col_idx]
+                } else {
+                    cursor_col as f32 * self.char_width
+                };
             let cursor_y = rect.top() + cursor_row as f32 * self.char_height;
-            render_cursor(&painter, cursor_x, cursor_y, self.char_height, self.theme.cursor);
+            render_cursor(
+                &painter,
+                cursor_x,
+                cursor_y,
+                self.char_height,
+                self.theme.cursor,
+            );
         }
 
         // Draw scrollbar if there's scrollback content
         if max_scroll > 0 {
-            render_scrollbar(&painter, rect, scroll_offset, max_scroll, visible_rows.len());
+            render_scrollbar(
+                &painter,
+                rect,
+                scroll_offset,
+                max_scroll,
+                visible_rows.len(),
+            );
         }
     }
 }
