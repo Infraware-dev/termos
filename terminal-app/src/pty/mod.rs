@@ -97,11 +97,8 @@ impl Pty {
         builder.env("COLUMNS", size.cols.to_string());
         builder.env("LINES", size.rows.to_string());
 
-        // Set custom prompt with |~| prefix
-        // Format: |~| user@host:path$
-        builder.env("PS1", "|~| \\u@\\h:\\w\\$ ");
-        // Also set PROMPT for zsh
-        builder.env("PROMPT", "|~| %n@%m:%~%# ");
+        // NOTE: Do NOT set PS1/PROMPT here - it interferes with sub-shells (sudo su).
+        // The custom prompt is set by initialize_shell() after startup instead.
 
         let child = pair.slave.spawn_command(builder)?;
 
