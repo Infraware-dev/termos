@@ -77,7 +77,10 @@ impl PtyManager {
     ///
     /// # Arguments
     /// * `sender` - Sync channel sender where PTY output will be sent
-    pub async fn take_reader(&mut self, sender: std::sync::mpsc::SyncSender<Vec<u8>>) -> Result<PtyReader> {
+    pub async fn take_reader(
+        &mut self,
+        sender: std::sync::mpsc::SyncSender<Vec<u8>>,
+    ) -> Result<PtyReader> {
         self.session.reader(sender).await
     }
 

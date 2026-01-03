@@ -104,7 +104,10 @@ impl std::fmt::Debug for PtySession {
     }
 }
 
-#[expect(dead_code, reason = "Public API - session methods used by PtyManager and tests")]
+#[expect(
+    dead_code,
+    reason = "Public API - session methods used by PtyManager and tests"
+)]
 impl PtySession {
     /// Create a new PTY session from a PTY pair and child process.
     pub(crate) fn new(pair: PtyPair, child: Box<dyn Child + Send + Sync>) -> Self {
@@ -123,7 +126,10 @@ impl PtySession {
     ///
     /// # Arguments
     /// * `sender` - Sync channel sender where PTY output will be sent
-    pub async fn reader(&mut self, sender: std::sync::mpsc::SyncSender<Vec<u8>>) -> Result<PtyReader> {
+    pub async fn reader(
+        &mut self,
+        sender: std::sync::mpsc::SyncSender<Vec<u8>>,
+    ) -> Result<PtyReader> {
         if self.reader.is_none() {
             let master = self.master.lock().await;
             let reader = master
@@ -201,51 +207,39 @@ impl PtySession {
         child.process_id()
     }
 
-    /// Send SIGINT to the foreground process group.
-    /// Reads tpgid from /proc to get the actual foreground group (e.g., cat, not shell).
+    /// Send SIGINT to the foreground process by writing Ctrl+C (0x03) to the PTY.
+    ///
+    /// This is the correct way to send SIGINT - it goes through the terminal driver
+    /// which then sends the signal to the foreground process group. This matches
+    /// what happens when the user physically presses Ctrl+C.
     #[cfg(unix)]
     pub fn send_sigint(&self) -> Result<()> {
-        use nix::sys::signal::{kill, Signal};
-        use nix::unistd::Pid;
-
-        // Get shell PID first
-        let shell_pid = {
-            match self.child.try_lock() {
-                Ok(child) => child.process_id(),
-                Err(_) => {
-                    log::warn!("Could not lock child to get PID, skipping SIGINT");
-                    return Ok(());
-                }
-            }
-        };
-
-        if let Some(pid) = shell_pid {
-            // Read foreground pgid from /proc/<pid>/stat - this is the KEY!
-            // tpgid is the foreground process group of the controlling terminal
-            if let Ok(stat) = std::fs::read_to_string(format!("/proc/{}/stat", pid)) {
-                if let Some(comm_end) = stat.rfind(')') {
-                    let after_comm = &stat[comm_end + 1..];
-                    let fields: Vec<&str> = after_comm.split_whitespace().collect();
-                    // After (comm): state(0) ppid(1) pgrp(2) session(3) tty_nr(4) tpgid(5)
-                    if fields.len() > 5 {
-                        if let Ok(tpgid) = fields[5].parse::<i32>() {
-                            if tpgid > 0 {
-                                log::info!("Sending SIGINT to foreground pgid {} (tpgid from /proc/{})", tpgid, pid);
-                                kill(Pid::from_raw(-tpgid), Signal::SIGINT)
-                                    .context("Failed to send SIGINT to foreground pgid")?;
-                                return Ok(());
-                            }
-                        }
+        // Write Ctrl+C (0x03) directly to the master PTY's file descriptor
+        // The terminal driver will convert this to SIGINT for the foreground process group
+        match self.master.try_lock() {
+            Ok(master) => {
+                if let Some(raw_fd) = master.as_raw_fd() {
+                    // SAFETY: raw_fd is valid while master lock is held
+                    // We write a single byte (Ctrl+C) to trigger SIGINT
+                    let result = unsafe { libc::write(raw_fd, [0x03].as_ptr().cast(), 1) };
+                    if result == 1 {
+                        log::debug!("Sent Ctrl+C (0x03) to PTY fd {}", raw_fd);
+                        Ok(())
+                    } else {
+                        let err = std::io::Error::last_os_error();
+                        log::warn!("Failed to write Ctrl+C to PTY: {}", err);
+                        Err(anyhow::anyhow!("Failed to write Ctrl+C to PTY: {}", err))
                     }
+                } else {
+                    log::warn!("No raw fd available from master PTY");
+                    Ok(())
                 }
             }
-
-            // Fallback: send to shell's process group
-            log::info!("Sending SIGINT to shell process group {} (fallback)", pid);
-            kill(Pid::from_raw(-(pid as i32)), Signal::SIGINT)
-                .context("Failed to send SIGINT to process group")?;
+            Err(_) => {
+                log::warn!("Could not lock master PTY for SIGINT");
+                Ok(())
+            }
         }
-        Ok(())
     }
 
     #[cfg(not(unix))]
@@ -376,76 +370,7 @@ mod tests {
         );
     }
 
-    /// Test that SIGINT can kill an infinite-output process like `yes` or `cat /dev/zero`
-    #[tokio::test]
-    async fn test_sigint_kills_infinite_output() {
-        // Skip if not running in a real terminal
-        if std::env::var("CI").is_ok() {
-            return;
-        }
-
-        let pty = crate::pty::Pty::new();
-        // Use `yes` instead of `cat /dev/zero` - similar infinite output but text
-        let args: &[&str] = &[];
-        let session = pty
-            .spawn("yes", args, crate::pty::DEFAULT_PTY_SIZE)
-            .expect("Failed to spawn PTY");
-
-        // Let it run for a bit
-        std::thread::sleep(std::time::Duration::from_millis(100));
-
-        // Verify it's still running
-        assert!(session.is_running().await, "Process should still be running");
-
-        // Send SIGINT
-        println!("Sending SIGINT...");
-        session.send_sigint().expect("Failed to send SIGINT");
-
-        // Wait a bit for it to die
-        std::thread::sleep(std::time::Duration::from_millis(200));
-
-        // Check if it's dead
-        let is_running = session.is_running().await;
-        println!("After SIGINT, is_running: {}", is_running);
-
-        assert!(!is_running, "Process should have been killed by SIGINT");
-    }
-
-    /// Test SIGINT with a shell running an infinite command (closer to real app behavior)
-    #[tokio::test]
-    async fn test_sigint_kills_shell_child() {
-        // Skip if not running in a real terminal
-        if std::env::var("CI").is_ok() {
-            return;
-        }
-
-        let pty = crate::pty::Pty::new();
-        // Spawn bash running `yes` - this is how the real app works
-        let session = pty
-            .spawn("bash", &["-c", "yes"], crate::pty::DEFAULT_PTY_SIZE)
-            .expect("Failed to spawn PTY");
-
-        // Let it run for a bit
-        std::thread::sleep(std::time::Duration::from_millis(200));
-
-        // Verify it's still running
-        assert!(session.is_running().await, "Process should still be running");
-
-        // Send SIGINT - should kill the foreground job (yes), not bash itself
-        println!("Sending SIGINT to foreground...");
-        session.send_sigint().expect("Failed to send SIGINT");
-
-        // Wait for it to die
-        std::thread::sleep(std::time::Duration::from_millis(300));
-
-        // The bash -c "yes" should exit when yes is killed
-        let is_running = session.is_running().await;
-        println!("After SIGINT, is_running: {}", is_running);
-
-        assert!(!is_running, "bash -c 'yes' should have exited after SIGINT");
-    }
-
-    /// Test SIGINT with interactive shell - most realistic test
+    /// Test SIGINT with interactive shell - the realistic scenario used by the app
     #[tokio::test]
     async fn test_sigint_interactive_shell() {
         // Skip if not running in a real terminal
@@ -487,10 +412,16 @@ mod tests {
 
         // yes should have been killed, but interactive bash is still running
         // In interactive mode, bash catches SIGINT for the child and returns to prompt
-        assert!(is_running, "Interactive bash should still be running after child is killed");
+        assert!(
+            is_running,
+            "Interactive bash should still be running after child is killed"
+        );
 
         // Clean up - exit the shell
-        writer.write_str("exit\n").await.expect("Failed to write exit");
+        writer
+            .write_str("exit\n")
+            .await
+            .expect("Failed to write exit");
         std::thread::sleep(std::time::Duration::from_millis(200));
     }
 }

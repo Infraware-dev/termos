@@ -67,5 +67,4 @@ impl PromptConfig {
             self.prefix, self.username, self.hostname, cwd, symbol
         )
     }
-
 }

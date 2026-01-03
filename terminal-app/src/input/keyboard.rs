@@ -11,6 +11,8 @@ pub enum KeyboardAction {
     SendBytes(Vec<u8>),
     /// Send SIGINT signal (Ctrl+C)
     SendSigInt,
+    /// Copy selected text to clipboard (Cmd+C on macOS, Ctrl+Shift+C on Linux)
+    Copy,
 }
 
 /// Keyboard handler that processes egui input and returns terminal actions.
@@ -33,6 +35,14 @@ impl KeyboardHandler {
     pub fn process(&mut self, ctx: &egui::Context) -> Vec<KeyboardAction> {
         self.actions.clear();
 
+        // Process clipboard shortcuts FIRST (Cmd+C/V on macOS, Ctrl+Shift+C/V on Linux)
+        // These take priority over Ctrl+C (SIGINT)
+        let clipboard_action = Self::process_clipboard_keys(ctx);
+        if let Some(action) = clipboard_action {
+            self.actions.push(action);
+            return std::mem::take(&mut self.actions);
+        }
+
         // Process Ctrl+key combinations via event iteration
         // (more reliable on Linux than modifiers + key_pressed)
         let ctrl_action = Self::process_ctrl_keys(ctx);
@@ -48,6 +58,24 @@ impl KeyboardHandler {
         self.process_text_input(ctx);
 
         std::mem::take(&mut self.actions)
+    }
+
+    /// Process clipboard shortcuts.
+    /// Listens for egui's Event::Copy which is triggered by Cmd+C (macOS) or Ctrl+C (Linux/Windows).
+    fn process_clipboard_keys(ctx: &egui::Context) -> Option<KeyboardAction> {
+        let mut result = None;
+
+        ctx.input(|i| {
+            for event in &i.events {
+                if matches!(event, egui::Event::Copy) {
+                    log::info!("Event::Copy detected");
+                    result = Some(KeyboardAction::Copy);
+                    return;
+                }
+            }
+        });
+
+        result
     }
 
     /// Process Ctrl+key combinations by iterating events directly.
@@ -125,23 +153,19 @@ impl KeyboardHandler {
 
             // Special keys
             if i.key_pressed(Key::Enter) {
-                self.actions
-                    .push(KeyboardAction::SendBytes(b"\r".to_vec()));
+                self.actions.push(KeyboardAction::SendBytes(b"\r".to_vec()));
                 return;
             }
             if i.key_pressed(Key::Backspace) {
-                self.actions
-                    .push(KeyboardAction::SendBytes(vec![0x7F]));
+                self.actions.push(KeyboardAction::SendBytes(vec![0x7F]));
                 return;
             }
             if i.key_pressed(Key::Tab) {
-                self.actions
-                    .push(KeyboardAction::SendBytes(vec![0x09]));
+                self.actions.push(KeyboardAction::SendBytes(vec![0x09]));
                 return;
             }
             if i.key_pressed(Key::Escape) {
-                self.actions
-                    .push(KeyboardAction::SendBytes(vec![0x1B]));
+                self.actions.push(KeyboardAction::SendBytes(vec![0x1B]));
                 return;
             }
 
@@ -263,8 +287,7 @@ impl KeyboardHandler {
 
             // Space
             if i.key_pressed(Key::Space) {
-                self.actions
-                    .push(KeyboardAction::SendBytes(b" ".to_vec()));
+                self.actions.push(KeyboardAction::SendBytes(b" ".to_vec()));
             }
         });
     }
@@ -276,8 +299,7 @@ impl KeyboardHandler {
                 if let egui::Event::Text(text) = event {
                     for c in text.chars() {
                         if c.is_ascii() {
-                            self.actions
-                                .push(KeyboardAction::SendBytes(vec![c as u8]));
+                            self.actions.push(KeyboardAction::SendBytes(vec![c as u8]));
                         } else {
                             self.actions
                                 .push(KeyboardAction::SendBytes(c.to_string().into_bytes()));

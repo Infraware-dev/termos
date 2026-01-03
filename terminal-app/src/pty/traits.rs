@@ -26,7 +26,10 @@ pub trait PtyWrite: Send + Sync {
 /// Trait for PTY session management.
 ///
 /// This abstraction allows for mock implementations in tests.
-#[expect(dead_code, reason = "Public API for DI/mocking - consumed by external tests")]
+#[expect(
+    dead_code,
+    reason = "Public API for DI/mocking - consumed by external tests"
+)]
 pub trait PtyControl: Send + Sync {
     /// Resize the terminal.
     ///

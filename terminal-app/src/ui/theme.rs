@@ -38,7 +38,7 @@ impl Theme {
     /// Dark theme matching the UI mockups.
     pub fn dark() -> Self {
         Self {
-            background: Color32::from_rgb(45, 45, 45),      // #2d2d2d
+            background: Color32::from_rgb(45, 45, 45),       // #2d2d2d
             text: Color32::from_rgb(204, 204, 204),          // #cccccc
             prompt_prefix: Color32::from_rgb(204, 204, 204), // #cccccc (same as text)
             prompt_path: Color32::from_rgb(152, 195, 121),   // #98c379 (green)

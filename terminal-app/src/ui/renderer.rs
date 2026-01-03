@@ -22,7 +22,12 @@ pub struct RenderConfig {
 impl RenderConfig {
     /// Create a new render configuration.
     #[must_use]
-    pub fn new(char_width: f32, char_height: f32, background: Color32, cursor_color: Color32) -> Self {
+    pub fn new(
+        char_width: f32,
+        char_height: f32,
+        background: Color32,
+        cursor_color: Color32,
+    ) -> Self {
         Self {
             char_width,
             char_height,
@@ -85,14 +90,20 @@ pub fn render_decorations(
         if *underline {
             let y_line = y + char_height - 2.0;
             painter.line_segment(
-                [Pos2::new(abs_x, y_line), Pos2::new(abs_x + char_width, y_line)],
+                [
+                    Pos2::new(abs_x, y_line),
+                    Pos2::new(abs_x + char_width, y_line),
+                ],
                 Stroke::new(1.0, *fg),
             );
         }
         if *strikethrough {
             let y_line = y + char_height / 2.0;
             painter.line_segment(
-                [Pos2::new(abs_x, y_line), Pos2::new(abs_x + char_width, y_line)],
+                [
+                    Pos2::new(abs_x, y_line),
+                    Pos2::new(abs_x + char_width, y_line),
+                ],
                 Stroke::new(1.0, *fg),
             );
         }
@@ -107,10 +118,7 @@ pub fn render_cursor(
     char_height: f32,
     color: Color32,
 ) {
-    let bar_rect = Rect::from_min_size(
-        Pos2::new(cursor_x, cursor_y),
-        Vec2::new(2.0, char_height),
-    );
+    let bar_rect = Rect::from_min_size(Pos2::new(cursor_x, cursor_y), Vec2::new(2.0, char_height));
     painter.rect_filled(bar_rect, 0.0, color);
 }
 

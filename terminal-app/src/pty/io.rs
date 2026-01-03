@@ -140,9 +140,7 @@ impl PtyWriter {
             .inner
             .lock()
             .expect("PTY writer lock poisoned - unrecoverable state corruption");
-        writer
-            .write_all(data)
-            .context("Failed to write to PTY")?;
+        writer.write_all(data).context("Failed to write to PTY")?;
         writer.flush().context("Failed to flush PTY")?;
         Ok(data.len())
     }

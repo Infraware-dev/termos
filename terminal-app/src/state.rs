@@ -9,18 +9,16 @@ use anyhow::{bail, Result};
 ///
 /// The state machine enforces valid transitions between modes.
 /// Invalid transitions return an error.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 #[allow(dead_code)] // Variants used when LLM integration is active
 pub enum AppMode {
     /// Normal operation - waiting for user input
+    #[default]
     Normal,
     /// Waiting for LLM response after "command not found"
     WaitingLLM,
     /// LLM requested command approval (y/n)
-    AwaitingApproval {
-        command: String,
-        message: String,
-    },
+    AwaitingApproval { command: String, message: String },
     /// LLM asked a question (free-text answer)
     AwaitingAnswer {
         question: String,
@@ -28,15 +26,12 @@ pub enum AppMode {
     },
 }
 
-impl Default for AppMode {
-    fn default() -> Self {
-        Self::Normal
-    }
-}
-
 /// Events that trigger state transitions.
 #[derive(Debug, Clone)]
-#[expect(dead_code, reason = "State machine events - used conditionally based on LLM responses")]
+#[expect(
+    dead_code,
+    reason = "State machine events - used conditionally based on LLM responses"
+)]
 pub enum AppModeEvent {
     /// User submitted a query that requires LLM
     QueryLLM,
@@ -144,19 +139,11 @@ impl AppMode {
 
             // Invalid transition
             (state, event) => {
-                bail!(
-                    "Invalid state transition: {} + {:?}",
-                    state.name(),
-                    event
-                );
+                bail!("Invalid state transition: {} + {:?}", state.name(), event);
             }
         };
 
-        log::debug!(
-            "State transition: {} -> {}",
-            from_name,
-            new_state.name()
-        );
+        log::debug!("State transition: {} -> {}", from_name, new_state.name());
 
         Ok(new_state)
     }

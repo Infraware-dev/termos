@@ -45,6 +45,9 @@ hostname = "0.4"
 vte = "0.15"
 ctrlc = "3.4"
 
+# Clipboard (direct OS access, bypasses egui's delayed sync)
+arboard = "3.4"
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 nix = { version = "0.29", features = ["signal", "process"] }

@@ -1,7 +1,7 @@
 //! Main application struct implementing eframe::App with full terminal emulation.
 
 use crate::config::{pty as pty_config, rendering, size, timing};
-use crate::input::{KeyboardAction, KeyboardHandler};
+use crate::input::{KeyboardAction, KeyboardHandler, TextSelection};
 use crate::pty::{PtyManager, PtyReader, PtyWrite, PtyWriter};
 use crate::state::AppMode;
 use crate::terminal::{Color, TerminalHandler};
@@ -9,7 +9,7 @@ use crate::ui::{
     render_backgrounds, render_cursor, render_decorations, render_scrollbar, render_text_runs,
     Theme,
 };
-use egui::{Color32, FontFamily, FontId, Sense, Vec2, ViewportCommand};
+use egui::{Color32, FontFamily, FontId, Pos2, Rect, Sense, Vec2, ViewportCommand};
 use std::sync::mpsc;
 use std::sync::Arc;
 use std::time::Instant;
@@ -96,6 +96,14 @@ pub struct InfrawareApp {
     render_text_runs: Vec<(f32, String, egui::Color32)>,
     /// Decorations buffer (reused each frame with .clear())
     render_decorations: Vec<(f32, bool, bool, egui::Color32)>,
+
+    // === Text Selection ===
+    /// Current text selection (None if no selection active)
+    selection: Option<TextSelection>,
+
+    // === Clipboard (arboard for direct OS access) ===
+    /// Clipboard instance for immediate copy operations (bypasses egui's delayed sync)
+    clipboard: Option<arboard::Clipboard>,
 }
 
 impl std::fmt::Debug for InfrawareApp {
@@ -143,6 +151,11 @@ impl InfrawareApp {
             }
         });
 
+        // Initialize clipboard (arboard) once - keeping it alive avoids macOS issues
+        let clipboard = arboard::Clipboard::new()
+            .map_err(|e| log::error!("Failed to init clipboard: {}", e))
+            .ok();
+
         Self {
             mode: AppMode::Normal,
             theme,
@@ -174,6 +187,10 @@ impl InfrawareApp {
             render_bg_rects: Vec::with_capacity(32),
             render_text_runs: Vec::with_capacity(32),
             render_decorations: Vec::with_capacity(8),
+            // Text selection (initialized on first drag)
+            selection: None,
+            // Clipboard (kept alive for immediate OS access)
+            clipboard,
         }
     }
 
@@ -306,6 +323,15 @@ impl InfrawareApp {
 
     /// Handle keyboard input using the extracted KeyboardHandler.
     fn handle_keyboard(&mut self, ctx: &egui::Context) {
+        // Handle paste events from egui (macOS Cmd+V fires Event::Paste)
+        ctx.input(|i| {
+            for event in &i.events {
+                if let egui::Event::Paste(text) = event {
+                    self.handle_paste(text);
+                }
+            }
+        });
+
         // Process keyboard input and get actions (returns owned Vec to avoid borrow issues)
         let actions = self.keyboard_handler.process(ctx);
 
@@ -319,6 +345,9 @@ impl InfrawareApp {
                     log::info!("Ctrl+C detected, sending ETX (0x03) to PTY");
                     self.send_to_pty(&[0x03]);
                 }
+                KeyboardAction::Copy => {
+                    self.copy_selection_to_clipboard(ctx);
+                }
             }
         }
     }
@@ -329,6 +358,93 @@ impl InfrawareApp {
             Color::Named(named) => named.to_egui(),
             Color::Indexed(_) => color.to_egui(true),
             Color::Rgb(r, g, b) => Color32::from_rgb(r, g, b),
+        }
+    }
+
+    /// Convert screen coordinates to grid (row, col).
+    /// Returns visible row index (0-based from top of visible area).
+    fn screen_to_grid(&self, pos: Pos2, rect: Rect) -> (usize, usize) {
+        let col = ((pos.x - rect.left()) / self.char_width).max(0.0) as usize;
+        let row = ((pos.y - rect.top()) / self.char_height).max(0.0) as usize;
+
+        // Clamp to valid range
+        let max_col = self.terminal_size.0.saturating_sub(1) as usize;
+        let max_row = self.terminal_size.1.saturating_sub(1) as usize;
+
+        (row.min(max_row), col.min(max_col))
+    }
+
+    /// Check if a cell is within the current selection.
+    fn is_cell_selected(&self, row: usize, col: usize) -> bool {
+        self.selection
+            .as_ref()
+            .is_some_and(|sel| sel.contains(row, col))
+    }
+
+    /// Copy selected text to clipboard using arboard for immediate OS access.
+    ///
+    /// Uses arboard directly instead of egui's `ctx.copy_text()` to avoid
+    /// the delayed clipboard sync that causes "stale data" issues on macOS.
+    fn copy_selection_to_clipboard(&mut self, ctx: &egui::Context) {
+        log::info!(
+            "copy_selection_to_clipboard called, selection: {:?}",
+            self.selection
+        );
+
+        if let Some(ref sel) = self.selection {
+            if sel.is_empty() {
+                log::info!("Selection is empty, nothing to copy");
+                return;
+            }
+
+            let (start, end) = sel.normalized();
+            log::info!(
+                "Extracting text from ({},{}) to ({},{})",
+                start.row,
+                start.col,
+                end.row,
+                end.col
+            );
+
+            let text = self
+                .terminal_handler
+                .grid()
+                .extract_selection_text(start.row, start.col, end.row, end.col);
+
+            log::info!("Extracted text: '{}' ({} chars)", text, text.len());
+
+            if !text.is_empty() {
+                // Use arboard for immediate OS clipboard write (bypasses egui's delayed sync)
+                if let Some(ref mut cb) = self.clipboard {
+                    match cb.set_text(&text) {
+                        Ok(()) => {
+                            log::info!(
+                                "Text copied to OS clipboard via arboard ({} chars)",
+                                text.len()
+                            );
+                        }
+                        Err(e) => {
+                            log::error!("Arboard copy error: {}", e);
+                            // Fallback to egui if arboard fails
+                            ctx.copy_text(text);
+                        }
+                    }
+                } else {
+                    // Fallback to egui if arboard init failed
+                    log::warn!("Arboard not available, using egui fallback");
+                    ctx.copy_text(text);
+                }
+            }
+        } else {
+            log::info!("No selection exists");
+        }
+    }
+
+    /// Handle paste event from egui (Event::Paste).
+    fn handle_paste(&self, text: &str) {
+        if !text.is_empty() {
+            log::info!("Pasting {} chars from clipboard", text.len());
+            self.send_to_pty(text.as_bytes());
         }
     }
 
@@ -348,9 +464,36 @@ impl InfrawareApp {
         let (response, painter) = ui.allocate_painter(size, Sense::click().union(Sense::drag()));
         let rect = response.rect;
 
-        // Request keyboard focus when terminal is clicked
+        // Request keyboard focus when terminal is clicked (without drag)
         if response.clicked() {
             ui.memory_mut(|mem| mem.request_focus(terminal_id));
+            // Clear selection on simple click
+            self.selection = None;
+        }
+
+        // Handle mouse drag for text selection
+        if response.drag_started() {
+            if let Some(pos) = response.interact_pointer_pos() {
+                let (row, col) = self.screen_to_grid(pos, rect);
+                self.selection = Some(TextSelection::new(row, col));
+                log::debug!("Selection started at ({}, {})", row, col);
+            }
+        }
+
+        if response.dragged() {
+            if let Some(pos) = response.interact_pointer_pos() {
+                let (row, col) = self.screen_to_grid(pos, rect);
+                if let Some(ref mut sel) = self.selection {
+                    sel.update_end(row, col);
+                }
+            }
+        }
+
+        if response.drag_stopped() {
+            if let Some(ref mut sel) = self.selection {
+                sel.active = false;
+                log::debug!("Selection ended");
+            }
         }
 
         // Handle mouse wheel scrolling
@@ -415,14 +558,19 @@ impl InfrawareApp {
             for (col_idx, cell) in row.iter().take(row_len).enumerate() {
                 let x = col_x(col_idx);
 
-                // --- Background batching ---
-                let bg = if cell.attrs.reverse {
+                // --- Background batching (with selection support) ---
+                let is_selected = self.is_cell_selected(row_idx, col_idx);
+                let bg = if is_selected {
+                    // Selection takes priority over other background colors
+                    self.theme.selection
+                } else if cell.attrs.reverse {
                     self.color_to_egui(cell.fg)
                 } else {
                     self.color_to_egui(cell.bg)
                 };
 
-                if bg != self.theme.background {
+                // For selection, always draw background (even if it matches theme background)
+                if is_selected || bg != self.theme.background {
                     match bg_start {
                         Some((_start, color)) if color == bg => {
                             // Continue current background run

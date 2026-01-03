@@ -816,6 +816,63 @@ impl TerminalGrid {
         self.auto_wrap = on;
     }
 
+    // ========== Selection Support ==========
+
+    /// Extract text from a selection range.
+    /// The start/end points should already be normalized (start before end).
+    /// Returns the selected text with newlines between rows.
+    #[must_use]
+    pub fn extract_selection_text(
+        &self,
+        start_row: usize,
+        start_col: usize,
+        end_row: usize,
+        end_col: usize,
+    ) -> String {
+        let mut result = String::new();
+        let visible = self.visible_rows();
+
+        for row_idx in start_row..=end_row {
+            if row_idx >= visible.len() {
+                break;
+            }
+
+            let row = visible[row_idx];
+            let (col_start, col_end) = if start_row == end_row {
+                // Single line selection
+                (start_col, end_col)
+            } else if row_idx == start_row {
+                // First line: from start_col to end of line
+                (start_col, row.len().saturating_sub(1))
+            } else if row_idx == end_row {
+                // Last line: from start of line to end_col
+                (0, end_col)
+            } else {
+                // Middle lines: entire line
+                (0, row.len().saturating_sub(1))
+            };
+
+            // Extract characters from the row
+            let mut line = String::new();
+            for col in col_start..=col_end.min(row.len().saturating_sub(1)) {
+                if let Some(cell) = row.get(col) {
+                    line.push(cell.ch);
+                }
+            }
+
+            // Trim trailing spaces from each line
+            let trimmed = line.trim_end();
+            result.push_str(trimmed);
+
+            // Add newline between rows (not after the last row)
+            if row_idx < end_row {
+                result.push('\n');
+            }
+        }
+
+        result
+    }
+
     // ========== Resize ==========
 
     /// Resize the terminal grid.
