@@ -8,6 +8,7 @@ mod app;
 mod config;
 mod input;
 mod llm;
+mod orchestrators;
 mod pty;
 mod state;
 mod terminal;
