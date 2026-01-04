@@ -122,7 +122,7 @@ pub fn render_cursor(
     painter.rect_filled(bar_rect, 0.0, color);
 }
 
-/// Render a scrollbar with track and thumb.
+/// Render a scrollbar with track, thumb, and arrows.
 pub fn render_scrollbar(
     painter: &Painter,
     rect: Rect,
@@ -130,28 +130,55 @@ pub fn render_scrollbar(
     max_scroll: usize,
     visible_lines: usize,
 ) {
-    let scrollbar_width = 8.0;
+    if max_scroll == 0 {
+        return;
+    }
+
+    let scrollbar_width = 12.0; // Slightly wider for better interaction
     let scrollbar_x = rect.right() - scrollbar_width - 2.0;
-
-    // Calculate thumb position and size
-    let total_lines = max_scroll + visible_lines;
-    let thumb_height = (visible_lines as f32 / total_lines as f32 * rect.height()).max(20.0);
-    let scroll_range = rect.height() - thumb_height;
-    let thumb_y = rect.top() + (1.0 - scroll_offset as f32 / max_scroll as f32) * scroll_range;
-
-    // Draw scrollbar track
-    let track_rect = Rect::from_min_size(
-        Pos2::new(scrollbar_x, rect.top()),
-        Vec2::new(scrollbar_width, rect.height()),
+    
+    let padding_top = 2.0;
+    let padding_bottom = 12.0;
+    let arrow_size = 12.0;
+    
+    let track_top = rect.top() + padding_top + arrow_size;
+    let track_bottom = rect.bottom() - padding_bottom - arrow_size;
+    let track_height = (track_bottom - track_top).max(0.0);
+    
+    // 1. Draw Scrollbar Track (Background)
+    let track_rect = Rect::from_min_max(
+        Pos2::new(scrollbar_x, track_top),
+        Pos2::new(scrollbar_x + scrollbar_width, track_bottom)
     );
-    painter.rect_filled(track_rect, 4.0, Color32::from_gray(40));
+    painter.rect_filled(track_rect, 2.0, Color32::from_gray(30));
 
-    // Draw scrollbar thumb
+    // 2. Calculate and Draw Thumb (Handle)
+    let total_lines = max_scroll + visible_lines;
+    let thumb_height = (visible_lines as f32 / total_lines as f32 * track_height).max(20.0);
+    let travel_range = track_height - thumb_height;
+    let scroll_pct = scroll_offset as f32 / max_scroll as f32;
+    let thumb_y = track_top + (1.0 - scroll_pct) * travel_range;
+
     let thumb_rect = Rect::from_min_size(
-        Pos2::new(scrollbar_x, thumb_y),
-        Vec2::new(scrollbar_width, thumb_height),
+        Pos2::new(scrollbar_x + 2.0, thumb_y),
+        Vec2::new(scrollbar_width - 4.0, thumb_height),
     );
     painter.rect_filled(thumb_rect, 4.0, Color32::from_gray(100));
+
+    // 3. Draw Arrows (Top and Bottom)
+    let arrow_color = Color32::from_gray(160);
+    let stroke = Stroke::new(1.5, arrow_color);
+    
+    // Up Arrow
+    let up_arrow_center = Pos2::new(scrollbar_x + scrollbar_width / 2.0, rect.top() + padding_top + arrow_size / 2.0);
+    // Use painter.arrow or simpler lines
+    painter.line_segment([Pos2::new(up_arrow_center.x - 3.0, up_arrow_center.y + 2.0), Pos2::new(up_arrow_center.x, up_arrow_center.y - 2.0)], stroke);
+    painter.line_segment([Pos2::new(up_arrow_center.x + 3.0, up_arrow_center.y + 2.0), Pos2::new(up_arrow_center.x, up_arrow_center.y - 2.0)], stroke);
+
+    // Down Arrow
+    let down_arrow_center = Pos2::new(scrollbar_x + scrollbar_width / 2.0, rect.bottom() - padding_bottom - arrow_size / 2.0);
+    painter.line_segment([Pos2::new(down_arrow_center.x - 3.0, down_arrow_center.y - 2.0), Pos2::new(down_arrow_center.x, down_arrow_center.y + 2.0)], stroke);
+    painter.line_segment([Pos2::new(down_arrow_center.x + 3.0, down_arrow_center.y - 2.0), Pos2::new(down_arrow_center.x, down_arrow_center.y + 2.0)], stroke);
 }
 
 #[cfg(test)]
