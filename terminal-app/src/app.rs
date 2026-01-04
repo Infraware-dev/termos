@@ -2,9 +2,12 @@
 
 use crate::config::{pty as pty_config, rendering, size, timing};
 use crate::input::{KeyboardAction, KeyboardHandler, TextSelection};
+use crate::llm::{HttpLLMClient, LLMQueryResult, LLMClientTrait};
+use crate::orchestrators::NaturalLanguageOrchestrator;
 use crate::pty::{PtyManager, PtyReader, PtyWrite, PtyWriter};
 use crate::state::AppMode;
 use crate::terminal::{Color, TerminalHandler};
+use crate::ui::scrollbar::{Scrollbar, ScrollAction};
 use crate::ui::{
     render_backgrounds, render_cursor, render_decorations, render_scrollbar, render_text_runs,
     Theme,
@@ -15,6 +18,15 @@ use std::sync::Arc;
 use std::time::Instant;
 use tokio::runtime::Runtime;
 use tokio::sync::Mutex as TokioMutex;
+
+/// Events coming from background tasks (LLM, etc.)
+#[derive(Debug)]
+pub enum AppBackgroundEvent {
+    /// LLM produced a chunk of output or completed
+    LlmResult(LLMQueryResult),
+    /// An error occurred during LLM query
+    LlmError(String),
+}
 
 /// Main terminal application with VTE-based terminal emulation.
 pub struct InfrawareApp {
@@ -89,6 +101,20 @@ pub struct InfrawareApp {
     /// Keyboard input handler (extracted for testability)
     keyboard_handler: KeyboardHandler,
 
+    /// Buffer for collecting user input during HITL interactions (AwaitingApproval/Answer)
+    current_input_buffer: String,
+
+    /// Buffer for tracking the current command line (for '?' prefix detection)
+    current_command_buffer: String,
+
+    // === LLM & Orchestration ===
+    /// Orchestrator for natural language queries
+    orchestrator: Arc<NaturalLanguageOrchestrator>,
+    /// Channel for background events (sender)
+    bg_event_tx: mpsc::Sender<AppBackgroundEvent>,
+    /// Channel for background events (receiver)
+    bg_event_rx: mpsc::Receiver<AppBackgroundEvent>,
+
     // === PERFORMANCE: Reusable render buffers (avoid per-frame allocations) ===
     /// Background rectangles buffer (reused each frame with .clear())
     render_bg_rects: Vec<(f32, f32, egui::Color32)>,
@@ -104,6 +130,9 @@ pub struct InfrawareApp {
     // === Clipboard (arboard for direct OS access) ===
     /// Clipboard instance for immediate copy operations (bypasses egui's delayed sync)
     clipboard: Option<arboard::Clipboard>,
+
+    /// Scrollbar logic and state
+    scrollbar: Scrollbar,
 }
 
 impl std::fmt::Debug for InfrawareApp {
@@ -156,6 +185,24 @@ impl InfrawareApp {
             .map_err(|e| log::error!("Failed to init clipboard: {}", e))
             .ok();
 
+        // Initialize background event channel
+        let (bg_event_tx, bg_event_rx) = mpsc::channel();
+
+        // Initialize LLM Orchestrator with fallback logic
+        let backend_url = std::env::var("INFRAWARE_BACKEND_URL")
+            .unwrap_or_else(|_| "http://localhost:8000".to_string());
+        let api_key = std::env::var("BACKEND_API_KEY").unwrap_or_default();
+        
+        let llm_client: Arc<dyn LLMClientTrait> = if api_key.is_empty() {
+            log::warn!("No BACKEND_API_KEY found, using Mock LLM Client");
+            Arc::new(crate::llm::MockLLMClient::new())
+        } else {
+            log::info!("Using HTTP LLM Client at {}", backend_url);
+            Arc::new(HttpLLMClient::new(backend_url, api_key))
+        };
+
+        let orchestrator = Arc::new(NaturalLanguageOrchestrator::new(llm_client));
+
         Self {
             mode: AppMode::Normal,
             theme,
@@ -183,6 +230,12 @@ impl InfrawareApp {
                 .map(|c| c as f32 * rendering::CHAR_WIDTH)
                 .collect(),
             keyboard_handler: KeyboardHandler::new(),
+            current_input_buffer: String::new(),
+            current_command_buffer: String::new(),
+            // LLM & Orchestration
+            orchestrator,
+            bg_event_tx,
+            bg_event_rx,
             // Pre-allocate render buffers (reused each frame to avoid allocations)
             render_bg_rects: Vec::with_capacity(32),
             render_text_runs: Vec::with_capacity(32),
@@ -191,6 +244,8 @@ impl InfrawareApp {
             selection: None,
             // Clipboard (kept alive for immediate OS access)
             clipboard,
+            // Scrollbar logic
+            scrollbar: Scrollbar::new(),
         }
     }
 
@@ -208,17 +263,28 @@ impl InfrawareApp {
         self.shell_initialized = true;
 
         // Set custom prompt with |~| prefix (green)
-        // Use $'...' for bash escape interpretation and %{...%} for zsh
-        // The shell-specific syntax is handled by detecting which shell is running
+        // Also inject command_not_found hooks to trigger LLM on error
         let init_commands = if std::env::var("SHELL").unwrap_or_default().contains("zsh") {
-            // zsh: use %{ %} for non-printing chars and %F/%f for colors
-            "export PROMPT='%F{green}|~| %n@%m:%~%# %f'\nclear\n"
+            "export PROMPT='%F{green}|~| %n@%m:%~%# %f'\n\
+             command_not_found_handler() { printf \"\\033]777;CommandNotFound;%s\\033\\\\\" \"$1\"; return 127; }\n\
+             clear\n"
         } else {
-            // bash: use $'...' for escape interpretation, \[...\] for non-printing
-            "export PS1=$'\\[\\e[32m\\]|~| \\u@\\h:\\w\\$ \\[\\e[0m\\]'\nclear\n"
+            "export PS1=$'\\[\\e[32m\\]|~| \\u@\\h:\\w\\$ \\[\\e[0m\\]'\n\
+             command_not_found_handle() { printf \"\\033]777;CommandNotFound;%s\\033\\\\\" \"$1\"; return 127; }\n\
+             clear\n"
         };
 
         self.send_to_pty(init_commands.as_bytes());
+        
+        // Print welcome message with LLM status
+        if std::env::var("BACKEND_API_KEY").is_ok() {
+            let msg = "\r\n\x1b[1;32mInfraware Terminal Ready (Connected to LLM Backend)\x1b[0m\r\n";
+            self.vte_parser.advance(&mut self.terminal_handler, msg.as_bytes());
+        } else {
+            let msg = "\r\n\x1b[1;33mInfraware Terminal Ready (Using Mock LLM - Set BACKEND_API_KEY to connect)\x1b[0m\r\n";
+            self.vte_parser.advance(&mut self.terminal_handler, msg.as_bytes());
+        }
+        
         log::info!("Shell initialized with custom prompt");
     }
 
@@ -279,6 +345,65 @@ impl InfrawareApp {
         }
     }
 
+    /// Poll background events (LLM results, etc.)
+    fn poll_background_events(&mut self) {
+        while let Ok(event) = self.bg_event_rx.try_recv() {
+            match event {
+                AppBackgroundEvent::LlmResult(result) => {
+                    match result {
+                        LLMQueryResult::Complete(text) => {
+                            log::info!("LLM query complete");
+                            let lines = self.orchestrator.render_response(&text);
+                            for line in lines {
+                                // Use VTE parser to handle ANSI formatting from renderer
+                                self.vte_parser.advance(&mut self.terminal_handler, line.as_bytes());
+                                self.vte_parser.advance(&mut self.terminal_handler, b"\r\n");
+                            }
+                            self.mode = AppMode::Normal;
+                        }
+                        LLMQueryResult::CommandApproval { command, message } => {
+                            log::info!("LLM requested command approval: {}", command);
+                            self.mode = AppMode::AwaitingApproval { command, message };
+                        }
+                        LLMQueryResult::Question { question, options } => {
+                            log::info!("LLM asked a question: {}", question);
+                            self.mode = AppMode::AwaitingAnswer { question, options };
+                        }
+                    }
+                }
+                AppBackgroundEvent::LlmError(err) => {
+                    log::error!("LLM query error: {}", err);
+                    let error_msg = format!("\x1b[31mError: {}\x1b[0m\r\n", err);
+                    self.vte_parser.advance(&mut self.terminal_handler, error_msg.as_bytes());
+                    self.mode = AppMode::Normal;
+                }
+            }
+        }
+    }
+
+    /// Start an LLM query in a background task
+    fn start_llm_query(&mut self, query: String) {
+        log::info!("Starting LLM query: {}", query);
+        self.mode = AppMode::WaitingLLM;
+        
+        let orchestrator = self.orchestrator.clone();
+        let tx = self.bg_event_tx.clone();
+        
+        self.runtime.spawn(async move {
+            // Using a new cancellation token for each query
+            let cancel_token = tokio_util::sync::CancellationToken::new();
+            
+            match orchestrator.query(&query, cancel_token).await {
+                Ok(result) => {
+                    let _ = tx.send(AppBackgroundEvent::LlmResult(result));
+                }
+                Err(e) => {
+                    let _ = tx.send(AppBackgroundEvent::LlmError(e.to_string()));
+                }
+            }
+        });
+    }
+
     /// Send SIGINT to the foreground process group (non-blocking).
     /// This bypasses PTY buffers and directly signals the process.
     fn send_sigint(&self) {
@@ -323,6 +448,12 @@ impl InfrawareApp {
 
     /// Handle keyboard input using the extracted KeyboardHandler.
     fn handle_keyboard(&mut self, ctx: &egui::Context) {
+        // Intercept input if in HITL mode
+        if !matches!(self.mode, AppMode::Normal | AppMode::WaitingLLM) {
+            self.handle_hitl_keyboard(ctx);
+            return;
+        }
+
         // Process keyboard input and get actions (returns owned Vec to avoid borrow issues)
         let actions = self.keyboard_handler.process(ctx);
 
@@ -330,11 +461,41 @@ impl InfrawareApp {
         for action in actions {
             match action {
                 KeyboardAction::SendBytes(bytes) => {
-                    self.send_to_pty(&bytes);
+                    let text = String::from_utf8_lossy(&bytes);
+                    let mut handled = false;
+                    for c in text.chars() {
+                        if c == '\r' || c == '\n' {
+                            // Check for '?' prefix
+                            if self.current_command_buffer.starts_with('?') {
+                                let query = self.current_command_buffer[1..].trim().to_string();
+                                if !query.is_empty() {
+                                    self.current_command_buffer.clear();
+                                    // Visual feedback: clear the line and move to next
+                                    self.vte_parser.advance(&mut self.terminal_handler, b"\r\n");
+                                    self.start_llm_query(query);
+                                    handled = true;
+                                    break;
+                                }
+                            }
+                            self.current_command_buffer.clear();
+                        } else if c == '\x7f' || c == '\x08' {
+                            self.current_command_buffer.pop();
+                        } else if !c.is_control() {
+                            self.current_command_buffer.push(c);
+                        }
+                    }
+                    
+                    if !handled {
+                        self.send_to_pty(&bytes);
+                    }
                 }
                 KeyboardAction::SendSigInt => {
                     log::info!("Ctrl+C detected, sending ETX (0x03) to PTY");
                     self.send_to_pty(&[0x03]);
+                    // Pause output reading briefly to let the kernel/shell process the signal
+                    // and to give immediate visual feedback (stop scrolling)
+                    self.output_pause_until =
+                        Some(Instant::now() + std::time::Duration::from_millis(200));
                 }
                 KeyboardAction::Copy => {
                     self.copy_selection_to_clipboard(ctx);
@@ -344,6 +505,105 @@ impl InfrawareApp {
                 }
             }
         }
+    }
+
+    /// Handle keyboard input specifically for Human-in-the-Loop interactions.
+    fn handle_hitl_keyboard(&mut self, ctx: &egui::Context) {
+        let actions = self.keyboard_handler.process(ctx);
+
+        for action in actions {
+            match action {
+                KeyboardAction::SendBytes(bytes) => {
+                    let text = String::from_utf8_lossy(&bytes);
+                    for c in text.chars() {
+                        if c == '\r' || c == '\n' {
+                            self.submit_hitl_input();
+                        } else if c == '\x7f' || c == '\x08' {
+                            self.current_input_buffer.pop();
+                        } else if !c.is_control() {
+                            self.current_input_buffer.push(c);
+                        }
+                    }
+                }
+                KeyboardAction::SendSigInt => {
+                    log::info!("Cancelling HITL interaction");
+                    self.current_input_buffer.clear();
+                    self.mode = AppMode::Normal;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Submit current input buffer for the active HITL interaction.
+    fn submit_hitl_input(&mut self) {
+        let input = std::mem::take(&mut self.current_input_buffer);
+        let mode = self.mode.clone();
+        
+        match mode {
+            AppMode::AwaitingApproval { command, .. } => {
+                let approved = crate::orchestrators::HitlOrchestrator::parse_approval(&input);
+                if approved {
+                    log::info!("User approved command: {}", command);
+                    // Echo the command to the terminal
+                    let echo = format!("Executing: {}\r\n", command);
+                    self.vte_parser.advance(&mut self.terminal_handler, echo.as_bytes());
+                    
+                    // Option 1: Execute directly in PTY
+                    let cmd_bytes = format!("{}\n", command);
+                    self.send_to_pty(cmd_bytes.as_bytes());
+                    
+                    // Option 2: Resume LLM if it expects feedback (using main branch logic)
+                    self.resume_llm_run();
+                } else {
+                    log::info!("User rejected command: {}", command);
+                    self.mode = AppMode::Normal;
+                }
+            }
+            AppMode::AwaitingAnswer { .. } => {
+                log::info!("User answered question: {}", input);
+                self.resume_llm_with_answer(input);
+            }
+            _ => {
+                self.mode = AppMode::Normal;
+            }
+        }
+    }
+
+    /// Resume LLM run after approval.
+    fn resume_llm_run(&mut self) {
+        self.mode = AppMode::WaitingLLM;
+        let orchestrator = self.orchestrator.clone();
+        let tx = self.bg_event_tx.clone();
+        
+        self.runtime.spawn(async move {
+            match orchestrator.resume_run().await {
+                Ok(result) => {
+                    let _ = tx.send(AppBackgroundEvent::LlmResult(result));
+                }
+                Err(e) => {
+                    let _ = tx.send(AppBackgroundEvent::LlmError(e.to_string()));
+                }
+            }
+        });
+    }
+
+    /// Resume LLM run with a text answer.
+    fn resume_llm_with_answer(&mut self, answer: String) {
+        self.mode = AppMode::WaitingLLM;
+        let orchestrator = self.orchestrator.clone();
+        let tx = self.bg_event_tx.clone();
+        
+        self.runtime.spawn(async move {
+            match orchestrator.resume_with_answer(&answer).await {
+                Ok(result) => {
+                    let _ = tx.send(AppBackgroundEvent::LlmResult(result));
+                }
+                Err(e) => {
+                    let _ = tx.send(AppBackgroundEvent::LlmError(e.to_string()));
+                }
+            }
+        });
     }
 
     /// Convert terminal color to egui color.
@@ -504,27 +764,39 @@ impl InfrawareApp {
         let (response, painter) = ui.allocate_painter(size, Sense::click().union(Sense::drag()));
         let rect = response.rect;
 
+        // Calculate scrollbar area for exclusion (using Scrollbar helper)
+        let scrollbar_area = self.scrollbar.area(rect);
+
         // Request keyboard focus when terminal is clicked (without drag)
         if response.clicked() {
-            ui.memory_mut(|mem| mem.request_focus(terminal_id));
-            // Clear selection on simple click
-            self.selection = None;
+            if let Some(pos) = response.interact_pointer_pos() {
+                if !scrollbar_area.contains(pos) {
+                    ui.memory_mut(|mem| mem.request_focus(terminal_id));
+                    // Clear selection on simple click
+                    self.selection = None;
+                }
+            }
         }
 
         // Handle mouse drag for text selection
         if response.drag_started() {
             if let Some(pos) = response.interact_pointer_pos() {
-                let (row, col) = self.screen_to_grid(pos, rect);
-                self.selection = Some(TextSelection::new(row, col));
-                log::debug!("Selection started at ({}, {})", row, col);
+                if !scrollbar_area.contains(pos) {
+                    let (row, col) = self.screen_to_grid(pos, rect);
+                    self.selection = Some(TextSelection::new(row, col));
+                    log::debug!("Selection started at ({}, {})", row, col);
+                }
             }
         }
 
         if response.dragged() {
             if let Some(pos) = response.interact_pointer_pos() {
-                let (row, col) = self.screen_to_grid(pos, rect);
-                if let Some(ref mut sel) = self.selection {
-                    sel.update_end(row, col);
+                // If we are dragging the scrollbar, don't update text selection
+                if !self.scrollbar.is_dragging() {
+                    let (row, col) = self.screen_to_grid(pos, rect);
+                    if let Some(ref mut sel) = self.selection {
+                        sel.update_end(row, col);
+                    }
                 }
             }
         }
@@ -548,26 +820,42 @@ impl InfrawareApp {
             }
         }
 
-        // Get grid info for rendering
-        let grid = self.terminal_handler.grid();
-        let (_rows, cols) = grid.size();
-        let visible_rows = grid.visible_rows();
-        let (cursor_row, cursor_col) = grid.cursor_position();
-        let cursor_visible = grid.cursor_visible();
-        let scroll_offset = grid.scroll_offset();
-        let max_scroll = grid.max_scroll_offset();
-
-        // Fill background
-        painter.rect_filled(rect, 0.0, self.theme.background);
-
-        // SINGLE-PASS RENDERING: Iterate each row once, collecting all render data,
-        // then draw in correct z-order (backgrounds → text → decorations).
-        // This reduces from 3 iterations to 1 iteration per row.
-
-        // PERFORMANCE: Use struct-level buffers to avoid per-frame allocations.
-        // These are cleared per-row but memory is reused across frames.
-        // (Vec::clear() is O(1) and doesn't deallocate)
-
+                // --- SCROLLBAR HANDLING ---
+                // Get scroll state (copy values to avoid borrow issues)
+                let (scroll_offset, max_scroll, visible_lines_count, cols) = {
+                    let grid = self.terminal_handler.grid();
+                    (grid.scroll_offset(), grid.max_scroll_offset(), grid.visible_rows().len(), grid.size().1)
+                };
+        
+                // Render and handle scrollbar interaction
+                if let Some(action) = self.scrollbar.show(
+                    ui,
+                    &painter,
+                    rect,
+                    scroll_offset,
+                    max_scroll,
+                    visible_lines_count,
+                ) {
+                    match action {
+                        ScrollAction::ScrollUp(n) => self.terminal_handler.grid_mut().scroll_view_up(n),
+                        ScrollAction::ScrollDown(n) => self.terminal_handler.grid_mut().scroll_view_down(n),
+                        ScrollAction::ScrollTo(offset) => self.terminal_handler.grid_mut().scroll_to_offset(offset),
+                    }
+                }
+        
+                // --- RENDERING PHASE ---
+                // Now re-acquire grid state for rendering (might have changed due to input)
+                let grid = self.terminal_handler.grid();
+                // Update these values for rendering
+                let scroll_offset = grid.scroll_offset();
+                let max_scroll = grid.max_scroll_offset();
+                let visible_rows = grid.visible_rows();
+                let (cursor_row, cursor_col) = grid.cursor_position();
+                let cursor_visible = grid.cursor_visible();
+        
+                // Fill background
+                painter.rect_filled(rect, 0.0, self.theme.background);
+        // ... (rendering rows remains same) ...
         for (row_idx, row) in visible_rows.iter().enumerate() {
             let y = rect.top() + row_idx as f32 * self.char_height;
 
@@ -720,8 +1008,24 @@ impl InfrawareApp {
             );
         }
 
-        // Draw cursor (only when at bottom/live view, after shell init, with blink, and focused)
-        if cursor_visible
+        // Draw Braille Throbber when waiting for LLM
+        if matches!(self.mode, AppMode::WaitingLLM) && scroll_offset == 0 {
+            let braille_frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+            let frame_idx = (self.startup_time.elapsed().as_millis() / 100) as usize % braille_frames.len();
+            let frame = braille_frames[frame_idx];
+            
+            // Draw at current cursor position
+            let tx = rect.left() + cursor_col as f32 * self.char_width;
+            let ty = rect.top() + cursor_row as f32 * self.char_height;
+            
+            painter.text(
+                Pos2::new(tx, ty),
+                egui::Align2::LEFT_TOP,
+                frame,
+                font_id.clone(),
+                Color32::from_rgb(0, 255, 0), // Infraware Green
+            );
+        } else if cursor_visible
             && self.shell_initialized
             && self.cursor_blink_visible
             && scroll_offset == 0
@@ -810,6 +1114,19 @@ impl eframe::App for InfrawareApp {
         if crate::SIGINT_RECEIVED.swap(false, std::sync::atomic::Ordering::SeqCst) {
             log::info!("System SIGINT received, sending to process group");
             self.send_sigint();
+            // Pause output reading briefly to let the kernel/shell process the signal
+            // and to give immediate visual feedback (stop scrolling)
+            self.output_pause_until = Some(Instant::now() + std::time::Duration::from_millis(200));
+        }
+
+        // Poll background events (LLM results, etc.)
+        self.poll_background_events();
+
+        // Check for pending LLM query from shell hook (Command Not Found)
+        if let Some(failed_cmd) = self.terminal_handler.take_pending_llm_query() {
+            log::info!("Triggering LLM for failed command: {}", failed_cmd);
+            let query = format!("I tried to run '{}' but got 'command not found'. What should I do?", failed_cmd);
+            self.start_llm_query(query);
         }
 
         // Handle keyboard FIRST - ensures Ctrl+C works even during heavy output
@@ -849,10 +1166,16 @@ impl eframe::App for InfrawareApp {
             let blink_interval = timing::CURSOR_BLINK_INTERVAL;
             let time_since_blink = self.last_cursor_blink.elapsed();
             let cursor_needs_blink = time_since_blink >= blink_interval;
+            
+            // Check if we need to animate the throbber (10 FPS / 100ms)
+            let is_waiting_llm = matches!(self.mode, AppMode::WaitingLLM);
 
             if pty_had_data || cursor_needs_blink || had_user_input {
                 // Something changed - repaint immediately
                 ctx.request_repaint();
+            } else if is_waiting_llm {
+                // Animate throbber at 10 FPS
+                ctx.request_repaint_after(std::time::Duration::from_millis(100));
             } else {
                 // Idle - schedule repaint only for next cursor blink
                 let time_to_next_blink = blink_interval.saturating_sub(time_since_blink);
