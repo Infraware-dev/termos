@@ -13,6 +13,8 @@ pub struct TerminalHandler {
     /// Bracketed paste mode (ESC[?2004h enables, ESC[?2004l disables).
     /// When enabled, pasted text should be wrapped in ESC[200~ ... ESC[201~
     bracketed_paste_mode: bool,
+    /// A command name that was not found, triggering an LLM query.
+    pending_llm_query: Option<String>,
 }
 
 #[allow(dead_code)]
@@ -24,7 +26,13 @@ impl TerminalHandler {
             grid: TerminalGrid::new(rows, cols),
             window_title: String::from("Infraware Terminal"),
             bracketed_paste_mode: false,
+            pending_llm_query: None,
         }
+    }
+
+    /// Take the pending LLM query, leaving None in its place.
+    pub fn take_pending_llm_query(&mut self) -> Option<String> {
+        self.pending_llm_query.take()
     }
 
     /// Check if bracketed paste mode is enabled.
@@ -424,6 +432,18 @@ impl vte::Perform for TerminalHandler {
                 if let Some(title) = params.get(1) {
                     if let Ok(title) = std::str::from_utf8(title) {
                         self.window_title = title.to_string();
+                    }
+                }
+            }
+            // Infraware Custom: Command Not Found hook
+            // Format: OSC 777 ; CommandNotFound ; <command> ST
+            777 => {
+                if params.get(1).map(|&p| p) == Some(b"CommandNotFound") {
+                    if let Some(cmd_bytes) = params.get(2) {
+                        if let Ok(cmd_str) = std::str::from_utf8(cmd_bytes) {
+                            debug!("Detected CommandNotFound via OSC 777: {}", cmd_str);
+                            self.pending_llm_query = Some(cmd_str.to_string());
+                        }
                     }
                 }
             }
