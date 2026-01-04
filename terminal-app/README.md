@@ -1,567 +1,95 @@
 # Infraware Terminal
 
-**A hybrid command interpreter with AI assistance for DevOps operations**
+**A next-generation AI-powered terminal emulator for DevOps engineers.**
 
-Infraware Terminal is a TUI-based terminal application that intelligently routes user input to either shell command execution or an LLM backend for natural language queries. It's designed specifically for DevOps engineers working with cloud environments (AWS/Azure).
+Infraware Terminal is a hybrid terminal emulator built with Rust and `egui`. It combines a robust, standards-compliant PTY terminal with an integrated LLM agent that assists you when commands fail or when you need expert guidance.
 
-## 🎯 Project Status
+![License](https://img.shields.io/badge/license-MIT-blue.svg)
+![Status](https://img.shields.io/badge/status-beta-orange.svg)
 
-**Current Milestone:** M1 - Terminal Core MVP (Month 1)
-**Version:** 0.1.0
-**Tech Stack:** Rust + TUI (ratatui/crossterm)
-**Code Quality:** Microsoft Pragmatic Rust Guidelines compliant
-**Status:** M1 Complete + Backend Integration in Progress
+## 🚀 Key Features
 
-The codebase is feature-complete for M1 with 224 tests passing and zero clippy warnings. Implementation follows the 4-week timeline and adheres to Microsoft's enterprise-scale Rust guidelines with strict compiler/clippy lints, Debug trait implementations on all public types, and #[expect] for all lint overrides.
+*   **Native Terminal Emulation:** Full support for interactive CLI tools (`vim`, `htop`, `ssh`) via `portable-pty` and `vte`.
+*   **AI Shell Hook:** Automatically detects "command not found" errors and triggers the AI agent to suggest corrections.
+*   **Magic Input (`?`):** Start any command line with `?` to bypass the shell and ask the AI directly (e.g., `? how do I revert a git commit`).
+*   **Human-in-the-Loop:** The AI proposes commands but *you* approve them. Dangerous commands are flagged for review.
+*   **Streaming Responses:** Real-time AI feedback with markdown rendering and syntax highlighting.
+*   **Cross-Platform:** Runs on Linux, macOS, and Windows.
 
-## ✨ Features
+## 🛠️ Architecture
 
-### Implemented in M1 (Production-Ready)
+The application is built on a modern Rust stack:
 
-- ✅ **History Expansion**: Bash-style history expansion (!!,  !$, !^, !*)
-  - `!!` - Entire previous command
-  - `!$` - Last argument (or command itself if no args, Bash-compatible)
-  - `!^` - First argument
-  - `!*` - All arguments
-  - Multiple expansions per input: `printf '%s %s' !^ !$`
-  - Preserves shell operators (pipes, redirects) in expanded output
-  - <20μs average overhead, thread-safe
-- ✅ **Alias Support**: System and user alias expansion with security validation
-  - Loads from system files: `/etc/bash.bashrc`, `/etc/bashrc`, `/etc/profile`, `/etc/profile.d/*.sh`
-  - Loads from user files: `~/.bashrc`, `~/.bash_aliases`, `~/.zshrc`
-  - User aliases override system aliases
-  - O(1) HashMap lookup for performance (<1μs expansion overhead)
-  - Built-in `reload-aliases` command for runtime reloading
-  - Security: Rejects dangerous patterns (rm -rf /, mkfs, dd, fork bombs, etc.)
-- ✅ **SCAN Algorithm**: Advanced input classification with 10-handler chain + alias + history expansion (<100μs avg)
-  - Alias expansion before classification (single-level like Bash)
-  - Shell builtin support (45+): `.`, `:`, `[`, `[[`, source, export, eval, exec, and more
-  - Command recognition with PATH verification and caching
-  - Typo detection with Levenshtein distance (e.g., "dokcer" → "docker")
-  - Shell operator support (pipes, redirects, logical operators)
-  - Glob pattern expansion (`*`, `?`, `[...]`, `{...}`) with shell execution
-  - Language-agnostic classification (works for any language)
-- ✅ **Command Execution**: Async shell command execution with stdout/stderr capture
-- ✅ **Background Processes**: Execute commands in the background with `&` suffix (e.g., `sleep 10 &`)
-  - Job tracking with 1-based job IDs and process IDs
-  - `jobs` builtin command to list all background jobs
-  - Real-time notifications when jobs complete
-  - Non-blocking execution with independent job management
-- ✅ **Shell Operator Support**: Full support for pipes (`|`), redirects (`>`/`<`), logical operators (`&&`/`||`), subshells
-- ✅ **Performance Optimizations**: Precompiled regex patterns, thread-safe command caching, fail-fast lock poisoning recovery, periodic job checking (250ms)
-- ✅ **Interactive Commands**: 28 commands with full TUI suspension (vim, nano, less, man, top, htop, sudo, etc.) + 31 blocked commands with helpful alternatives
-- ✅ **Auto-Install Framework**: Detect missing commands and prompt for installation (execution deferred to M2)
-- ✅ **LLM Integration**: Mock client ready, route natural language queries to AI backend
-- ✅ **Syntax Highlighting**: Code blocks with syntax highlighting (Rust, Python, Bash, JSON)
-- ✅ **Tab Completion**: Basic command and file path completion
-- ✅ **Command History**: Navigate previous commands with arrow keys, reverse search with Ctrl+R
-- ✅ **Reverse History Search**: Interactive bash-like history search (Ctrl+R) with case-insensitive matching, cached search results, and match cycling
-- ✅ **Output Scrolling**: Full scrollbar with mouse wheel and click/drag support, smart auto-scroll to keep prompt visible on user input
-- ✅ **Cross-Platform**: Windows, macOS, and Linux support with platform-specific optimizations
-- ✅ **Benchmarking Suite**: Performance benchmarks for SCAN algorithm
-- ✅ **Unicode Support**: Full Unicode support for international users (CJK, emoji, etc.) with character-count based cursor positioning
-- ✅ **Code Quality**: 224 tests passing with comprehensive edge case coverage, 0 clippy warnings, Microsoft Pragmatic Rust Guidelines compliant (Debug on all public types, #[expect] for lint overrides, fail-fast lock poisoning recovery, static verification lints enabled)
+*   **GUI Framework:** `egui` + `eframe` (Immediate Mode GUI for high performance).
+*   **Terminal Core:**
+    *   `portable-pty`: Cross-platform pseudoterminal management.
+    *   `vte`: Industry-standard ANSI escape sequence parser.
+    *   `TerminalGrid`: Custom high-performance character grid with ring buffer scrolling.
+*   **AI Orchestration:**
+    *   **Async Event Loop:** Non-blocking background tasks handle LLM communication.
+    *   **Streaming Client:** HTTP client supporting Server-Sent Events (SSE) for real-time interaction.
+    *   **State Machine:** Robust handling of UI states (Normal, Waiting, Approval, Answer).
 
-### Coming in M2/M3
-
-- Multi-shell support (Zsh, Fish)
-- Advanced markdown rendering (tables, images)
-- Telemetry and analytics
-- Cloud provider integrations (AWS CLI, Azure CLI)
-- Plugin system
-
-## 🏗️ Architecture
-
-### SCAN Algorithm (Shell-Command And Natural-language)
-
-The core of Infraware Terminal is the **SCAN algorithm** - a high-performance input classification system using the Chain of Responsibility pattern:
-
-```
-User Input → Alias Expansion → InputClassifier (9-Handler Chain)
-                (if matches)           ↓
-                              ┌────────┼────────┐
-                              ↓        ↓        ↓
-                          Command    Typo?   Natural Language
-                              ↓        ↓        ↓
-                          Shell Exec Suggest LLM Backend
-```
-
-**10-Handler Chain** (executed in strict order):
-1. **EmptyInputHandler** - Fast path for empty input (<1μs)
-2. **HistoryExpansionHandler** - Bash-style history expansion: `!!`,  `!$`, `!^`, `!*` (~5μs)
-3. **ApplicationBuiltinHandler** - App-specific commands: clear, exit, jobs, history, reload-aliases, reload-commands, auth-status (<1μs)
-4. **ShellBuiltinHandler** - Shell builtins without PATH check: `.`, `:`, `[`, `[[`, source, export, eval, etc. (<1μs)
-5. **PathCommandHandler** - Executable paths: `./script.sh`, `/usr/bin/cmd`, background processes with `&` (~10μs)
-6. **PathDiscoveryHandler** - Auto-discover PATH commands with caching (~1-5ms miss, <1μs hit)
-7. **CommandSyntaxHandler** - Language-agnostic: flags, pipes, redirects, glob patterns (~10μs)
-8. **TypoDetectionHandler** - Levenshtein distance ≤2: "dokcer" → "docker" (~100μs, disabled by default)
-9. **NaturalLanguageHandler** - Language-agnostic heuristics (universal patterns) (~5μs)
-10. **DefaultHandler** - Fallback to LLM (<1μs)
-
-**Key Features**:
-- Average classification: <100μs
-- Language-agnostic core algorithm (works for any language)
-- Precompiled regex patterns (10-100x faster)
-- Thread-safe locks with fail-fast poisoning recovery (Microsoft Rust Guidelines M-PANIC-IS-STOP)
-- Panic-safe indexing on all array access (no unwrap() on array indices)
-- English-first fast path with universal LLM fallback
-- Periodic background job checking (250ms interval) to minimize lock contention
-
-See `docs/SCAN_ARCHITECTURE.md` for complete documentation.
-
-## 📂 Project Structure
-
-```
-infraware-terminal/
-├── Cargo.toml
-├── src/
-│   ├── main.rs                    # Entry point + event loop
-│   ├── lib.rs                     # Library exports
-│   ├── terminal/                  # TUI rendering and state
-│   │   ├── tui.rs                # ratatui rendering logic with scrollbar
-│   │   ├── state.rs              # Terminal state management (modes, scrollbar info)
-│   │   ├── buffers.rs            # Buffer components (SRP) - scrollable output, Unicode-safe
-│   │   ├── events.rs             # Keyboard and mouse event handling
-│   │   └── throbber.rs           # Animated loading indicator
-│   ├── input/                     # SCAN Algorithm
-│   │   ├── classifier.rs         # InputClassifier coordinator
-│   │   ├── handler.rs            # 10-handler Chain of Responsibility
-│   │   ├── history_expansion.rs  # Bash-style history expansion (!!, !$, !^, !*)
-│   │   ├── shell_builtins.rs     # Shell builtin recognition (., :, [, [[, etc.)
-│   │   ├── application_builtins.rs # Application builtins (clear, exit, jobs, etc.)
-│   │   ├── patterns.rs           # Precompiled RegexSet patterns
-│   │   ├── discovery.rs          # PATH-aware command cache
-│   │   ├── typo_detection.rs     # Levenshtein distance typo detection
-│   │   └── parser.rs             # Shell command parsing
-│   ├── pty/                       # PTY support for interactive commands
-│   │   ├── mod.rs                # PTY wrapper + REQUIRES_PTY list
-│   │   ├── session.rs            # Session management
-│   │   └── io.rs                 # Async I/O wrappers
-│   ├── executor/                  # Command execution
-│   │   ├── command.rs            # Async command execution + background processes (&)
-│   │   ├── job_manager.rs        # Background job tracking with JobManager
-│   │   ├── package_manager.rs    # Strategy pattern (apt, yum, brew, etc.)
-│   │   ├── install.rs            # Auto-install workflow
-│   │   └── completion.rs         # Tab completion
-│   ├── orchestrators/             # Workflow coordination
-│   │   ├── command.rs            # Command execution workflow
-│   │   ├── natural_language.rs   # LLM query workflow
-│   │   └── tab_completion.rs     # Tab completion workflow
-│   ├── llm/                       # LLM integration
-│   │   ├── client.rs             # Mock & HTTP clients
-│   │   └── renderer.rs           # Markdown rendering
-│   └── utils/                     # Shared utilities
-│       ├── ansi.rs               # ANSI color utilities
-│       └── message.rs            # Message formatting
-├── tests/                         # Test suites (224 tests)
-│   ├── classifier_tests.rs       # SCAN algorithm tests
-│   ├── executor_tests.rs         # Command execution tests
-│   └── integration_tests.rs      # End-to-end tests
-├── benches/                       # Performance benchmarks
-│   └── scan_benchmark.rs         # SCAN algorithm benchmarks
-└── docs/                          # Documentation
-    ├── INDEX.md                  # Documentation index
-    ├── SCAN_ARCHITECTURE.md      # SCAN algorithm details
-    ├── SCROLLING_ARCHITECTURE.md # Scrollbar implementation
-    ├── INTERACTIVE_COMMANDS_ARCHITECTURE.md
-    └── uml/                      # PlantUML diagrams
-```
-
-## 🚀 Getting Started
+## 📦 Installation & Setup
 
 ### Prerequisites
 
-- Rust 1.70+ (2021 edition)
-- Linux, macOS, or Windows
-- Terminal with ANSI color support
+*   Rust 1.75+
+*   Linux dependencies: `libssl-dev`, `pkg-config`, `libxcb-shape0-dev`, `libxcb-xfixes0-dev`.
 
-#### Linux
-
-On Linux systems, you need to install OpenSSL development dependencies:
-
-```bash
-sudo apt update && sudo apt install -y pkg-config libssl-dev
-```
-
-### Building
+### Building from Source
 
 ```bash
 # Clone the repository
-git clone <repository-url>
-cd infraware-terminal
+git clone https://github.com/infraware/terminal.git
+cd terminal-app
 
-# Build the project
-cargo build --release
-
-# Run tests
-cargo test
-
-# Run the application
-cargo run
-
-# Run with debug logging
-LOG_LEVEL=debug cargo run
-
-# Run with trace logging (very verbose)
-LOG_LEVEL=trace cargo run
+# Build and run
+cargo run --release
 ```
 
-### Environment Variables
+### Configuration
 
-| Variable | Description | Default |
-|----------|-------------|---------|
-| `LOG_LEVEL` | Log level: trace, debug, info, warn, error | `info` |
-| `LOG_MAX_SIZE_MB` | Max log file size before rotation | `10` |
-| `LOG_MAX_FILES` | Number of rotated log files to keep | `5` |
-| `LOG_PATH` | Custom log directory path | Platform-specific |
-| `INFRAWARE_BACKEND_URL` | Backend API endpoint | - |
-| `BACKEND_API_KEY` | API key for LLM backend | - |
-
-Log files are stored in:
-- **Linux**: `~/.local/share/infraware-terminal/logs/`
-- **macOS**: `~/Library/Logs/infraware-terminal/`
-- **Windows**: `%APPDATA%\infraware-terminal\logs\`
-
-### Usage
-
-Once running, you can:
-
-1. **Execute commands**: Type any shell command (e.g., `ls -la`, `docker ps`)
-2. **Use interactive commands**: Full terminal control for editors and pagers (Unix/Linux/macOS):
-   - Text editors: `vim file.txt`, `nano config.yml`, `emacs script.rs`
-   - Pagers: `less output.log`, `man docker`, `info grep`
-   - File managers: `mc`, `ranger`, `nnn`
-   - System monitoring: `watch -n 1 'ps aux'`
-3. **Run background processes**: Execute commands in the background with `&` suffix:
-   - `sleep 10 &` - Run sleep in the background, terminal stays responsive
-   - `long-running-task &` - Start any long-running task without blocking
-   - `jobs` - List all background jobs with their status and process IDs
-   - Auto-notification when jobs complete with exit status
-4. **Use history expansion**: Use bash-style history patterns:
-   - `!!` - Re-run previous command: `sudo !!`
-   - `!$` - Use last argument: `vim !$` (if previous was `cat file.txt`)
-   - `!^` - Use first argument: `echo !^` (if previous was `cat file1 file2`)
-   - `!*` - Use all arguments: `find !*` (if previous was `ls -la /tmp`)
-5. **Use glob patterns**: Commands with `*`, `?`, `[...]`, `{...}` automatically execute through shell:
-   - `rm -rf file*` - Remove files matching pattern
-   - `ls *.txt` - List all .txt files
-   - `echo file{1..3}` - Brace expansion
-   - `find /etc/host[s]` - Bracket patterns
-6. **Use aliases**: Type user-defined aliases from `~/.bashrc`, `~/.bash_aliases`, `~/.zshrc` (e.g., `ll` → expands to `ls -la`)
-7. **Ask questions**: Type natural language queries (e.g., "how do I list files?")
-8. **View history**: Type `history` to show all commands, or `history N` to show last N commands
-9. **Navigate history**: Use ↑/↓ arrow keys, or press Ctrl+R for reverse search
-10. **Reverse search history**: Press Ctrl+R to search interactively through command history
-    - Type characters to search (case-insensitive)
-    - Press Ctrl+R again to cycle to the next match (most recent first)
-    - Press Enter to accept the match
-    - Press Ctrl+C to cancel and restore your original input
-    - Press Backspace to modify the search query
-11. **Scroll output**: Navigate previous command output when it exceeds the visible area
-    - **Mouse wheel**: Scroll up/down with scroll wheel
-    - **Scrollbar clicks**: Click scrollbar track to jump, drag thumb to navigate, click arrows for line-by-line scroll
-    - **Keyboard**: Ctrl+Home/End to jump to start/end of output, Page Up/Down to scroll (if implemented)
-    - **Auto-scroll**: When you reach the bottom of output, typing a new command automatically scrolls to show the prompt
-12. **Tab completion**: Press Tab to complete commands/paths
-13. **Reload aliases**: Type `reload-aliases` to refresh aliases from config files (useful if editing `.bashrc` during a session)
-14. **Reload commands**: Type `reload-commands` to clear the command cache (useful after installing new commands during a session)
-15. **Quit**: Press Ctrl+C or type `exit`
-
-#### Keyboard Shortcuts
-
-| Action | Key(s) | Description |
-|--------|--------|-------------|
-| **Input Navigation** | | |
-| Move cursor left | ← | Move left in input line |
-| Move cursor right | → | Move right in input line |
-| Delete character | Backspace | Delete character before cursor |
-| Submit input | Enter | Execute command or query |
-| **History Navigation** | | |
-| Previous command | ↑ | Navigate to previous command in history |
-| Next command | ↓ | Navigate to next command in history |
-| Reverse history search | Ctrl+R | Search through history interactively (bash-like) |
-| Cycle through matches | Ctrl+R | While searching, press again to cycle to next match |
-| **Output Scrolling** | | |
-| Scroll up | PageUp | Scroll output up one page |
-| Scroll down | PageDown | Scroll output down one page |
-| Scroll up (laptop) | Ctrl+↑ | Alternative scroll up for laptops (when Fn+PageUp is inconvenient) |
-| Scroll down (laptop) | Ctrl+↓ | Alternative scroll down for laptops (when Fn+PageDown is inconvenient) |
-| **Other** | | |
-| Tab completion | Tab | Complete command or file path |
-| Clear screen | Ctrl+L | Clear terminal output buffer |
-| Quit/Cancel | Ctrl+C | Context-aware: cancel operations, clear input, or exit reverse search |
-
-**Note**: The visual scrollbar appears on the right side of the output area when the content exceeds the visible space, showing your position in the output history.
-
-#### Interactive Commands
-
-Infraware Terminal supports full interactive command execution with complete terminal control. When you run an interactive command, the TUI temporarily suspends (returns to normal terminal), the command runs with full terminal access, and the TUI automatically resumes when you exit. A total of 28 interactive commands are supported.
-
-**Supported Interactive Commands** (28 total):
-- **Text Editors** (7): vim, nvim, nano, emacs, pico, ed, vi
-- **Pagers** (5): less, more, most, man, info
-- **File Managers** (5): mc, ranger, nnn, lf, vifm
-- **System Monitors** (4): top, htop, btop, atop
-- **Other Monitors** (3): iotop, iftop, nethogs
-- **Privilege Escalation** (1): sudo
-- **Process Watcher** (1): watch
-
-**Usage Examples**:
-```bash
-# Text editors - full terminal control
-vim file.txt          # Opens vim for editing
-nano config.yml       # Opens nano editor
-emacs script.py       # Opens emacs editor
-
-# Pagers and documentation - scroll through content
-less output.log       # Browse large log files
-man docker            # View docker manual pages
-info grep             # View grep documentation
-
-# File managers - navigate file system
-mc                    # Opens Norton Commander-style file manager
-ranger                # Opens ranger file browser
-nnn /tmp              # Opens nnn file manager in /tmp
-
-# System monitoring - real-time process/system info
-top                   # Real-time system monitor
-htop                  # Interactive process viewer
-iotop                 # Monitor I/O statistics
-
-# Privilege escalation - requires password entry
-sudo apt update       # Run command with sudo (prompts for password)
-sudo visudo           # Edit sudoers file safely
-
-# Process monitoring
-watch -n 1 'ps aux'   # Monitor processes continuously
-```
-
-**Execution Workflow**:
-1. Type the interactive command
-2. The TUI suspends (temporarily leaves alternate screen, disables raw mode)
-3. Command runs with full terminal access (inherits stdin/stdout/stderr)
-4. When you exit the command, the TUI automatically resumes
-5. Output is not captured (command runs in native terminal, not TUI buffer)
-
-**Platform Support**:
-- **Linux, macOS, Unix**: Fully supported with TUI suspension/resumption
-- **Windows**: Not supported - returns helpful error message
-
-**Blocked Interactive Commands** (31 total):
-Some commands require persistent network or complex TTY sessions that cannot be supported:
-
-```
-Network Tools (4):     ssh, telnet, ftp, sftp - Use in separate terminal window
-Multiplexers (2):      tmux, screen - Use outside Infraware Terminal
-REPLs (5):             python, python3, node, irb, ipython
-                       → Pass code with -c flag: python -c "print(1+1)"
-Databases (5):         mysql, psql, sqlite3, mongo, redis-cli
-                       → Use connection flags or scripts
-Debuggers (3):         gdb, lldb, pdb
-System Monitors (3):   iotop, iftop, nethogs - Require root, use alt-commands
-Admin Tools (2):       passwd, visudo - Use external terminal for safety
-Terminal Browsers (3): w3m, lynx, links
-```
-
-These commands show helpful error messages with alternatives when you try to run them.
-
-#### Alias Support
-
-Infraware Terminal automatically loads and expands your shell aliases:
-
-**System Aliases** (loaded first):
-- `/etc/bash.bashrc` (Debian/Ubuntu)
-- `/etc/bashrc` (RedHat/CentOS/Fedora)
-- `/etc/profile`
-- `/etc/profile.d/*.sh`
-
-**User Aliases** (override system, loaded second):
-- `~/.bashrc`
-- `~/.bash_aliases`
-- `~/.zshrc`
-
-**Examples**:
-```
-# If your ~/.bashrc contains:
-alias ll='ls -la'
-alias gs='git status'
-
-# You can use them directly:
-ll                    # Expands to: ls -la
-gs                    # Expands to: git status
-ll -h | grep test     # Expands and preserves arguments
-```
-
-**Runtime Reload**:
-If you edit your shell config files during a session, use `reload-aliases` to refresh:
-```
-reload-aliases        # Reloads all aliases from system and user config files
-```
-
-**Security**: Dangerous alias patterns are automatically rejected (e.g., `alias rm='rm -rf /'`)
-
-## 🧪 Testing & Benchmarking
-
-### Running Tests
+The terminal looks for environment variables to connect to the backend:
 
 ```bash
-# Run all tests
-cargo test
-
-# Run specific test suite
-cargo test --test classifier_tests
-cargo test --test executor_tests
-cargo test --test integration_tests
-
-# Run tests for specific module
-cargo test classifier
-cargo test typo_detection
-
-# Run with output
-cargo test -- --nocapture
-
-# Run code coverage (requires cargo-llvm-cov)
-cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info
+export INFRAWARE_BACKEND_URL="http://your-backend-api.com"
+export BACKEND_API_KEY="your-api-key"
 ```
 
-### Running Benchmarks
+If no API key is provided, the terminal falls back to a **Mock Client** for testing purposes.
 
+## 💡 Usage Guide
+
+### Standard Terminal
+Use it just like `xterm` or `iTerm2`. Run commands, edit files, ssh into servers.
+
+### Automatic Error Assistance
+If you type a command that doesn't exist:
 ```bash
-# Run all benchmarks
-cargo bench
-
-# Run SCAN algorithm benchmarks only
-cargo bench scan_
-
-# View benchmark results
-open target/criterion/report/index.html  # macOS
-xdg-open target/criterion/report/index.html  # Linux
+$ gti status
 ```
+The terminal detects the error via a shell hook and asks the AI. The AI will suggest `git status`. You can approve execution with `Y`.
 
-**Performance Targets**:
-- Average SCAN classification: <100μs
-- Known command (cache hit): <1μs
-- Typo detection: <100μs (disabled by default)
-- Natural language: <5μs
-- PATH lookup (cache miss): 1-5ms
-- Background job check (read path, no jobs): <1μs
-- Job polling interval: 250ms (balances responsiveness vs lock contention)
-- LLM query throbber animation: 10 FPS (100ms render interval for smooth visual feedback)
+### Direct AI Query
+Prefix your input with `?` to ask a question:
+```bash
+$ ? list all docker containers sorted by memory usage
+```
+The AI will generate the appropriate `docker stats` command format for you.
 
-## 📝 Development Status
-
-### M1 Implementation - Complete ✅
-
-**Week 1: TUI Foundation** ✅
-- [x] Project setup with complete module structure
-- [x] Basic TUI with ratatui
-- [x] Keyboard event capture
-- [x] Output buffer management
-- [x] Terminal state composition (SRP-compliant buffers)
-
-**Week 2-3: SCAN Algorithm Implementation** ✅
-- [x] 8-handler Chain of Responsibility implementation
-- [x] Precompiled RegexSet patterns (10-100x performance improvement)
-- [x] PATH-aware command discovery with thread-safe caching
-- [x] Levenshtein distance typo detection
-- [x] Shell operator support (pipes, redirects, logical operators)
-- [x] Command parser with shell-words integration
-- [x] Async command executor with stdout/stderr capture
-- [x] Cross-platform package manager support (7 managers)
-- [x] Auto-install framework (prompt logic implemented)
-
-**Week 4: Testing & Optimization** ✅
-- [x] Comprehensive test suite (224 tests passing with edge case coverage)
-- [x] History expansion tests (comprehensive unit tests covering all patterns)
-- [x] Panic safety improvements (safe indexing throughout, no unwrap on array access)
-- [x] Unicode fix for international users (character-count based cursor positioning)
-- [x] Performance benchmarking suite
-- [x] Integration tests for end-to-end workflows
-- [x] Cross-platform testing (Ubuntu, Windows, macOS)
-- [x] CI/CD pipeline (fmt, clippy, coverage ≥75%)
-- [x] Documentation (CLAUDE.md, SCAN_ARCHITECTURE.md)
-- [x] Zero clippy warnings
-- [x] Dead code cleanup (removed facade.rs and errors.rs, 537 lines reduced)
-
-**Code Quality Improvements** ✅
-- [x] Microsoft Pragmatic Rust Guidelines compliance
-  - [x] Debug trait implementations on 5 complex types (InfrawareTerminal, CommandCache, CompiledPatterns, ClassifierChain, KnownCommandHandler)
-  - [x] Debug derives on 9 marker structs
-  - [x] Replaced 31 `#[allow]` with `#[expect]` for better lint management
-  - [x] Configured Microsoft-recommended lints in Cargo.toml (missing_debug_implementations, redundant_imports, unsafe_op_in_unsafe_fn, etc.)
-  - [x] Static verification: All 224 tests passing, 0 clippy warnings, 0 compiler warnings
-
-### Next Steps (M2/M3)
-- [ ] Real LLM backend integration (endpoint/auth configuration)
-- [ ] Auto-install execution (currently prompts only)
-- [ ] Advanced markdown rendering (tables, images)
-- [ ] Configuration file support (.infraware-terminal.toml)
-- [ ] Command history persistence to disk
-- [ ] Multi-shell support (Zsh, Fish)
-- [ ] Cloud provider integrations (AWS CLI, Azure CLI)
-
-## ⚠️ Known Limitations
-
-### M1 Constraints (By Design)
-
-- **Interactive Commands**: 28 commands supported with full TUI suspension. Some commands that require persistent TTY sessions are blocked (ssh, tmux, screen, python REPL, etc.)
-  - Supported: vim, nano, less, man, mc, ranger, top, htop, sudo, and more (see usage section for complete list)
-  - Blocked: 31 commands requiring long-running sessions or network access. Use alternatives or separate terminal
-  - Platform: Unix/Linux/macOS only (Windows shows error message)
-- **Alias Cache TTL**: No automatic TTL/invalidation - alias files modified externally during session require manual `reload-aliases` command to be recognized
-- **Command Cache TTL**: No automatic TTL/invalidation - commands installed during a session require `reload-commands` to be recognized
-- **Tab Completion**: Basic file and command completion only - no integration with bash/zsh completion systems
-- **Command History**: Session-only persistence - history is not saved to disk when the terminal closes (accessible via `history` command)
-- **Configuration**: Uses hardcoded defaults - no config file support yet
-- **Advanced Markdown**: Only basic formatting with syntax highlighting - tables, images deferred to M2
-
-### Future Improvements (M2/M3)
-
-- Automatic command cache invalidation with TTL
-- Full bash/zsh completion integration
-- Persistent command history across sessions
-- Configuration file support (.infraware-terminal.toml)
-- Advanced markdown rendering (tables, lists, images)
-- Multi-shell support (Zsh, Fish)
-- Cloud provider integrations (AWS CLI, Azure CLI enhancements)
-
-## 🔧 Configuration
-
-Configuration will be added in future milestones. For M1, the terminal uses sensible defaults.
-
-Planned configuration options:
-- LLM backend URL and authentication
-- Known commands whitelist
-- Color schemes
-- Key bindings
+### Interactive Mode
+If the AI needs more information (e.g., "Which region do you want to deploy to?"), it will pause and ask you. Type your answer directly in the prompt.
 
 ## 🤝 Contributing
 
-This is a 3-month contractor project. For questions or issues:
+We welcome contributions! Please follow our [Rust coding guidelines](CLAUDE.md) (Microsoft Pragmatic Rust).
 
-1. Review `CLAUDE.md` for development guidelines
-2. Check `docs/INDEX.md` for architecture documentation
-3. Run tests to ensure your changes work
-4. Follow Rust best practices and conventions
+1.  Fork the repo.
+2.  Create a feature branch.
+3.  Ensure `cargo check` and `cargo test` pass (zero warnings policy).
+4.  Submit a Pull Request.
 
-## 📄 License
+## 📜 License
 
-[To be determined]
-
-## 🙏 Acknowledgments
-
-- [ratatui](https://github.com/ratatui-org/ratatui) - Terminal UI framework
-- [crossterm](https://github.com/crossterm-rs/crossterm) - Cross-platform terminal control
-- [syntect](https://github.com/trishume/syntect) - Syntax highlighting
-
-## 📞 Support
-
-For technical questions:
-- Architecture decisions → Technical Lead
-- LLM backend integration → Backend Team
-- Product requirements → Product Manager
-- Timeline concerns → Project Manager
-
----
-
-**Note**: This is M1 (Milestone 1) of a 3-month project. The codebase is designed for extensibility and will evolve significantly in M2 and M3.
+MIT License. See [LICENSE](LICENSE) for details.
