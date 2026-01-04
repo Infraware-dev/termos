@@ -202,6 +202,11 @@ impl TerminalGrid {
         self.scroll_offset = 0;
     }
 
+    /// Scroll to specific absolute offset.
+    pub fn scroll_to_offset(&mut self, offset: usize) {
+        self.scroll_offset = offset.min(self.max_scroll_offset());
+    }
+
     /// Check if at bottom (live view).
     pub fn is_at_bottom(&self) -> bool {
         self.scroll_offset == 0
