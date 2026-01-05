@@ -1,8 +1,8 @@
 #!/bin/bash
 
-# Check if langgraph-cli is installed
-if ! command -v langgraph &> /dev/null; then
-    echo "Error: langgraph-cli is not installed."
+# Check if langgraph-cli is installed in the uv environment
+if ! uv pip list | grep -q "langgraph-cli"; then
+    echo "Error: langgraph-cli is not installed in the virtual environment."
     echo ""
     read -p "Would you like to install it now? (y/n) " -n 1 -r
     echo ""
