@@ -8,7 +8,7 @@ if ! command -v langgraph &> /dev/null; then
     echo ""
     if [[ $REPLY =~ ^[Yy]$ ]]; then
         echo "Installing langgraph-cli..."
-        pip install langgraph-cli
+        uv pip install langgraph-cli
         if [ $? -ne 0 ]; then
             echo "Error: Failed to install langgraph-cli"
             exit 1
