@@ -12,31 +12,12 @@ echo "==================================="
 echo "Infraware Terminal Backend Setup"
 echo "==================================="
 echo ""
-echo -e "${YELLOW}WARNING: This script will install packages using pip with --break-system-packages flag.${NC}"
-echo -e "${YELLOW}This may override system-managed packages. Use with caution.${NC}"
-echo ""
-echo -ne "${YELLOW}Do you want to proceed? (Y/n): ${NC}"
-read -n 1 -r
-echo ""
-if [[ ! $REPLY =~ ^[Yy]$ ]] && [[ ! -z $REPLY ]]; then
-    echo "Installation cancelled."
-    exit 0
-fi
+echo "This script will install all dependencies inside the backend virtual environment using uv."
 echo ""
 
 # Function to check if a command exists
 command_exists() {
     command -v "$1" >/dev/null 2>&1
-}
-
-# Function to check Python package
-python_package_exists() {
-    python3 -c "import $1" >/dev/null 2>&1
-}
-
-# Function to check if uv package is installed
-uv_package_exists() {
-    uv pip list 2>/dev/null | grep -q "^$1 "
 }
 
 # Check Python 3
@@ -58,43 +39,8 @@ else
     exit 1
 fi
 
-# Check pip
-echo -n "Checking pip... "
-if command_exists pip3; then
-    PIP_VERSION=$(pip3 --version | awk '{print $2}')
-    echo -e "${GREEN}Found${NC} (version $PIP_VERSION)"
-    echo "Upgrading pip..."
-    pip3 install --upgrade pip --break-system-packages 2>/dev/null || pip3 install --upgrade pip
-else
-    echo -e "${RED}Not found${NC}"
-    echo "Installing pip..."
-
-    if [[ "$OSTYPE" == "linux-gnu"* ]]; then
-        if command_exists apt-get; then
-            sudo apt-get update
-            sudo apt-get install -y python3-pip
-        elif command_exists yum; then
-            sudo yum install -y python3-pip
-        elif command_exists dnf; then
-            sudo dnf install -y python3-pip
-        else
-            echo -e "${RED}Unable to install pip. Please install manually.${NC}"
-            exit 1
-        fi
-    elif [[ "$OSTYPE" == "darwin"* ]]; then
-        if command_exists brew; then
-            brew install python3
-        else
-            echo -e "${RED}Homebrew not found. Please install pip manually.${NC}"
-            exit 1
-        fi
-    else
-        echo -e "${RED}Unable to install pip. Please install manually.${NC}"
-        exit 1
-    fi
-fi
-
 # Check uv package manager
+echo ""
 echo -n "Checking uv package manager... "
 if command_exists uv; then
     UV_VERSION=$(uv --version | awk '{print $2}')
@@ -102,22 +48,27 @@ if command_exists uv; then
 else
     echo -e "${YELLOW}Not found${NC}"
     echo "Installing uv..."
-    pip3 install uv --break-system-packages 2>/dev/null || pip3 install uv
+
+    # Install uv using the official installer
+    if [[ "$OSTYPE" == "msys" ]] || [[ "$OSTYPE" == "win32" ]]; then
+        powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
+    else
+        curl -LsSf https://astral.sh/uv/install.sh | sh
+    fi
 
     # Refresh PATH to find newly installed uv
+    export PATH="$HOME/.cargo/bin:$PATH"
     hash -r 2>/dev/null || true
 
-    # If still not found, try to locate it
     if ! command_exists uv; then
-        UV_PATH=$(python3 -c "import site; print(site.USER_BASE + '/bin')" 2>/dev/null)
-        if [ -n "$UV_PATH" ] && [ -f "$UV_PATH/uv" ]; then
-            export PATH="$UV_PATH:$PATH"
-            echo "Added $UV_PATH to PATH"
-        fi
+        echo -e "${RED}Failed to install uv. Please install manually.${NC}"
+        echo "Visit: https://docs.astral.sh/uv/getting-started/installation/"
+        exit 1
     fi
 fi
 
 # Check wget
+echo ""
 echo -n "Checking wget... "
 if command_exists wget; then
     echo -e "${GREEN}Found${NC}"
@@ -194,40 +145,42 @@ else
     fi
 fi
 
-# Sync dependencies with uv
+# Navigate to backend directory
 echo ""
-echo "Syncing project dependencies..."
-
-# Change to backend directory if it exists
-if [ -d "backend" ]; then
-    cd backend
-    echo "Changed to backend directory"
+if [ ! -d "backend" ]; then
+    echo -e "${RED}Error: backend directory not found${NC}"
+    exit 1
 fi
 
-if [ -f "pyproject.toml" ] && [ -f "uv.lock" ]; then
+cd backend
+echo "Changed to backend directory"
+
+# Sync dependencies with uv (creates venv automatically)
+echo ""
+echo "Syncing project dependencies with uv..."
+echo "This will create a virtual environment in backend/.venv"
+
+if [ -f "pyproject.toml" ]; then
     uv sync
+    echo -e "${GREEN}Dependencies synced successfully${NC}"
 else
-    echo -e "${YELLOW}Warning: pyproject.toml or uv.lock not found. Skipping uv sync.${NC}"
+    echo -e "${YELLOW}Warning: pyproject.toml not found.${NC}"
+    echo "Creating virtual environment..."
+    uv venv
 fi
 
-# Install Python packages
+# Install additional packages using uv
 echo ""
-echo "Installing Python packages..."
+echo "Installing additional Python packages..."
 
 PACKAGES=("ruff" "langgraph-cli" "langchain-experimental" "fastapi")
 
 for package in "${PACKAGES[@]}"; do
-    echo -n "Checking $package... "
-    if python3 -c "import ${package//-/_}" 2>/dev/null || command_exists "$package"; then
-        echo -e "${GREEN}Found${NC}"
+    echo "Installing $package..."
+    if [ "$package" == "langgraph-cli" ]; then
+        uv pip install --upgrade langgraph-cli 'langgraph-cli[inmem]'
     else
-        echo -e "${YELLOW}Not found${NC}"
-        echo "Installing $package..."
-        if [ "$package" == "langgraph-cli" ]; then
-            pip3 install --upgrade langgraph-cli 'langgraph-cli[inmem]' --break-system-packages 2>/dev/null || pip3 install --upgrade langgraph-cli 'langgraph-cli[inmem]'
-        else
-            pip3 install --upgrade "$package" --break-system-packages 2>/dev/null || pip3 install --upgrade "$package"
-        fi
+        uv pip install --upgrade "$package"
     fi
 done
 
@@ -236,6 +189,15 @@ echo -e "${GREEN}==================================="
 echo "Setup completed successfully!"
 echo "===================================${NC}"
 echo ""
-echo "Note: If you want to install the package in editable mode, run:"
-echo "  pip install -e ."
+echo "Virtual environment location: backend/.venv"
+echo ""
+echo "To activate the virtual environment, run:"
+if [[ "$OSTYPE" == "msys" ]] || [[ "$OSTYPE" == "win32" ]]; then
+    echo "  source backend/.venv/Scripts/activate"
+else
+    echo "  source backend/.venv/bin/activate"
+fi
+echo ""
+echo "Or use uv to run commands directly:"
+echo "  uv run python your_script.py"
 echo ""

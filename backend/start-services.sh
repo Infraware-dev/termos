@@ -1,5 +1,25 @@
 #!/bin/bash
 
+# Check if langgraph-cli is installed
+if ! command -v langgraph &> /dev/null; then
+    echo "Error: langgraph-cli is not installed."
+    echo ""
+    read -p "Would you like to install it now? (y/n) " -n 1 -r
+    echo ""
+    if [[ $REPLY =~ ^[Yy]$ ]]; then
+        echo "Installing langgraph-cli..."
+        pip install langgraph-cli
+        if [ $? -ne 0 ]; then
+            echo "Error: Failed to install langgraph-cli"
+            exit 1
+        fi
+        echo "langgraph-cli installed successfully!"
+    else
+        echo "Installation cancelled. Exiting."
+        exit 0
+    fi
+fi
+
 # Create logs directory if it doesn't exist
 mkdir -p logs
 
