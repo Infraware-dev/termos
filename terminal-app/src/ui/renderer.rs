@@ -136,19 +136,19 @@ pub fn render_scrollbar(
 
     let scrollbar_width = 12.0; // Slightly wider for better interaction
     let scrollbar_x = rect.right() - scrollbar_width - 2.0;
-    
+
     let padding_top = 2.0;
     let padding_bottom = 12.0;
     let arrow_size = 12.0;
-    
+
     let track_top = rect.top() + padding_top + arrow_size;
     let track_bottom = rect.bottom() - padding_bottom - arrow_size;
     let track_height = (track_bottom - track_top).max(0.0);
-    
+
     // 1. Draw Scrollbar Track (Background)
     let track_rect = Rect::from_min_max(
         Pos2::new(scrollbar_x, track_top),
-        Pos2::new(scrollbar_x + scrollbar_width, track_bottom)
+        Pos2::new(scrollbar_x + scrollbar_width, track_bottom),
     );
     painter.rect_filled(track_rect, 2.0, Color32::from_gray(30));
 
@@ -168,17 +168,47 @@ pub fn render_scrollbar(
     // 3. Draw Arrows (Top and Bottom)
     let arrow_color = Color32::from_gray(160);
     let stroke = Stroke::new(1.5, arrow_color);
-    
+
     // Up Arrow
-    let up_arrow_center = Pos2::new(scrollbar_x + scrollbar_width / 2.0, rect.top() + padding_top + arrow_size / 2.0);
+    let up_arrow_center = Pos2::new(
+        scrollbar_x + scrollbar_width / 2.0,
+        rect.top() + padding_top + arrow_size / 2.0,
+    );
     // Use painter.arrow or simpler lines
-    painter.line_segment([Pos2::new(up_arrow_center.x - 3.0, up_arrow_center.y + 2.0), Pos2::new(up_arrow_center.x, up_arrow_center.y - 2.0)], stroke);
-    painter.line_segment([Pos2::new(up_arrow_center.x + 3.0, up_arrow_center.y + 2.0), Pos2::new(up_arrow_center.x, up_arrow_center.y - 2.0)], stroke);
+    painter.line_segment(
+        [
+            Pos2::new(up_arrow_center.x - 3.0, up_arrow_center.y + 2.0),
+            Pos2::new(up_arrow_center.x, up_arrow_center.y - 2.0),
+        ],
+        stroke,
+    );
+    painter.line_segment(
+        [
+            Pos2::new(up_arrow_center.x + 3.0, up_arrow_center.y + 2.0),
+            Pos2::new(up_arrow_center.x, up_arrow_center.y - 2.0),
+        ],
+        stroke,
+    );
 
     // Down Arrow
-    let down_arrow_center = Pos2::new(scrollbar_x + scrollbar_width / 2.0, rect.bottom() - padding_bottom - arrow_size / 2.0);
-    painter.line_segment([Pos2::new(down_arrow_center.x - 3.0, down_arrow_center.y - 2.0), Pos2::new(down_arrow_center.x, down_arrow_center.y + 2.0)], stroke);
-    painter.line_segment([Pos2::new(down_arrow_center.x + 3.0, down_arrow_center.y - 2.0), Pos2::new(down_arrow_center.x, down_arrow_center.y + 2.0)], stroke);
+    let down_arrow_center = Pos2::new(
+        scrollbar_x + scrollbar_width / 2.0,
+        rect.bottom() - padding_bottom - arrow_size / 2.0,
+    );
+    painter.line_segment(
+        [
+            Pos2::new(down_arrow_center.x - 3.0, down_arrow_center.y - 2.0),
+            Pos2::new(down_arrow_center.x, down_arrow_center.y + 2.0),
+        ],
+        stroke,
+    );
+    painter.line_segment(
+        [
+            Pos2::new(down_arrow_center.x + 3.0, down_arrow_center.y - 2.0),
+            Pos2::new(down_arrow_center.x, down_arrow_center.y + 2.0),
+        ],
+        stroke,
+    );
 }
 
 #[cfg(test)]

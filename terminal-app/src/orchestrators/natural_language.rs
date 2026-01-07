@@ -35,7 +35,11 @@ impl NaturalLanguageOrchestrator {
     }
 
     /// Query the LLM with cancellation support
-    pub async fn query(&self, text: &str, cancel_token: CancellationToken) -> Result<LLMQueryResult> {
+    pub async fn query(
+        &self,
+        text: &str,
+        cancel_token: CancellationToken,
+    ) -> Result<LLMQueryResult> {
         self.llm_client.query_cancellable(text, cancel_token).await
     }
 

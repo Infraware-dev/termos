@@ -4,10 +4,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**Infraware Terminal** is a VTE-based terminal emulator built with egui. It provides full terminal emulation with PTY support for running interactive shell sessions.
+**Infraware Terminal** is an AI-powered terminal emulator built with egui. It combines VTE-based terminal emulation with an integrated LLM agent for DevOps assistance (command suggestions, error handling, natural language queries).
 
-**Tech Stack**: Rust + egui/eframe + VTE + portable-pty
-**Status**: Terminal Emulator Complete (0 clippy warnings, Microsoft Pragmatic Rust Guidelines compliant)
+**Tech Stack**: Rust + egui/eframe + VTE + portable-pty + tokio (async) + reqwest (HTTP/SSE)
+**Status**: Terminal + LLM Integration Complete (0 clippy warnings, Microsoft Pragmatic Rust Guidelines compliant)
 
 **Prerequisites** (Linux): `sudo apt install -y pkg-config libssl-dev`
 
@@ -21,7 +21,7 @@ cargo check                          # Fast type check
 LOG_LEVEL=debug cargo run            # With debug logging
 
 # Testing
-cargo test                           # All tests (21 tests)
+cargo test                           # All tests (36 tests)
 cargo test test_name                 # Single test
 cargo test -- --nocapture            # With output
 
@@ -35,11 +35,48 @@ cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info
 ## Architecture
 
 ```
-User Input (egui) → KeyboardHandler → PTY writer → Shell (bash/zsh)
-                                           ↓
-                          PTY reader → VTE parser → Terminal grid
-                                           ↓
-                          egui renderer (backgrounds, text, scrollbar)
+┌─────────────────────────────────────────────────────────────────────┐
+│                        User Input (egui)                            │
+└─────────────────────────────────────────────────────────────────────┘
+                                   │
+                    ┌──────────────┴──────────────┐
+                    ▼                              ▼
+         ┌──────────────────┐          ┌─────────────────────┐
+         │ KeyboardHandler  │          │ Magic Input (? ...)│
+         └────────┬─────────┘          └──────────┬──────────┘
+                  │                               │
+                  ▼                               ▼
+         ┌──────────────────┐          ┌─────────────────────┐
+         │   PTY Writer     │          │ NaturalLanguage     │
+         │                  │          │ Orchestrator        │
+         └────────┬─────────┘          └──────────┬──────────┘
+                  │                               │
+                  ▼                               ▼
+         ┌──────────────────┐          ┌─────────────────────┐
+         │   Shell Process  │          │  LLM Client (SSE)   │
+         │   (bash/zsh)     │          │  + HITL Orchestrator│
+         └────────┬─────────┘          └──────────┬──────────┘
+                  │                               │
+                  ▼                               ▼
+         ┌──────────────────┐          ┌─────────────────────┐
+         │   PTY Reader     │          │ ResponseRenderer    │
+         └────────┬─────────┘          │ (markdown→ANSI)     │
+                  │                    └──────────┬──────────┘
+                  ▼                               │
+         ┌──────────────────┐                     │
+         │   VTE Parser     │◄────────────────────┘
+         └────────┬─────────┘
+                  │
+                  ▼
+         ┌──────────────────┐
+         │  Terminal Grid   │
+         │  (scrollback)    │
+         └────────┬─────────┘
+                  │
+                  ▼
+         ┌──────────────────┐
+         │  egui Renderer   │
+         └──────────────────┘
 ```
 
 ### Core Components
@@ -50,6 +87,9 @@ User Input (egui) → KeyboardHandler → PTY writer → Shell (bash/zsh)
 | **Terminal Grid** | 2D cell array with scrollback buffer |
 | **PTY Session** | Bidirectional I/O with shell process |
 | **egui Renderer** | Single-pass rendering with text batching |
+| **LLM Client** | HTTP client with SSE streaming for LLM backend |
+| **Orchestrators** | NaturalLanguage (queries) + HITL (command approval, questions) |
+| **ResponseRenderer** | Markdown→ANSI conversion with syntax highlighting (syntect) |
 
 ### Quick Reference: Where to Find X
 
@@ -57,31 +97,39 @@ User Input (egui) → KeyboardHandler → PTY writer → Shell (bash/zsh)
 |------|----------|
 | Add keyboard shortcut | `src/input/keyboard.rs` → `process_ctrl_keys()` or `process_other_keys()` |
 | Modify terminal rendering | `src/app.rs` → `render_terminal()` |
-| Modify scrollbar | `src/ui/renderer.rs` → `render_scrollbar()` |
+| Modify scrollbar | `src/ui/scrollbar.rs` → `ScrollbarLogic` |
 | Change cursor blink rate | `src/config.rs` → `timing::CURSOR_BLINK_INTERVAL` |
 | Modify PTY spawn | `src/pty/mod.rs` → `Pty::spawn()` |
 | Add VTE escape handler | `src/terminal/handler.rs` → `csi_dispatch()` |
 | Modify cell attributes | `src/terminal/cell.rs` → `CellAttrs` |
 | Change theme colors | `src/ui/theme.rs` → `Theme` struct |
 | Add app mode | `src/state.rs` → `AppMode` enum |
+| Modify LLM query flow | `src/orchestrators/natural_language.rs` → `NaturalLanguageOrchestrator` |
+| Handle HITL interrupts | `src/orchestrators/hitl.rs` → `HitlOrchestrator` |
+| Change LLM response rendering | `src/llm/renderer.rs` → `ResponseRenderer` |
+| Add text selection | `src/input/selection.rs` → `SelectionState` |
 
 ### Key Modules
 
 | Directory | Purpose |
 |-----------|---------|
+| `auth/` | Authentication: `authenticator.rs` (Authenticator trait + HTTP/Mock impl), `config.rs` (AuthConfig), `models.rs` (request/response structs) |
 | `terminal/` | VTE: `grid.rs` (terminal grid + scrollback), `cell.rs` (cell attributes), `handler.rs` (escape sequence handler) |
 | `pty/` | PTY: `manager.rs` (coordinator), `session.rs` (session lifecycle), `io.rs` (async reader/writer), `traits.rs` (DI traits) |
-| `input/` | Input: `keyboard.rs` (keyboard event mapping) |
-| `ui/` | UI: `renderer.rs` (egui helpers), `theme.rs` (colors), `prompt.rs` (placeholder) |
-| `llm/` | LLM: `client.rs` (placeholder for future LLM integration) |
+| `input/` | Input: `keyboard.rs` (keyboard event mapping), `selection.rs` (text selection state) |
+| `ui/` | UI: `renderer.rs` (egui helpers), `theme.rs` (colors), `scrollbar.rs` (scrollbar logic) |
+| `llm/` | LLM: `client.rs` (HTTP+SSE client with HITL), `renderer.rs` (markdown→ANSI with syntect) |
+| `orchestrators/` | Workflows: `natural_language.rs` (LLM queries), `hitl.rs` (human-in-the-loop approval) |
 | `app.rs` | Main egui application with rendering loop |
 | `state.rs` | Application state machine (AppMode, transitions) |
 | `config.rs` | Configuration constants (timing, rendering, sizes) |
 
 ### Design Patterns
 - **State Machine**: `state.rs` (AppMode with validated transitions)
-- **Dependency Injection**: `pty/traits.rs` (PtyWrite, PtyControl traits for testing)
+- **Dependency Injection**: `pty/traits.rs` (PtyWrite, PtyControl), `llm/client.rs` (LLMClientTrait)
 - **Single-Pass Rendering**: `app.rs` (batched backgrounds, text, decorations)
+- **Orchestrator Pattern**: `orchestrators/` (workflow coordination for LLM + HITL)
+- **SSE Streaming**: `llm/client.rs` (real-time LLM responses via Server-Sent Events)
 
 ## Keyboard Shortcuts (Active)
 
@@ -118,11 +166,10 @@ User Input (egui) → KeyboardHandler → PTY writer → Shell (bash/zsh)
 - PTY with async I/O and backpressure
 - SIGINT propagation to foreground process
 - Reactive repaint (CPU <5% when idle)
-
-### Placeholder (Code Ready, Not Active)
-- **LLM Client** (`llm/client.rs`): Complete HTTP client, marked `#[allow(dead_code)]`
-- **AppMode variants**: WaitingLLM, AwaitingApproval, AwaitingAnswer (state machine ready)
-- **Prompt rendering** (`ui/prompt.rs`): Placeholder module
+- **Magic Input (`?`)**: Prefix with `?` to query LLM directly (e.g., `? how do I revert a git commit`)
+- **LLM Integration**: HTTP/SSE client with streaming responses
+- **Human-in-the-Loop (HITL)**: Command approval and question answering workflows
+- **Markdown Rendering**: LLM responses rendered with syntax highlighting (syntect)
 
 ### Not Implemented
 - Command classification (SCAN algorithm)
@@ -133,9 +180,21 @@ User Input (egui) → KeyboardHandler → PTY writer → Shell (bash/zsh)
 - Command confirmations (rm -i)
 - Multilingual patterns
 
-## Configuration Constants
+## Configuration
 
-All in `src/config.rs`:
+### Environment Variables
+
+Set via shell or `.env` file (loaded automatically via `dotenvy`):
+
+```bash
+INFRAWARE_BACKEND_URL="http://your-backend-api.com"  # LLM backend URL
+ANTHROPIC_API_KEY="your-api-key"                     # API key for authentication
+LOG_LEVEL="debug"                                    # Logging level (debug, info, warn, error)
+```
+
+At startup, the terminal authenticates via `POST /api/auth`. If authentication fails or no API key is configured, it falls back to `MockLLMClient` for testing.
+
+### Constants (src/config.rs)
 
 ```rust
 // Timing
@@ -224,9 +283,9 @@ Standard `log` crate. `LOG_LEVEL=debug cargo run` for debug output.
 ```rust
 pub enum AppMode {
     Normal,                           // Default state
-    WaitingLLM,                       // Querying LLM (placeholder)
-    AwaitingApproval { command, message },  // LLM command approval (placeholder)
-    AwaitingAnswer { question, options },   // LLM question (placeholder)
+    WaitingLLM,                       // Querying LLM
+    AwaitingApproval { command, message },  // LLM wants to execute command (y/n)
+    AwaitingAnswer { question, options },   // LLM asks question (free-text)
 }
 ```
 
@@ -256,11 +315,10 @@ Agents in `.claude/agents/` are invoked automatically when appropriate:
 
 | Metric | Value |
 |--------|-------|
-| Total LOC | ~4,350 |
-| Source files | 21 |
-| Functions | 202 |
-| Tests | 21 |
-| Largest file | `terminal/grid.rs` (744 LOC) |
+| Total LOC | ~7,000 |
+| Source files | 30 |
+| Tests | 36 |
+| Largest file | `llm/client.rs` (~900 LOC) |
 | Highest complexity | `render_terminal()` (CC ~28) |
 
 ## Platform Notes

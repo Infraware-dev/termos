@@ -58,7 +58,7 @@ impl Scrollbar {
         // Includes padding and margins
         Rect::from_min_max(
             Pos2::new(x - 2.0, available_rect.top()),
-            Pos2::new(available_rect.right(), available_rect.bottom())
+            Pos2::new(available_rect.right(), available_rect.bottom()),
         )
     }
 
@@ -102,10 +102,8 @@ impl Scrollbar {
             egui::Vec2::new(width - 4.0, thumb_height),
         );
 
-        let track_rect = Rect::from_min_max(
-            Pos2::new(x, track_top),
-            Pos2::new(x + width, track_bottom),
-        );
+        let track_rect =
+            Rect::from_min_max(Pos2::new(x, track_top), Pos2::new(x + width, track_bottom));
 
         let up_arrow_rect = Rect::from_min_max(
             Pos2::new(x, rect.top() + padding_top),
@@ -138,7 +136,8 @@ impl Scrollbar {
             }
 
             if self.is_dragging && pointer_down {
-                let new_thumb_y = (pos.y - self.drag_offset).clamp(track_top, track_top + travel_range);
+                let new_thumb_y =
+                    (pos.y - self.drag_offset).clamp(track_top, track_top + travel_range);
                 if travel_range > 0.0 {
                     // Convert Y back to offset
                     let new_pct = 1.0 - (new_thumb_y - track_top) / travel_range;
@@ -148,7 +147,11 @@ impl Scrollbar {
             }
 
             // 2. Track Click (Page Jump)
-            if !self.is_dragging && track_rect.contains(pos) && !thumb_rect.contains(pos) && pointer_pressed {
+            if !self.is_dragging
+                && track_rect.contains(pos)
+                && !thumb_rect.contains(pos)
+                && pointer_pressed
+            {
                 if pos.y < thumb_y {
                     action = Some(ScrollAction::Up(visible_lines));
                 } else {
@@ -179,9 +182,10 @@ impl Scrollbar {
                         // Repeat logic
                         let initial_delay = std::time::Duration::from_millis(300);
                         let repeat_interval = std::time::Duration::from_millis(50);
-                        
+
                         if last_time.elapsed() > initial_delay {
-                            self.last_action_time = Some(Instant::now() - (initial_delay - repeat_interval));
+                            self.last_action_time =
+                                Some(Instant::now() - (initial_delay - repeat_interval));
                             action = Some(if direction == 1 {
                                 ScrollAction::Up(1)
                             } else {
@@ -199,30 +203,62 @@ impl Scrollbar {
         }
 
         // --- Rendering ---
-        
+
         // Track
         painter.rect_filled(track_rect, 2.0, Color32::from_gray(30));
 
         // Thumb
-        painter.rect_filled(thumb_rect, 4.0, if self.is_dragging {
-            Color32::from_gray(140)
-        } else {
-            Color32::from_gray(100)
-        });
+        painter.rect_filled(
+            thumb_rect,
+            4.0,
+            if self.is_dragging {
+                Color32::from_gray(140)
+            } else {
+                Color32::from_gray(100)
+            },
+        );
 
         // Arrows
-        let arrow_color = if self.active_direction != 0 { Color32::WHITE } else { Color32::from_gray(160) };
+        let arrow_color = if self.active_direction != 0 {
+            Color32::WHITE
+        } else {
+            Color32::from_gray(160)
+        };
         let stroke = Stroke::new(1.5, arrow_color);
 
         // Up Arrow
         let up_center = up_arrow_rect.center();
-        painter.line_segment([Pos2::new(up_center.x - 3.0, up_center.y + 2.0), Pos2::new(up_center.x, up_center.y - 2.0)], stroke);
-        painter.line_segment([Pos2::new(up_center.x + 3.0, up_center.y + 2.0), Pos2::new(up_center.x, up_center.y - 2.0)], stroke);
+        painter.line_segment(
+            [
+                Pos2::new(up_center.x - 3.0, up_center.y + 2.0),
+                Pos2::new(up_center.x, up_center.y - 2.0),
+            ],
+            stroke,
+        );
+        painter.line_segment(
+            [
+                Pos2::new(up_center.x + 3.0, up_center.y + 2.0),
+                Pos2::new(up_center.x, up_center.y - 2.0),
+            ],
+            stroke,
+        );
 
         // Down Arrow
         let down_center = down_arrow_rect.center();
-        painter.line_segment([Pos2::new(down_center.x - 3.0, down_center.y - 2.0), Pos2::new(down_center.x, down_center.y + 2.0)], stroke);
-        painter.line_segment([Pos2::new(down_center.x + 3.0, down_center.y - 2.0), Pos2::new(down_center.x, down_center.y + 2.0)], stroke);
+        painter.line_segment(
+            [
+                Pos2::new(down_center.x - 3.0, down_center.y - 2.0),
+                Pos2::new(down_center.x, down_center.y + 2.0),
+            ],
+            stroke,
+        );
+        painter.line_segment(
+            [
+                Pos2::new(down_center.x + 3.0, down_center.y - 2.0),
+                Pos2::new(down_center.x, down_center.y + 2.0),
+            ],
+            stroke,
+        );
 
         action
     }
