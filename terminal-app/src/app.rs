@@ -591,8 +591,12 @@ impl InfrawareApp {
                                 InputType::NaturalLanguage(query) => {
                                     log::info!("Input classified as NaturalLanguage: {}", query);
                                     self.current_command_buffer.clear();
+                                    // Clear the shell's input buffer (Ctrl+U kills line in readline)
+                                    // This prevents the shell from executing the typed text
+                                    self.send_to_pty(b"\x15");
                                     // Visual feedback: move to next line
-                                    self.vte_parser.advance(&mut self.terminal_handler, b"\r\n");
+                                    self.vte_parser
+                                        .advance(&mut self.terminal_handler, b"\r\n");
                                     self.start_llm_query(query);
                                     handled = true;
                                     break;
@@ -690,12 +694,12 @@ impl InfrawareApp {
                     self.vte_parser
                         .advance(&mut self.terminal_handler, echo.as_bytes());
 
-                    // Option 1: Execute directly in PTY
+                    // Execute command in PTY (shell will run it and show output)
                     let cmd_bytes = format!("{}\n", command);
                     self.send_to_pty(cmd_bytes.as_bytes());
 
-                    // Option 2: Resume LLM if it expects feedback (using main branch logic)
-                    self.resume_llm_run();
+                    // Return to normal mode - shell will handle the command execution
+                    self.mode = AppMode::Normal;
                 } else {
                     log::info!("User rejected command: {}", command);
                     self.mode = AppMode::Normal;
