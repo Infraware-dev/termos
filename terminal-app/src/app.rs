@@ -1,13 +1,14 @@
 //! Main application struct implementing eframe::App with full terminal emulation.
 
+use crate::auth::{AuthConfig, Authenticator, HttpAuthenticator};
 use crate::config::{pty as pty_config, rendering, size, timing};
 use crate::input::{KeyboardAction, KeyboardHandler, TextSelection};
-use crate::llm::{HttpLLMClient, LLMQueryResult, LLMClientTrait};
+use crate::llm::{HttpLLMClient, LLMClientTrait, LLMQueryResult};
 use crate::orchestrators::NaturalLanguageOrchestrator;
 use crate::pty::{PtyManager, PtyReader, PtyWrite, PtyWriter};
 use crate::state::AppMode;
 use crate::terminal::{Color, TerminalHandler};
-use crate::ui::scrollbar::{Scrollbar, ScrollAction};
+use crate::ui::scrollbar::{ScrollAction, Scrollbar};
 use crate::ui::{
     render_backgrounds, render_cursor, render_decorations, render_scrollbar, render_text_runs,
     Theme, SPINNER_FRAMES,
@@ -133,6 +134,9 @@ pub struct InfrawareApp {
 
     /// Scrollbar logic and state
     scrollbar: Scrollbar,
+
+    /// Authentication status message (shown at startup)
+    auth_status_message: Option<String>,
 }
 
 impl std::fmt::Debug for InfrawareApp {
@@ -188,19 +192,59 @@ impl InfrawareApp {
         // Initialize background event channel
         let (bg_event_tx, bg_event_rx) = mpsc::channel();
 
-        // Initialize LLM Orchestrator with fallback logic
+        // Initialize LLM Orchestrator with authentication
         // Reads from .env file (loaded in main.rs via dotenvy)
-        let backend_url = std::env::var("INFRAWARE_BACKEND_URL")
-            .unwrap_or_else(|_| "http://localhost:8000".to_string());
-        let api_key = std::env::var("ANTHROPIC_API_KEY").unwrap_or_default();
+        let auth_config = AuthConfig::from_env();
 
-        let llm_client: Arc<dyn LLMClientTrait> = if api_key.is_empty() {
-            log::warn!("No ANTHROPIC_API_KEY found, using Mock LLM Client");
-            Arc::new(crate::llm::MockLLMClient::new())
-        } else {
-            log::info!("Using HTTP LLM Client at {}", backend_url);
-            Arc::new(HttpLLMClient::new(backend_url, api_key))
-        };
+        let (llm_client, auth_status_message): (Arc<dyn LLMClientTrait>, Option<String>) =
+            if auth_config.is_configured() {
+                let backend_url = auth_config.backend_url.clone().unwrap();
+                let api_key = auth_config.api_key.clone().unwrap();
+
+                // Authenticate at startup
+                let authenticator = HttpAuthenticator::new(backend_url.clone());
+                let auth_result =
+                    runtime.block_on(async { authenticator.authenticate(&api_key).await });
+
+                match auth_result {
+                    Ok(response) if response.success => {
+                        log::info!("Authentication successful: {}", response.message);
+                        (
+                            Arc::new(HttpLLMClient::new(backend_url, api_key)),
+                            Some(format!(
+                                "\x1b[1;32mConnected to LLM Backend: {}\x1b[0m",
+                                response.message
+                            )),
+                        )
+                    }
+                    Ok(response) => {
+                        log::warn!("Authentication rejected: {}", response.message);
+                        (
+                            Arc::new(crate::llm::MockLLMClient::new()),
+                            Some(format!(
+                                "\x1b[1;31mAuth rejected: {} (Using Mock LLM)\x1b[0m",
+                                response.message
+                            )),
+                        )
+                    }
+                    Err(e) => {
+                        log::error!("Authentication failed: {}", e);
+                        (
+                            Arc::new(crate::llm::MockLLMClient::new()),
+                            Some(format!(
+                                "\x1b[1;31mAuth failed: {} (Using Mock LLM)\x1b[0m",
+                                e
+                            )),
+                        )
+                    }
+                }
+            } else {
+                log::warn!("No API key configured, using Mock LLM Client");
+                (
+                    Arc::new(crate::llm::MockLLMClient::new()),
+                    Some("\x1b[1;33mNo API key configured (Using Mock LLM - Set ANTHROPIC_API_KEY to connect)\x1b[0m".to_string())
+                )
+            };
 
         let orchestrator = Arc::new(NaturalLanguageOrchestrator::new(llm_client));
 
@@ -247,6 +291,8 @@ impl InfrawareApp {
             clipboard,
             // Scrollbar logic
             scrollbar: Scrollbar::new(),
+            // Authentication status
+            auth_status_message,
         }
     }
 
@@ -276,16 +322,14 @@ impl InfrawareApp {
         };
 
         self.send_to_pty(init_commands.as_bytes());
-        
-        // Print welcome message with LLM status
-        if std::env::var("ANTHROPIC_API_KEY").is_ok() {
-            let msg = "\r\n\x1b[1;32mInfraware Terminal Ready (Connected to LLM Backend)\x1b[0m\r\n";
-            self.vte_parser.advance(&mut self.terminal_handler, msg.as_bytes());
-        } else {
-            let msg = "\r\n\x1b[1;33mInfraware Terminal Ready (Using Mock LLM - Set ANTHROPIC_API_KEY to connect)\x1b[0m\r\n";
-            self.vte_parser.advance(&mut self.terminal_handler, msg.as_bytes());
+
+        // Print welcome message with auth status
+        if let Some(ref status_msg) = self.auth_status_message {
+            let msg = format!("\r\nInfraware Terminal Ready - {}\r\n", status_msg);
+            self.vte_parser
+                .advance(&mut self.terminal_handler, msg.as_bytes());
         }
-        
+
         log::info!("Shell initialized with custom prompt");
     }
 
@@ -349,17 +393,23 @@ impl InfrawareApp {
     /// Poll background events (LLM results, etc.)
     fn poll_background_events(&mut self) {
         while let Ok(event) = self.bg_event_rx.try_recv() {
+            log::debug!("Received background event: {:?}", event);
             match event {
                 AppBackgroundEvent::LlmResult(result) => {
                     match result {
                         LLMQueryResult::Complete(text) => {
-                            log::info!("LLM query complete");
+                            log::info!("LLM query complete, response length: {} chars", text.len());
+                            if text.is_empty() {
+                                log::warn!("LLM returned EMPTY response!");
+                            }
 
                             // Render response lines
                             let lines = self.orchestrator.render_response(&text);
+                            log::debug!("Rendered {} lines to display", lines.len());
                             let last_idx = lines.len().saturating_sub(1);
                             for (i, line) in lines.iter().enumerate() {
-                                self.vte_parser.advance(&mut self.terminal_handler, line.as_bytes());
+                                self.vte_parser
+                                    .advance(&mut self.terminal_handler, line.as_bytes());
                                 // Add newline between lines, but not after the last one
                                 // (shell's echo of \n will provide that)
                                 if i < last_idx {
@@ -375,10 +425,49 @@ impl InfrawareApp {
                         }
                         LLMQueryResult::CommandApproval { command, message } => {
                             log::info!("LLM requested command approval: {}", command);
+
+                            // Convert any bare \n to \r\n for proper terminal alignment
+                            let message_formatted = message.replace('\n', "\r\n");
+
+                            // Display the approval prompt (message already contains command info)
+                            let prompt = format!(
+                                "\r\n\x1b[1;33m{}\x1b[0m\r\n\x1b[90mType 'y' to approve, 'n' to reject:\x1b[0m ",
+                                message_formatted
+                            );
+                            self.vte_parser
+                                .advance(&mut self.terminal_handler, prompt.as_bytes());
+
                             self.mode = AppMode::AwaitingApproval { command, message };
                         }
                         LLMQueryResult::Question { question, options } => {
                             log::info!("LLM asked a question: {}", question);
+
+                            // Convert any bare \n to \r\n for proper terminal alignment
+                            let question_formatted = question.replace('\n', "\r\n");
+
+                            // Display the question to the user
+                            let mut prompt = format!(
+                                "\r\n\x1b[1;33mAgent Question:\x1b[0m\r\n  {}\r\n",
+                                question_formatted
+                            );
+
+                            // Show options if provided
+                            if let Some(ref opts) = options {
+                                prompt.push_str("\x1b[90m  Options:\x1b[0m\r\n");
+                                for (i, opt) in opts.iter().enumerate() {
+                                    let opt_formatted = opt.replace('\n', "\r\n");
+                                    prompt.push_str(&format!(
+                                        "    {}. {}\r\n",
+                                        i + 1,
+                                        opt_formatted
+                                    ));
+                                }
+                            }
+
+                            prompt.push_str("\r\n\x1b[90mType your answer:\x1b[0m ");
+                            self.vte_parser
+                                .advance(&mut self.terminal_handler, prompt.as_bytes());
+
                             self.mode = AppMode::AwaitingAnswer { question, options };
                         }
                     }
@@ -387,7 +476,8 @@ impl InfrawareApp {
                     log::error!("LLM query error: {}", err);
                     // No trailing newline - shell's echo of \n provides it
                     let error_msg = format!("\x1b[31mError: {}\x1b[0m", err);
-                    self.vte_parser.advance(&mut self.terminal_handler, error_msg.as_bytes());
+                    self.vte_parser
+                        .advance(&mut self.terminal_handler, error_msg.as_bytes());
                     self.mode = AppMode::Normal;
 
                     // Clear shell buffer and trigger fresh prompt
@@ -403,22 +493,30 @@ impl InfrawareApp {
     fn start_llm_query(&mut self, query: String) {
         log::info!("Starting LLM query: {}", query);
         self.mode = AppMode::WaitingLLM;
-        
+
         let orchestrator = self.orchestrator.clone();
         let tx = self.bg_event_tx.clone();
-        
+
         self.runtime.spawn(async move {
+            log::info!("Background task started for query: {}", query);
             // Using a new cancellation token for each query
             let cancel_token = tokio_util::sync::CancellationToken::new();
-            
+
             match orchestrator.query(&query, cancel_token).await {
                 Ok(result) => {
-                    let _ = tx.send(AppBackgroundEvent::LlmResult(result));
+                    log::info!("LLM query succeeded, sending result to channel");
+                    if let Err(e) = tx.send(AppBackgroundEvent::LlmResult(result)) {
+                        log::error!("Failed to send LLM result to channel: {}", e);
+                    }
                 }
                 Err(e) => {
-                    let _ = tx.send(AppBackgroundEvent::LlmError(e.to_string()));
+                    log::error!("LLM query failed: {}", e);
+                    if let Err(send_err) = tx.send(AppBackgroundEvent::LlmError(e.to_string())) {
+                        log::error!("Failed to send error to channel: {}", send_err);
+                    }
                 }
             }
+            log::info!("Background task completed");
         });
     }
 
@@ -502,7 +600,7 @@ impl InfrawareApp {
                             self.current_command_buffer.push(c);
                         }
                     }
-                    
+
                     if !handled {
                         self.send_to_pty(&bytes);
                     }
@@ -535,17 +633,33 @@ impl InfrawareApp {
                     let text = String::from_utf8_lossy(&bytes);
                     for c in text.chars() {
                         if c == '\r' || c == '\n' {
+                            // Echo newline and submit
+                            self.vte_parser.advance(&mut self.terminal_handler, b"\r\n");
                             self.submit_hitl_input();
                         } else if c == '\x7f' || c == '\x08' {
-                            self.current_input_buffer.pop();
+                            // Backspace: remove from buffer and erase character on screen
+                            if self.current_input_buffer.pop().is_some() {
+                                // Move cursor back, print space, move back again
+                                self.vte_parser
+                                    .advance(&mut self.terminal_handler, b"\x08 \x08");
+                            }
                         } else if !c.is_control() {
+                            // Echo the character to terminal and add to buffer
                             self.current_input_buffer.push(c);
+                            let char_bytes = c.to_string();
+                            self.vte_parser
+                                .advance(&mut self.terminal_handler, char_bytes.as_bytes());
                         }
                     }
                 }
                 KeyboardAction::SendSigInt => {
                     log::info!("Cancelling HITL interaction");
                     self.current_input_buffer.clear();
+                    // Show cancellation message
+                    self.vte_parser.advance(
+                        &mut self.terminal_handler,
+                        b"\r\n\x1b[33m(cancelled)\x1b[0m\r\n",
+                    );
                     self.mode = AppMode::Normal;
                 }
                 _ => {}
@@ -557,7 +671,7 @@ impl InfrawareApp {
     fn submit_hitl_input(&mut self) {
         let input = std::mem::take(&mut self.current_input_buffer);
         let mode = self.mode.clone();
-        
+
         match mode {
             AppMode::AwaitingApproval { command, .. } => {
                 let approved = crate::orchestrators::HitlOrchestrator::parse_approval(&input);
@@ -565,12 +679,13 @@ impl InfrawareApp {
                     log::info!("User approved command: {}", command);
                     // Echo the command to the terminal
                     let echo = format!("Executing: {}\r\n", command);
-                    self.vte_parser.advance(&mut self.terminal_handler, echo.as_bytes());
-                    
+                    self.vte_parser
+                        .advance(&mut self.terminal_handler, echo.as_bytes());
+
                     // Option 1: Execute directly in PTY
                     let cmd_bytes = format!("{}\n", command);
                     self.send_to_pty(cmd_bytes.as_bytes());
-                    
+
                     // Option 2: Resume LLM if it expects feedback (using main branch logic)
                     self.resume_llm_run();
                 } else {
@@ -593,7 +708,7 @@ impl InfrawareApp {
         self.mode = AppMode::WaitingLLM;
         let orchestrator = self.orchestrator.clone();
         let tx = self.bg_event_tx.clone();
-        
+
         self.runtime.spawn(async move {
             match orchestrator.resume_run().await {
                 Ok(result) => {
@@ -611,7 +726,7 @@ impl InfrawareApp {
         self.mode = AppMode::WaitingLLM;
         let orchestrator = self.orchestrator.clone();
         let tx = self.bg_event_tx.clone();
-        
+
         self.runtime.spawn(async move {
             match orchestrator.resume_with_answer(&answer).await {
                 Ok(result) => {
@@ -838,41 +953,48 @@ impl InfrawareApp {
             }
         }
 
-                // --- SCROLLBAR HANDLING ---
-                // Get scroll state (copy values to avoid borrow issues)
-                let (scroll_offset, max_scroll, visible_lines_count, cols) = {
-                    let grid = self.terminal_handler.grid();
-                    (grid.scroll_offset(), grid.max_scroll_offset(), grid.visible_rows().len(), grid.size().1)
-                };
-        
-                // Render and handle scrollbar interaction
-                if let Some(action) = self.scrollbar.show(
-                    ui,
-                    &painter,
-                    rect,
-                    scroll_offset,
-                    max_scroll,
-                    visible_lines_count,
-                ) {
-                    match action {
-                        ScrollAction::Up(n) => self.terminal_handler.grid_mut().scroll_view_up(n),
-                        ScrollAction::Down(n) => self.terminal_handler.grid_mut().scroll_view_down(n),
-                        ScrollAction::To(offset) => self.terminal_handler.grid_mut().scroll_to_offset(offset),
-                    }
+        // --- SCROLLBAR HANDLING ---
+        // Get scroll state (copy values to avoid borrow issues)
+        let (scroll_offset, max_scroll, visible_lines_count, cols) = {
+            let grid = self.terminal_handler.grid();
+            (
+                grid.scroll_offset(),
+                grid.max_scroll_offset(),
+                grid.visible_rows().len(),
+                grid.size().1,
+            )
+        };
+
+        // Render and handle scrollbar interaction
+        if let Some(action) = self.scrollbar.show(
+            ui,
+            &painter,
+            rect,
+            scroll_offset,
+            max_scroll,
+            visible_lines_count,
+        ) {
+            match action {
+                ScrollAction::Up(n) => self.terminal_handler.grid_mut().scroll_view_up(n),
+                ScrollAction::Down(n) => self.terminal_handler.grid_mut().scroll_view_down(n),
+                ScrollAction::To(offset) => {
+                    self.terminal_handler.grid_mut().scroll_to_offset(offset)
                 }
-        
-                // --- RENDERING PHASE ---
-                // Now re-acquire grid state for rendering (might have changed due to input)
-                let grid = self.terminal_handler.grid();
-                // Update these values for rendering
-                let scroll_offset = grid.scroll_offset();
-                let max_scroll = grid.max_scroll_offset();
-                let visible_rows = grid.visible_rows();
-                let (cursor_row, cursor_col) = grid.cursor_position();
-                let cursor_visible = grid.cursor_visible();
-        
-                // Fill background
-                painter.rect_filled(rect, 0.0, self.theme.background);
+            }
+        }
+
+        // --- RENDERING PHASE ---
+        // Now re-acquire grid state for rendering (might have changed due to input)
+        let grid = self.terminal_handler.grid();
+        // Update these values for rendering
+        let scroll_offset = grid.scroll_offset();
+        let max_scroll = grid.max_scroll_offset();
+        let visible_rows = grid.visible_rows();
+        let (cursor_row, cursor_col) = grid.cursor_position();
+        let cursor_visible = grid.cursor_visible();
+
+        // Fill background
+        painter.rect_filled(rect, 0.0, self.theme.background);
         // ... (rendering rows remains same) ...
         for (row_idx, row) in visible_rows.iter().enumerate() {
             let y = rect.top() + row_idx as f32 * self.char_height;
@@ -1028,7 +1150,8 @@ impl InfrawareApp {
 
         // Draw Throbber when waiting for LLM
         if matches!(self.mode, AppMode::WaitingLLM) && scroll_offset == 0 {
-            let frame_idx = (self.startup_time.elapsed().as_millis() / 100) as usize % SPINNER_FRAMES.len();
+            let frame_idx =
+                (self.startup_time.elapsed().as_millis() / 100) as usize % SPINNER_FRAMES.len();
             let frame = SPINNER_FRAMES[frame_idx];
 
             // Position: after cursor on current line
@@ -1143,7 +1266,10 @@ impl eframe::App for InfrawareApp {
         // Check for pending LLM query from shell hook (Command Not Found)
         if let Some(failed_cmd) = self.terminal_handler.take_pending_llm_query() {
             log::info!("Triggering LLM for failed command: {}", failed_cmd);
-            let query = format!("I tried to run '{}' but got 'command not found'. What should I do?", failed_cmd);
+            let query = format!(
+                "I tried to run '{}' but got 'command not found'. What should I do?",
+                failed_cmd
+            );
             self.start_llm_query(query);
         }
 
@@ -1184,7 +1310,7 @@ impl eframe::App for InfrawareApp {
             let blink_interval = timing::CURSOR_BLINK_INTERVAL;
             let time_since_blink = self.last_cursor_blink.elapsed();
             let cursor_needs_blink = time_since_blink >= blink_interval;
-            
+
             // Check if we need to animate the throbber (10 FPS / 100ms)
             let is_waiting_llm = matches!(self.mode, AppMode::WaitingLLM);
 
