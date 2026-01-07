@@ -2,7 +2,7 @@
 
 use crate::auth::{AuthConfig, Authenticator, HttpAuthenticator};
 use crate::config::{pty as pty_config, rendering, size, timing};
-use crate::input::{KeyboardAction, KeyboardHandler, TextSelection};
+use crate::input::{InputClassifier, InputType, KeyboardAction, KeyboardHandler, TextSelection};
 use crate::llm::{HttpLLMClient, LLMClientTrait, LLMQueryResult};
 use crate::orchestrators::NaturalLanguageOrchestrator;
 use crate::pty::{PtyManager, PtyReader, PtyWrite, PtyWriter};
@@ -102,10 +102,13 @@ pub struct InfrawareApp {
     /// Keyboard input handler (extracted for testability)
     keyboard_handler: KeyboardHandler,
 
+    /// Input classifier for command vs natural language detection
+    input_classifier: InputClassifier,
+
     /// Buffer for collecting user input during HITL interactions (AwaitingApproval/Answer)
     current_input_buffer: String,
 
-    /// Buffer for tracking the current command line (for '?' prefix detection)
+    /// Buffer for tracking the current command line (for classification)
     current_command_buffer: String,
 
     // === LLM & Orchestration ===
@@ -275,6 +278,7 @@ impl InfrawareApp {
                 .map(|c| c as f32 * rendering::CHAR_WIDTH)
                 .collect(),
             keyboard_handler: KeyboardHandler::new(),
+            input_classifier: InputClassifier::new(),
             current_input_buffer: String::new(),
             current_command_buffer: String::new(),
             // LLM & Orchestration
@@ -581,19 +585,23 @@ impl InfrawareApp {
                     let mut handled = false;
                     for c in text.chars() {
                         if c == '\r' || c == '\n' {
-                            // Check for '?' prefix
-                            if self.current_command_buffer.starts_with('?') {
-                                let query = self.current_command_buffer[1..].trim().to_string();
-                                if !query.is_empty() {
+                            // Classify the input before sending
+                            let input = self.current_command_buffer.trim().to_string();
+                            match self.input_classifier.classify(&input) {
+                                InputType::NaturalLanguage(query) => {
+                                    log::info!("Input classified as NaturalLanguage: {}", query);
                                     self.current_command_buffer.clear();
-                                    // Visual feedback: clear the line and move to next
+                                    // Visual feedback: move to next line
                                     self.vte_parser.advance(&mut self.terminal_handler, b"\r\n");
                                     self.start_llm_query(query);
                                     handled = true;
                                     break;
                                 }
+                                InputType::Command(_) | InputType::Empty => {
+                                    // Send to shell (PTY) - will be handled below
+                                    self.current_command_buffer.clear();
+                                }
                             }
-                            self.current_command_buffer.clear();
                         } else if c == '\x7f' || c == '\x08' {
                             self.current_command_buffer.pop();
                         } else if !c.is_control() {

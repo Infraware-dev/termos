@@ -47,6 +47,8 @@ which = "8.0"
 hostname = "0.4"
 vte = "0.15"
 ctrlc = "3.4"
+regex = "1.11"
+once_cell = "1.20"
 
 # Clipboard (direct OS access, bypasses egui's delayed sync)
 arboard = "3.4"
