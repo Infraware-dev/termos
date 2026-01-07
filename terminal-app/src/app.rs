@@ -10,7 +10,7 @@ use crate::terminal::{Color, TerminalHandler};
 use crate::ui::scrollbar::{Scrollbar, ScrollAction};
 use crate::ui::{
     render_backgrounds, render_cursor, render_decorations, render_scrollbar, render_text_runs,
-    Theme,
+    Theme, SPINNER_FRAMES,
 };
 use egui::{Color32, FontFamily, FontId, Pos2, Rect, Sense, Vec2, ViewportCommand};
 use std::sync::mpsc;
@@ -353,13 +353,24 @@ impl InfrawareApp {
                     match result {
                         LLMQueryResult::Complete(text) => {
                             log::info!("LLM query complete");
+
+                            // Render response lines
                             let lines = self.orchestrator.render_response(&text);
-                            for line in lines {
-                                // Use VTE parser to handle ANSI formatting from renderer
+                            let last_idx = lines.len().saturating_sub(1);
+                            for (i, line) in lines.iter().enumerate() {
                                 self.vte_parser.advance(&mut self.terminal_handler, line.as_bytes());
-                                self.vte_parser.advance(&mut self.terminal_handler, b"\r\n");
+                                // Add newline between lines, but not after the last one
+                                // (shell's echo of \n will provide that)
+                                if i < last_idx {
+                                    self.vte_parser.advance(&mut self.terminal_handler, b"\r\n");
+                                }
                             }
                             self.mode = AppMode::Normal;
+
+                            // Clear shell buffer and trigger fresh prompt
+                            if let Some(ref writer) = self.pty_writer {
+                                let _ = writer.write_bytes(b"\x15\n");
+                            }
                         }
                         LLMQueryResult::CommandApproval { command, message } => {
                             log::info!("LLM requested command approval: {}", command);
@@ -373,9 +384,15 @@ impl InfrawareApp {
                 }
                 AppBackgroundEvent::LlmError(err) => {
                     log::error!("LLM query error: {}", err);
-                    let error_msg = format!("\x1b[31mError: {}\x1b[0m\r\n", err);
+                    // No trailing newline - shell's echo of \n provides it
+                    let error_msg = format!("\x1b[31mError: {}\x1b[0m", err);
                     self.vte_parser.advance(&mut self.terminal_handler, error_msg.as_bytes());
                     self.mode = AppMode::Normal;
+
+                    // Clear shell buffer and trigger fresh prompt
+                    if let Some(ref writer) = self.pty_writer {
+                        let _ = writer.write_bytes(b"\x15\n");
+                    }
                 }
             }
         }
@@ -837,9 +854,9 @@ impl InfrawareApp {
                     visible_lines_count,
                 ) {
                     match action {
-                        ScrollAction::ScrollUp(n) => self.terminal_handler.grid_mut().scroll_view_up(n),
-                        ScrollAction::ScrollDown(n) => self.terminal_handler.grid_mut().scroll_view_down(n),
-                        ScrollAction::ScrollTo(offset) => self.terminal_handler.grid_mut().scroll_to_offset(offset),
+                        ScrollAction::Up(n) => self.terminal_handler.grid_mut().scroll_view_up(n),
+                        ScrollAction::Down(n) => self.terminal_handler.grid_mut().scroll_view_down(n),
+                        ScrollAction::To(offset) => self.terminal_handler.grid_mut().scroll_to_offset(offset),
                     }
                 }
         
@@ -1008,22 +1025,22 @@ impl InfrawareApp {
             );
         }
 
-        // Draw Braille Throbber when waiting for LLM
+        // Draw Throbber when waiting for LLM
         if matches!(self.mode, AppMode::WaitingLLM) && scroll_offset == 0 {
-            let braille_frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-            let frame_idx = (self.startup_time.elapsed().as_millis() / 100) as usize % braille_frames.len();
-            let frame = braille_frames[frame_idx];
-            
-            // Draw at current cursor position
-            let tx = rect.left() + cursor_col as f32 * self.char_width;
-            let ty = rect.top() + cursor_row as f32 * self.char_height;
-            
+            let frame_idx = (self.startup_time.elapsed().as_millis() / 100) as usize % SPINNER_FRAMES.len();
+            let frame = SPINNER_FRAMES[frame_idx];
+
+            // Position: after cursor on current line
+            let row_y = rect.top() + cursor_row as f32 * self.char_height;
+            let spinner_x = rect.left() + cursor_col as f32 * self.char_width;
+
+            // Draw dots (no mask needed - terminal redraws each frame)
             painter.text(
-                Pos2::new(tx, ty),
+                Pos2::new(spinner_x, row_y),
                 egui::Align2::LEFT_TOP,
                 frame,
                 font_id.clone(),
-                Color32::from_rgb(0, 255, 0), // Infraware Green
+                Color32::from_rgb(0, 255, 255), // Cyan
             );
         } else if cursor_visible
             && self.shell_initialized
