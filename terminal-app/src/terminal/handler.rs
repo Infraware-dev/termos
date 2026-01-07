@@ -438,7 +438,7 @@ impl vte::Perform for TerminalHandler {
             // Infraware Custom: Command Not Found hook
             // Format: OSC 777 ; CommandNotFound ; <command> ST
             777 => {
-                if params.get(1).map(|&p| p) == Some(b"CommandNotFound") {
+                if params.get(1).copied() == Some(b"CommandNotFound") {
                     if let Some(cmd_bytes) = params.get(2) {
                         if let Ok(cmd_str) = std::str::from_utf8(cmd_bytes) {
                             debug!("Detected CommandNotFound via OSC 777: {}", cmd_str);

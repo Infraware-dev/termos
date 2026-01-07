@@ -321,13 +321,8 @@ impl KeyboardHandler {
             if i.key_pressed(Key::F12) {
                 self.actions
                     .push(KeyboardAction::SendBytes(b"\x1b[24~".to_vec()));
-                return;
             }
-
-            // Space
-            if i.key_pressed(Key::Space) {
-                self.actions.push(KeyboardAction::SendBytes(b" ".to_vec()));
-            }
+            // Note: Space is handled by process_text_input() via Event::Text
         });
     }
 

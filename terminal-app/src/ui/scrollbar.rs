@@ -10,11 +10,11 @@ use std::time::Instant;
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ScrollAction {
     /// Scroll up by N lines
-    ScrollUp(usize),
+    Up(usize),
     /// Scroll down by N lines
-    ScrollDown(usize),
+    Down(usize),
     /// Jump to specific offset (0 = bottom)
-    ScrollTo(usize),
+    To(usize),
 }
 
 /// Scrollbar state and logic.
@@ -143,16 +143,16 @@ impl Scrollbar {
                     // Convert Y back to offset
                     let new_pct = 1.0 - (new_thumb_y - track_top) / travel_range;
                     let new_offset = (new_pct * max_scroll as f32).round() as usize;
-                    action = Some(ScrollAction::ScrollTo(new_offset));
+                    action = Some(ScrollAction::To(new_offset));
                 }
             }
 
             // 2. Track Click (Page Jump)
             if !self.is_dragging && track_rect.contains(pos) && !thumb_rect.contains(pos) && pointer_pressed {
                 if pos.y < thumb_y {
-                    action = Some(ScrollAction::ScrollUp(visible_lines));
+                    action = Some(ScrollAction::Up(visible_lines));
                 } else {
-                    action = Some(ScrollAction::ScrollDown(visible_lines));
+                    action = Some(ScrollAction::Down(visible_lines));
                 }
             }
 
@@ -171,9 +171,9 @@ impl Scrollbar {
                         self.active_direction = direction;
                         self.last_action_time = Some(Instant::now());
                         action = Some(if direction == 1 {
-                            ScrollAction::ScrollUp(1)
+                            ScrollAction::Up(1)
                         } else {
-                            ScrollAction::ScrollDown(1)
+                            ScrollAction::Down(1)
                         });
                     } else if let Some(last_time) = self.last_action_time {
                         // Repeat logic
@@ -183,9 +183,9 @@ impl Scrollbar {
                         if last_time.elapsed() > initial_delay {
                             self.last_action_time = Some(Instant::now() - (initial_delay - repeat_interval));
                             action = Some(if direction == 1 {
-                                ScrollAction::ScrollUp(1)
+                                ScrollAction::Up(1)
                             } else {
-                                ScrollAction::ScrollDown(1)
+                                ScrollAction::Down(1)
                             });
                             ui.ctx().request_repaint();
                         }
