@@ -201,8 +201,15 @@ impl InfrawareApp {
 
         let (llm_client, auth_status_message): (Arc<dyn LLMClientTrait>, Option<String>) =
             if auth_config.is_configured() {
-                let backend_url = auth_config.backend_url.clone().unwrap();
-                let api_key = auth_config.api_key.clone().unwrap();
+                // Safe: is_configured() guarantees these are Some
+                let backend_url = auth_config
+                    .backend_url
+                    .clone()
+                    .expect("backend_url must be Some when is_configured() returns true");
+                let api_key = auth_config
+                    .api_key
+                    .clone()
+                    .expect("api_key must be Some when is_configured() returns true");
 
                 // Authenticate at startup
                 let authenticator = HttpAuthenticator::new(backend_url.clone());
@@ -595,8 +602,7 @@ impl InfrawareApp {
                                     // This prevents the shell from executing the typed text
                                     self.send_to_pty(b"\x15");
                                     // Visual feedback: move to next line
-                                    self.vte_parser
-                                        .advance(&mut self.terminal_handler, b"\r\n");
+                                    self.vte_parser.advance(&mut self.terminal_handler, b"\r\n");
                                     self.start_llm_query(query);
                                     handled = true;
                                     break;
@@ -716,6 +722,8 @@ impl InfrawareApp {
     }
 
     /// Resume LLM run after approval.
+    /// Reserved for future multi-turn HITL flow where LLM continues after command execution.
+    #[allow(dead_code)]
     fn resume_llm_run(&mut self) {
         self.mode = AppMode::WaitingLLM;
         let orchestrator = self.orchestrator.clone();

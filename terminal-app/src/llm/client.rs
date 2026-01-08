@@ -143,7 +143,9 @@ pub trait LLMClientTrait: Send + Sync + std::fmt::Debug {
         self.query(text).await
     }
 
-    /// Resume an interrupted run after user approval (for command approval)
+    /// Resume an interrupted run after user approval (for command approval).
+    /// Reserved for future multi-turn HITL flow where LLM continues after command execution.
+    #[allow(dead_code)]
     async fn resume_run(&self) -> Result<LLMQueryResult>;
 
     /// Resume an interrupted run with a text answer (for questions)
@@ -923,5 +925,207 @@ impl LLMClientTrait for MockLLMClient {
 
         // Return mock response (same as non-cancellable version)
         self.query(text).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // === LLMQueryResult Tests ===
+
+    #[test]
+    fn test_llm_query_result_complete() {
+        let result = LLMQueryResult::Complete("test response".to_string());
+        assert_eq!(result.as_complete(), Some("test response"));
+    }
+
+    #[test]
+    fn test_llm_query_result_unwrap_complete() {
+        let result = LLMQueryResult::Complete("test response".to_string());
+        assert_eq!(result.unwrap_complete(), "test response");
+    }
+
+    #[test]
+    fn test_llm_query_result_command_approval_as_complete_none() {
+        let result = LLMQueryResult::CommandApproval {
+            command: "ls".to_string(),
+            message: "List files?".to_string(),
+        };
+        assert_eq!(result.as_complete(), None);
+    }
+
+    #[test]
+    fn test_llm_query_result_question_as_complete_none() {
+        let result = LLMQueryResult::Question {
+            question: "Which option?".to_string(),
+            options: Some(vec!["A".to_string(), "B".to_string()]),
+        };
+        assert_eq!(result.as_complete(), None);
+    }
+
+    #[test]
+    #[should_panic(expected = "Expected Complete, got CommandApproval")]
+    fn test_llm_query_result_unwrap_complete_panics_on_approval() {
+        let result = LLMQueryResult::CommandApproval {
+            command: "rm -rf".to_string(),
+            message: "Delete?".to_string(),
+        };
+        let _ = result.unwrap_complete();
+    }
+
+    #[test]
+    #[should_panic(expected = "Expected Complete, got Question")]
+    fn test_llm_query_result_unwrap_complete_panics_on_question() {
+        let result = LLMQueryResult::Question {
+            question: "What?".to_string(),
+            options: None,
+        };
+        let _ = result.unwrap_complete();
+    }
+
+    #[test]
+    fn test_llm_query_result_debug() {
+        let result = LLMQueryResult::Complete("test".to_string());
+        let debug_str = format!("{:?}", result);
+        assert!(debug_str.contains("Complete"));
+    }
+
+    // === MockLLMClient Tests ===
+
+    #[test]
+    fn test_mock_client_creation() {
+        let client = MockLLMClient::new();
+        let debug_str = format!("{:?}", client);
+        assert!(debug_str.contains("MockLLMClient"));
+    }
+
+    #[test]
+    fn test_mock_client_default() {
+        let client = MockLLMClient::default();
+        let debug_str = format!("{:?}", client);
+        assert!(debug_str.contains("MockLLMClient"));
+    }
+
+    #[tokio::test]
+    async fn test_mock_client_query_list_files() {
+        let client = MockLLMClient::new();
+        let result = client.query("how do I list files").await;
+        assert!(result.is_ok());
+
+        let response = result.unwrap().unwrap_complete();
+        assert!(response.contains("ls"));
+        assert!(response.contains("-l"));
+    }
+
+    #[tokio::test]
+    async fn test_mock_client_query_docker() {
+        let client = MockLLMClient::new();
+        let result = client.query("tell me about docker").await;
+        assert!(result.is_ok());
+
+        let response = result.unwrap().unwrap_complete();
+        assert!(response.contains("docker"));
+        assert!(response.contains("container"));
+    }
+
+    #[tokio::test]
+    async fn test_mock_client_query_kubernetes() {
+        let client = MockLLMClient::new();
+        let result = client.query("how to use k8s").await;
+        assert!(result.is_ok());
+
+        let response = result.unwrap().unwrap_complete();
+        assert!(response.contains("kubectl"));
+    }
+
+    #[tokio::test]
+    async fn test_mock_client_query_unknown() {
+        let client = MockLLMClient::new();
+        let result = client.query("random gibberish xyz123").await;
+        assert!(result.is_ok());
+
+        let response = result.unwrap().unwrap_complete();
+        assert!(response.contains("mock LLM"));
+    }
+
+    #[tokio::test]
+    async fn test_mock_client_resume_run() {
+        let client = MockLLMClient::new();
+        let result = client.resume_run().await;
+        assert!(result.is_ok());
+
+        let response = result.unwrap().unwrap_complete();
+        assert!(response.contains("resume"));
+    }
+
+    #[tokio::test]
+    async fn test_mock_client_resume_with_answer() {
+        let client = MockLLMClient::new();
+        let result = client.resume_with_answer("my answer").await;
+        assert!(result.is_ok());
+
+        let response = result.unwrap().unwrap_complete();
+        assert!(response.contains("my answer"));
+    }
+
+    #[tokio::test]
+    async fn test_mock_client_query_cancellable_completes() {
+        let client = MockLLMClient::new();
+        let cancel_token = CancellationToken::new();
+
+        // Should complete without cancellation
+        let result = client.query_cancellable("list files", cancel_token).await;
+        assert!(result.is_ok());
+
+        let response = result.unwrap().unwrap_complete();
+        assert!(response.contains("ls"));
+    }
+
+    #[tokio::test]
+    async fn test_mock_client_query_cancellable_cancelled() {
+        let client = MockLLMClient::new();
+        let cancel_token = CancellationToken::new();
+
+        // Cancel immediately
+        cancel_token.cancel();
+
+        let result = client.query_cancellable("list files", cancel_token).await;
+        assert!(result.is_err());
+
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("cancelled"));
+    }
+
+    #[tokio::test]
+    async fn test_mock_client_case_insensitive() {
+        let client = MockLLMClient::new();
+
+        // Test uppercase
+        let result = client.query("LIST FILES").await;
+        assert!(result.is_ok());
+        let response = result.unwrap().unwrap_complete();
+        assert!(response.contains("ls"));
+
+        // Test mixed case
+        let result = client.query("Docker Commands").await;
+        assert!(result.is_ok());
+        let response = result.unwrap().unwrap_complete();
+        assert!(response.contains("docker"));
+    }
+
+    // === HttpLLMClient Tests (basic, no network) ===
+
+    #[test]
+    fn test_http_client_debug() {
+        let client = HttpLLMClient::new(
+            "http://localhost:8000".to_string(),
+            "test-api-key".to_string(),
+        );
+        let debug_str = format!("{:?}", client);
+        assert!(debug_str.contains("HttpLLMClient"));
+        assert!(debug_str.contains("localhost:8000"));
+        // API key should NOT be in debug output (security)
+        assert!(!debug_str.contains("test-api-key"));
     }
 }

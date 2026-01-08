@@ -38,3 +38,69 @@ impl HitlOrchestrator {
         trimmed.is_empty() || trimmed == "y" || trimmed == "yes"
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_approval_empty_is_yes() {
+        // Empty string (just Enter) should approve (like Python backend)
+        assert!(HitlOrchestrator::parse_approval(""));
+        assert!(HitlOrchestrator::parse_approval("   "));
+        assert!(HitlOrchestrator::parse_approval("\t"));
+        assert!(HitlOrchestrator::parse_approval("\n"));
+    }
+
+    #[test]
+    fn test_parse_approval_yes_variants() {
+        assert!(HitlOrchestrator::parse_approval("y"));
+        assert!(HitlOrchestrator::parse_approval("Y"));
+        assert!(HitlOrchestrator::parse_approval("yes"));
+        assert!(HitlOrchestrator::parse_approval("YES"));
+        assert!(HitlOrchestrator::parse_approval("Yes"));
+        assert!(HitlOrchestrator::parse_approval("  y  "));
+        assert!(HitlOrchestrator::parse_approval("  yes  "));
+    }
+
+    #[test]
+    fn test_parse_approval_no_variants() {
+        assert!(!HitlOrchestrator::parse_approval("n"));
+        assert!(!HitlOrchestrator::parse_approval("N"));
+        assert!(!HitlOrchestrator::parse_approval("no"));
+        assert!(!HitlOrchestrator::parse_approval("NO"));
+        assert!(!HitlOrchestrator::parse_approval("No"));
+        assert!(!HitlOrchestrator::parse_approval("  n  "));
+        assert!(!HitlOrchestrator::parse_approval("  no  "));
+    }
+
+    #[test]
+    fn test_parse_approval_rejects_other_input() {
+        assert!(!HitlOrchestrator::parse_approval("maybe"));
+        assert!(!HitlOrchestrator::parse_approval("sure"));
+        assert!(!HitlOrchestrator::parse_approval("ok"));
+        assert!(!HitlOrchestrator::parse_approval("yep"));
+        assert!(!HitlOrchestrator::parse_approval("nope"));
+        assert!(!HitlOrchestrator::parse_approval("cancel"));
+        assert!(!HitlOrchestrator::parse_approval("abort"));
+        assert!(!HitlOrchestrator::parse_approval("1"));
+        assert!(!HitlOrchestrator::parse_approval("0"));
+    }
+
+    #[test]
+    fn test_parse_approval_partial_matches() {
+        // "ye" is not "yes", should reject
+        assert!(!HitlOrchestrator::parse_approval("ye"));
+        // "yess" is not "yes", should reject
+        assert!(!HitlOrchestrator::parse_approval("yess"));
+        // "y " with trailing space is still "y" after trim
+        assert!(HitlOrchestrator::parse_approval("y "));
+    }
+
+    #[test]
+    fn test_hitl_orchestrator_debug() {
+        let orchestrator = HitlOrchestrator;
+        let debug_str = format!("{:?}", orchestrator);
+        assert!(debug_str.contains("HitlOrchestrator"));
+    }
+}

