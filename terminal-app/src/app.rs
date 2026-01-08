@@ -140,6 +140,13 @@ pub struct InfrawareApp {
 
     /// Authentication status message (shown at startup)
     auth_status_message: Option<String>,
+
+    /// Flag to track when LLM is processing in background (after command approval)
+    /// Used to show throbber even when mode is Normal (allowing shell interaction)
+    llm_background_processing: bool,
+
+    /// Timestamp of last PTY activity (used to suppress throbber during command execution)
+    last_pty_activity: Instant,
 }
 
 impl std::fmt::Debug for InfrawareApp {
@@ -304,6 +311,10 @@ impl InfrawareApp {
             scrollbar: Scrollbar::new(),
             // Authentication status
             auth_status_message,
+            // LLM background processing flag
+            llm_background_processing: false,
+            // Last PTY activity timestamp (start in past to not suppress initial throbber)
+            last_pty_activity: Instant::now() - std::time::Duration::from_secs(10),
         }
     }
 
@@ -407,6 +418,8 @@ impl InfrawareApp {
             log::debug!("Received background event: {:?}", event);
             match event {
                 AppBackgroundEvent::LlmResult(result) => {
+                    // Clear background processing flag - we received a result
+                    self.llm_background_processing = false;
                     match result {
                         LLMQueryResult::Complete(text) => {
                             log::info!("LLM query complete, response length: {} chars", text.len());
@@ -484,6 +497,8 @@ impl InfrawareApp {
                     }
                 }
                 AppBackgroundEvent::LlmError(err) => {
+                    // Clear background processing flag - we received an error
+                    self.llm_background_processing = false;
                     log::error!("LLM query error: {}", err);
                     // No trailing newline - shell's echo of \n provides it
                     let error_msg = format!("\x1b[31mError: {}\x1b[0m", err);
@@ -710,7 +725,17 @@ impl InfrawareApp {
                     self.resume_llm_run_background();
                 } else {
                     log::info!("User rejected command: {}", command);
+                    // Show rejection message
+                    self.vte_parser.advance(
+                        &mut self.terminal_handler,
+                        b"\r\n\x1b[33mCommand rejected.\x1b[0m\r\n",
+                    );
                     self.mode = AppMode::Normal;
+
+                    // Trigger fresh shell prompt
+                    if let Some(ref writer) = self.pty_writer {
+                        let _ = writer.write_bytes(b"\x15\n");
+                    }
                 }
             }
             AppMode::AwaitingAnswer { .. } => {
@@ -733,6 +758,7 @@ impl InfrawareApp {
     /// Resume LLM run in background without changing mode.
     /// Allows user to interact with shell while LLM processes.
     fn resume_llm_run_background(&mut self) {
+        self.llm_background_processing = true;
         let orchestrator = self.orchestrator.clone();
         let tx = self.bg_event_tx.clone();
 
@@ -1175,10 +1201,11 @@ impl InfrawareApp {
             );
         }
 
-        // Draw Throbber when waiting for LLM
+        // Draw Throbber ONLY when in WaitingLLM mode (blocking wait for LLM response)
+        // During llm_background_processing, user interacts with shell - no throbber needed
         if matches!(self.mode, AppMode::WaitingLLM) && scroll_offset == 0 {
             let frame_idx =
-                (self.startup_time.elapsed().as_millis() / 100) as usize % SPINNER_FRAMES.len();
+                (self.startup_time.elapsed().as_millis() / 250) as usize % SPINNER_FRAMES.len();
             let frame = SPINNER_FRAMES[frame_idx];
 
             // Position: after cursor on current line
@@ -1305,6 +1332,9 @@ impl eframe::App for InfrawareApp {
 
         // Poll PTY output and feed to VTE parser (limited per frame)
         let pty_had_data = self.poll_pty_output();
+        if pty_had_data {
+            self.last_pty_activity = Instant::now();
+        }
 
         // Initialize shell with custom prompt after startup delay
         self.initialize_shell();
@@ -1338,15 +1368,15 @@ impl eframe::App for InfrawareApp {
             let time_since_blink = self.last_cursor_blink.elapsed();
             let cursor_needs_blink = time_since_blink >= blink_interval;
 
-            // Check if we need to animate the throbber (10 FPS / 100ms)
+            // Check if we need to animate the throbber (4 FPS / 250ms)
             let is_waiting_llm = matches!(self.mode, AppMode::WaitingLLM);
 
             if pty_had_data || cursor_needs_blink || had_user_input {
                 // Something changed - repaint immediately
                 ctx.request_repaint();
             } else if is_waiting_llm {
-                // Animate throbber at 10 FPS
-                ctx.request_repaint_after(std::time::Duration::from_millis(100));
+                // Animate throbber at 4 FPS (250ms per frame, 1s full cycle)
+                ctx.request_repaint_after(std::time::Duration::from_millis(250));
             } else {
                 // Idle - schedule repaint only for next cursor blink
                 let time_to_next_blink = blink_interval.saturating_sub(time_since_blink);
