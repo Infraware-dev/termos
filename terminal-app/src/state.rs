@@ -3,7 +3,7 @@
 //! This module provides a type-safe state machine for application modes
 //! with validated transitions and logging.
 
-use anyhow::{bail, Result};
+use anyhow::{Result, bail};
 
 /// Application mode states.
 ///

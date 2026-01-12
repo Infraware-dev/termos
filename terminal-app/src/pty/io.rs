@@ -7,9 +7,9 @@ use super::traits::PtyWrite;
 use anyhow::{Context, Result};
 use std::fmt;
 use std::io::{Read, Write};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::SyncSender;
-use std::sync::Arc;
 
 /// Reader for PTY output.
 ///

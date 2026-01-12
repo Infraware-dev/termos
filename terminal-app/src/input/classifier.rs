@@ -135,12 +135,12 @@ impl InputClassifier {
         }
 
         // 6. Medium phrase (3-5 words) without known command at start
-        if words.len() >= 3 {
-            if let Some(first_word) = words.first() {
-                // If first word is not a likely command name, treat as NL
-                if !self.looks_like_command(first_word) {
-                    return true;
-                }
+        if words.len() >= 3
+            && let Some(first_word) = words.first()
+        {
+            // If first word is not a likely command name, treat as NL
+            if !self.looks_like_command(first_word) {
+                return true;
             }
         }
 

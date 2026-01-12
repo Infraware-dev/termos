@@ -429,22 +429,21 @@ impl vte::Perform for TerminalHandler {
         match cmd {
             // Set window title
             0 | 2 => {
-                if let Some(title) = params.get(1) {
-                    if let Ok(title) = std::str::from_utf8(title) {
-                        self.window_title = title.to_string();
-                    }
+                if let Some(title) = params.get(1)
+                    && let Ok(title) = std::str::from_utf8(title)
+                {
+                    self.window_title = title.to_string();
                 }
             }
             // Infraware Custom: Command Not Found hook
             // Format: OSC 777 ; CommandNotFound ; <command> ST
             777 => {
-                if params.get(1).copied() == Some(b"CommandNotFound") {
-                    if let Some(cmd_bytes) = params.get(2) {
-                        if let Ok(cmd_str) = std::str::from_utf8(cmd_bytes) {
-                            debug!("Detected CommandNotFound via OSC 777: {}", cmd_str);
-                            self.pending_llm_query = Some(cmd_str.to_string());
-                        }
-                    }
+                if params.get(1).copied() == Some(b"CommandNotFound")
+                    && let Some(cmd_bytes) = params.get(2)
+                    && let Ok(cmd_str) = std::str::from_utf8(cmd_bytes)
+                {
+                    debug!("Detected CommandNotFound via OSC 777: {}", cmd_str);
+                    self.pending_llm_query = Some(cmd_str.to_string());
                 }
             }
             // Set icon name (ignored)

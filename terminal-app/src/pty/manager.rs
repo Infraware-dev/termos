@@ -4,7 +4,7 @@
 //! that runs throughout the application's lifetime.
 
 use super::io::{PtyReader, PtyWriter};
-use super::{Pty, PtySession, DEFAULT_PTY_SIZE};
+use super::{DEFAULT_PTY_SIZE, Pty, PtySession};
 use anyhow::{Context, Result};
 use portable_pty::PtySize;
 use std::sync::Arc;

@@ -264,13 +264,13 @@ impl TerminalGrid {
         let fg = self.current_fg;
         let bg = self.current_bg;
         let attrs = self.current_attrs;
-        if let Some(row) = self.row_mut(cursor_row) {
-            if let Some(cell) = row.get_mut(cursor_col) {
-                cell.ch = c;
-                cell.fg = fg;
-                cell.bg = bg;
-                cell.attrs = attrs;
-            }
+        if let Some(row) = self.row_mut(cursor_row)
+            && let Some(cell) = row.get_mut(cursor_col)
+        {
+            cell.ch = c;
+            cell.fg = fg;
+            cell.bg = bg;
+            cell.attrs = attrs;
         }
 
         // Advance cursor

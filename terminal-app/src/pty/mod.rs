@@ -29,7 +29,7 @@ pub use session::PtySession;
 pub use traits::{PtyControl, PtyWrite};
 
 use anyhow::Result;
-use portable_pty::{native_pty_system, CommandBuilder, PtySize, PtySystem};
+use portable_pty::{CommandBuilder, PtySize, PtySystem, native_pty_system};
 use std::ffi::OsStr;
 
 /// Default PTY size matching typical terminal dimensions.

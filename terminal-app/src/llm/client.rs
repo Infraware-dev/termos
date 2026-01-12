@@ -381,18 +381,18 @@ impl HttpLLMClient {
                         if let Some(event_type) = line.strip_prefix("event: ") {
                             current_event = Some(event_type.trim().to_string());
                             log::debug!("SSE event type: {}", event_type);
-                        } else if let Some(data) = line.strip_prefix("data: ") {
-                            if let Some(ref event) = current_event {
-                                match self.handle_sse_event(event, data, &mut result) {
-                                    Ok(Some(interrupt)) => {
-                                        interrupt_data = Some(interrupt);
-                                        // Don't break - continue processing to get any remaining messages
-                                    }
-                                    Ok(None) => {}
-                                    Err(e) => {
-                                        log::error!("Error handling SSE event '{}': {}", event, e);
-                                        return Err(e);
-                                    }
+                        } else if let Some(data) = line.strip_prefix("data: ")
+                            && let Some(ref event) = current_event
+                        {
+                            match self.handle_sse_event(event, data, &mut result) {
+                                Ok(Some(interrupt)) => {
+                                    interrupt_data = Some(interrupt);
+                                    // Don't break - continue processing to get any remaining messages
+                                }
+                                Ok(None) => {}
+                                Err(e) => {
+                                    log::error!("Error handling SSE event '{}': {}", event, e);
+                                    return Err(e);
                                 }
                             }
                         }
@@ -416,12 +416,11 @@ impl HttpLLMClient {
             if line.is_empty() {
                 continue;
             }
-            if let Some(data) = line.strip_prefix("data: ") {
-                if let Some(ref event) = current_event {
-                    if let Some(interrupt) = self.handle_sse_event(event, data, &mut result)? {
-                        interrupt_data = Some(interrupt);
-                    }
-                }
+            if let Some(data) = line.strip_prefix("data: ")
+                && let Some(ref event) = current_event
+                && let Some(interrupt) = self.handle_sse_event(event, data, &mut result)?
+            {
+                interrupt_data = Some(interrupt);
             }
         }
 
@@ -543,10 +542,10 @@ impl HttpLLMClient {
 
     /// Handle "metadata" SSE event - log run_id for debugging
     fn handle_metadata_event(data: &str) {
-        if let Ok(meta) = serde_json::from_str::<serde_json::Value>(data) {
-            if let Some(run_id) = meta.get("run_id").and_then(|v| v.as_str()) {
-                log::info!("Run started: {}", run_id);
-            }
+        if let Ok(meta) = serde_json::from_str::<serde_json::Value>(data)
+            && let Some(run_id) = meta.get("run_id").and_then(|v| v.as_str())
+        {
+            log::info!("Run started: {}", run_id);
         }
     }
 
@@ -563,13 +562,13 @@ impl HttpLLMClient {
         log::debug!("Processing {} items in 'messages' event", msgs.len());
 
         for msg in msgs {
-            if Self::is_ai_message(msg) {
-                if let Some(content) = msg.get("content").and_then(|v| v.as_str()) {
-                    if !result.is_empty() {
-                        result.push('\n');
-                    }
-                    result.push_str(content);
+            if Self::is_ai_message(msg)
+                && let Some(content) = msg.get("content").and_then(|v| v.as_str())
+            {
+                if !result.is_empty() {
+                    result.push('\n');
                 }
+                result.push_str(content);
             }
         }
     }
@@ -1000,7 +999,7 @@ mod tests {
 
     #[test]
     fn test_mock_client_default() {
-        let client = MockLLMClient::default();
+        let client = MockLLMClient;
         let debug_str = format!("{:?}", client);
         assert!(debug_str.contains("MockLLMClient"));
     }
