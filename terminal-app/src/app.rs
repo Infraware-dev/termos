@@ -10,12 +10,12 @@ use crate::state::AppMode;
 use crate::terminal::{Color, TerminalHandler};
 use crate::ui::scrollbar::{ScrollAction, Scrollbar};
 use crate::ui::{
-    render_backgrounds, render_cursor, render_decorations, render_scrollbar, render_text_runs,
-    Theme, SPINNER_FRAMES,
+    SPINNER_FRAMES, Theme, render_backgrounds, render_cursor, render_decorations, render_scrollbar,
+    render_text_runs,
 };
 use egui::{Color32, FontFamily, FontId, Pos2, Rect, Sense, Vec2, ViewportCommand};
-use std::sync::mpsc;
 use std::sync::Arc;
+use std::sync::mpsc;
 use std::time::Instant;
 use tokio::runtime::Runtime;
 use tokio::sync::Mutex as TokioMutex;
@@ -748,13 +748,6 @@ impl InfrawareApp {
         }
     }
 
-    /// Resume LLM run after approval (sets WaitingLLM mode immediately).
-    #[allow(dead_code)]
-    fn resume_llm_run(&mut self) {
-        self.mode = AppMode::WaitingLLM;
-        self.resume_llm_run_background();
-    }
-
     /// Resume LLM run in background without changing mode.
     /// Allows user to interact with shell while LLM processes.
     fn resume_llm_run_background(&mut self) {
@@ -954,44 +947,42 @@ impl InfrawareApp {
         let scrollbar_area = self.scrollbar.area(rect);
 
         // Request keyboard focus when terminal is clicked (without drag)
-        if response.clicked() {
-            if let Some(pos) = response.interact_pointer_pos() {
-                if !scrollbar_area.contains(pos) {
-                    ui.memory_mut(|mem| mem.request_focus(terminal_id));
-                    // Clear selection on simple click
-                    self.selection = None;
-                }
-            }
+        if response.clicked()
+            && let Some(pos) = response.interact_pointer_pos()
+            && !scrollbar_area.contains(pos)
+        {
+            ui.memory_mut(|mem| mem.request_focus(terminal_id));
+            // Clear selection on simple click
+            self.selection = None;
         }
 
         // Handle mouse drag for text selection
-        if response.drag_started() {
-            if let Some(pos) = response.interact_pointer_pos() {
-                if !scrollbar_area.contains(pos) {
-                    let (row, col) = self.screen_to_grid(pos, rect);
-                    self.selection = Some(TextSelection::new(row, col));
-                    log::debug!("Selection started at ({}, {})", row, col);
+        if response.drag_started()
+            && let Some(pos) = response.interact_pointer_pos()
+            && !scrollbar_area.contains(pos)
+        {
+            let (row, col) = self.screen_to_grid(pos, rect);
+            self.selection = Some(TextSelection::new(row, col));
+            log::debug!("Selection started at ({}, {})", row, col);
+        }
+
+        if response.dragged()
+            && let Some(pos) = response.interact_pointer_pos()
+        {
+            // If we are dragging the scrollbar, don't update text selection
+            if !self.scrollbar.is_dragging() {
+                let (row, col) = self.screen_to_grid(pos, rect);
+                if let Some(ref mut sel) = self.selection {
+                    sel.update_end(row, col);
                 }
             }
         }
 
-        if response.dragged() {
-            if let Some(pos) = response.interact_pointer_pos() {
-                // If we are dragging the scrollbar, don't update text selection
-                if !self.scrollbar.is_dragging() {
-                    let (row, col) = self.screen_to_grid(pos, rect);
-                    if let Some(ref mut sel) = self.selection {
-                        sel.update_end(row, col);
-                    }
-                }
-            }
-        }
-
-        if response.drag_stopped() {
-            if let Some(ref mut sel) = self.selection {
-                sel.active = false;
-                log::debug!("Selection ended");
-            }
+        if response.drag_stopped()
+            && let Some(ref mut sel) = self.selection
+        {
+            sel.active = false;
+            log::debug!("Selection ended");
         }
 
         // Handle mouse wheel scrolling
@@ -1113,14 +1104,14 @@ impl InfrawareApp {
 
                 // --- Text batching ---
                 if cell.ch == ' ' || cell.attrs.hidden {
-                    if let Some((start, color)) = run_start.take() {
-                        if !text_run.is_empty() {
-                            self.render_text_runs.push((
-                                col_x(start),
-                                std::mem::take(&mut text_run),
-                                color,
-                            ));
-                        }
+                    if let Some((start, color)) = run_start.take()
+                        && !text_run.is_empty()
+                    {
+                        self.render_text_runs.push((
+                            col_x(start),
+                            std::mem::take(&mut text_run),
+                            color,
+                        ));
                     }
                 } else {
                     let mut fg = if cell.attrs.reverse {
@@ -1178,14 +1169,11 @@ impl InfrawareApp {
             }
 
             // Flush remaining text (use std::mem::take to avoid clone)
-            if let Some((start, color)) = run_start {
-                if !text_run.is_empty() {
-                    self.render_text_runs.push((
-                        col_x(start),
-                        std::mem::take(&mut text_run),
-                        color,
-                    ));
-                }
+            if let Some((start, color)) = run_start
+                && !text_run.is_empty()
+            {
+                self.render_text_runs
+                    .push((col_x(start), std::mem::take(&mut text_run), color));
             }
 
             // --- DRAW PHASE: Render in correct z-order using helper functions ---
@@ -1201,9 +1189,10 @@ impl InfrawareApp {
             );
         }
 
-        // Draw Throbber ONLY when in WaitingLLM mode (blocking wait for LLM response)
-        // During llm_background_processing, user interacts with shell - no throbber needed
-        if matches!(self.mode, AppMode::WaitingLLM) && scroll_offset == 0 {
+        // Draw Throbber when waiting for LLM response (either blocking or background)
+        let show_throbber =
+            matches!(self.mode, AppMode::WaitingLLM) || self.llm_background_processing;
+        if show_throbber && scroll_offset == 0 {
             let frame_idx =
                 (self.startup_time.elapsed().as_millis() / 250) as usize % SPINNER_FRAMES.len();
             let frame = SPINNER_FRAMES[frame_idx];
@@ -1369,7 +1358,8 @@ impl eframe::App for InfrawareApp {
             let cursor_needs_blink = time_since_blink >= blink_interval;
 
             // Check if we need to animate the throbber (4 FPS / 250ms)
-            let is_waiting_llm = matches!(self.mode, AppMode::WaitingLLM);
+            let is_waiting_llm =
+                matches!(self.mode, AppMode::WaitingLLM) || self.llm_background_processing;
 
             if pty_had_data || cursor_needs_blink || had_user_input {
                 // Something changed - repaint immediately
