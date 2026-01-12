@@ -1,23 +1,17 @@
 [package]
 name = "infraware-terminal"
-version = "0.2.0"
-edition = "2021"
-license = "MIT"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
 
-[lints.rust]
-missing_debug_implementations = "warn"
-redundant_imports = "warn"
-redundant_lifetimes = "warn"
-trivial_numeric_casts = "allow"
-unsafe_op_in_unsafe_fn = "forbid"
-unused_lifetimes = "warn"
-
-[lints.clippy]
-all = "warn"
-pedantic = "allow"
+[lints]
+workspace = true
 
 [dependencies]
-# GUI (replacing ratatui/crossterm)
+# Internal crates
+infraware-shared = { workspace = true }
+
+# GUI
 egui = "0.33.3"
 eframe = { version = "0.33.3", default-features = false, features = ["default_fonts", "glow", "x11"] }
 
@@ -25,19 +19,19 @@ eframe = { version = "0.33.3", default-features = false, features = ["default_fo
 portable-pty = "0.9.0"
 
 # Async runtime
-tokio = { version = "1.48.0", features = ["rt-multi-thread", "sync", "time", "macros"] }
-
+tokio = { workspace = true }
 
 # LLM client
 reqwest = { version = "0.13.1", features = ["json", "stream"] }
-serde = { version = "1.0.228", features = ["derive"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
 
 # Error handling
-anyhow = "1.0.100"
+anyhow = { workspace = true }
 
 # Logging
-log = "0.4.29"
-env_logger = "0.11.8"
+log = { workspace = true }
+env_logger = { workspace = true }
 
 # Environment
 dotenvy = "0.15"
@@ -52,9 +46,8 @@ once_cell = "1.20"
 
 # Clipboard (direct OS access, bypasses egui's delayed sync)
 arboard = "3.4"
-serde_json = "1.0.148"
-async-trait = "0.1.89"
-futures = "0.3.31"
+async-trait = { workspace = true }
+futures = { workspace = true }
 tokio-util = "0.7.17"
 syntect = { version = "5.3.0", features = ["default-fancy"] }
 
@@ -63,8 +56,3 @@ libc = "0.2"
 nix = { version = "0.29", features = ["signal", "process"] }
 
 [dev-dependencies]
-
-[profile.release]
-strip = true
-lto = true
-codegen-units = 1

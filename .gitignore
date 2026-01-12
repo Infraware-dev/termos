@@ -1,0 +1,19 @@
+# Build artifacts
+/target/
+
+# IDE
+.idea/
+*.swp
+*.swo
+*~
+
+# Secrets (never commit)
+.env.secrets
+
+# Local settings
+.claude/settings.local.json
+
+# Python (legacy backend)
+__pycache__/
+*.pyc
+.venv/
