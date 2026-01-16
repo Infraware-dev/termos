@@ -5,74 +5,122 @@ Guida per avviare Infraware Terminal con il backend Rust.
 ## Requisiti
 
 - **Rust** 1.85+ (edition 2024)
-- **Python 3.10+** (per LangGraph e ProcessEngine)
-- **LangGraph** (per HttpEngine/ProcessEngine)
 
 ```bash
 # Dipendenze Linux
 sudo apt install -y pkg-config libssl-dev libxcb-shape0-dev libxcb-xfixes0-dev
 ```
 
+**Opzionale** (solo per HttpEngine/ProcessEngine):
+- Python 3.10+
+- LangGraph
+
 ---
 
-## Setup Completo (3 Terminali)
+## Quick Start: RigEngine (Consigliato)
 
-Per usare il sistema completo con LLM reale, servono **3 terminali**:
+**RigEngine** è il motore primario raccomandato per Infraware Terminal. Utilizza rig-rs con API Anthropic Claude per un vero agente IA, senza dipendenze esterne (LangGraph non richiesto).
+
+### Architettura (2 Terminali)
 
 ```
-┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
-│   Terminal 1    │    │   Terminal 2    │    │   Terminal 3    │
-│                 │    │                 │    │                 │
-│   LangGraph     │◄───│  Rust Backend   │◄───│  Terminal App   │
-│   (porta 2024)  │    │  (porta 8080)   │    │    (egui)       │
-└─────────────────┘    └─────────────────┘    └─────────────────┘
+┌─────────────────┐    ┌─────────────────┐
+│   Terminal 1    │    │   Terminal 2    │
+│                 │    │                 │
+│  Rust Backend   │◄───│  Terminal App   │
+│  (RigEngine)    │    │    (egui)       │
+│  (porta 8080)   │    │                 │
+└────────┬────────┘    └─────────────────┘
+         │
+         ▼
+   Anthropic API
+   (Claude Sonnet)
 ```
 
-### Terminal 1: LangGraph Server
+### Prerequisiti
 
-```bash
-cd backend
-pip install -r requirements.txt  # Prima volta
-langgraph dev
-# Server avviato su http://localhost:2024
-```
+1. **API Key Anthropic** - Ottieni da [console.anthropic.com](https://console.anthropic.com/)
 
-### Terminal 2: Backend Rust (HttpEngine)
+### Terminal 1: Backend RigEngine
 
 ```bash
 cd /home/crist/infraware-terminal
 
-ENGINE_TYPE=http \
-LANGGRAPH_URL=http://localhost:2024 \
-cargo run -p infraware-backend
-# Server avviato su http://localhost:8080
+# Imposta la API key Anthropic
+export ANTHROPIC_API_KEY="sk-ant-api03-..."
+
+# Avvia il backend con RigEngine
+ENGINE_TYPE=rig cargo run -p infraware-backend --features rig
+# Server parte su http://localhost:8080
 ```
 
-### Terminal 3: Terminal App
+### Terminal 2: Terminal App
 
 ```bash
 cd /home/crist/infraware-terminal
 cargo run -p infraware-terminal
 # Si apre la finestra del terminale
-# Digita: ? come vedo i file nascosti
+```
+
+### Test Interattivo
+
+Nel terminale egui, digita:
+```
+? list files in current directory
+```
+
+Vedrai:
+1. **AwaitingApproval**: "Execute: ls -la?" [y/n]
+2. Premi **y** per approvare
+3. Il comando esegue nel PTY
+4. L'agente decide se risposta diretta o continuazione (`needs_continuation`)
+5. **Normal**: Risultato visualizzato
+
+### Come Funziona needs_continuation
+
+Il flag `needs_continuation` determina il comportamento dopo l'esecuzione:
+
+| Scenario | needs_continuation | Comportamento |
+|----------|-------------------|---------------|
+| "lista i file" → `ls -la` | `false` | Output del comando È la risposta |
+| "installa redis" → `uname -s` | `true` | Output usato per decidere prossimo step |
+
+Esempio flusso con `needs_continuation=true`:
+```
+User: "Come installo Redis?"
+         ↓
+Agent: execute_shell_command("uname -s", needs_continuation=true)
+         ↓
+[User approva] → Terminal esegue → "Linux"
+         ↓
+Agent riceve output, continua ragionamento:
+"Su Linux, installa con: sudo apt-get install redis-server"
 ```
 
 ---
 
-## Quick Start (MockEngine - Solo Testing)
+## MockEngine - Solo Testing
 
-Il modo più veloce per testare il backend, senza dipendenze esterne:
+Il modo più veloce per testare il backend, senza API key o dipendenze esterne:
 
 ```bash
 cd /home/crist/infraware-terminal
 
-# Avvia il server (MockEngine è il default)
-cargo run --bin infraware-backend
+# MockEngine è il default
+cargo run -p infraware-backend
+# Server parte su http://localhost:8080
 ```
 
-Il server parte su `http://localhost:8080`.
+**Risposte pre-configurate:**
+| Input contiene | Risposta |
+|----------------|----------|
+| `ls`, `list files` | Esempi comandi `ls` |
+| `docker` | Esempi Docker |
+| `kubernetes`, `k8s` | Esempi kubectl |
+| `git` | Esempi Git |
+| altro | Risposta generica |
 
-### Test rapido
+### Test API con curl
 
 ```bash
 # Health check
@@ -96,85 +144,40 @@ curl -N -X POST http://localhost:8080/threads/mock-thread-1/runs/stream \
 
 ---
 
-## Quick Start Consigliato: RigEngine (Real LLM Agent)
+## Engine Alternativi (LangGraph)
 
-**RigEngine** è il motore primario raccomandato per Infraware Terminal. Utilizza rig-rs con API Anthropic Claude per un vero agente IA, senza dipendenze esterne (LangGraph non richiesto).
+> **Nota**: Questi engine richiedono Python e LangGraph. Per la maggior parte degli utenti, **RigEngine è raccomandato**.
 
-### Prerequisiti
+### HttpEngine - Proxy LangGraph
 
-1. **API Key Anthropic** - Scarica da [console.anthropic.com](https://console.anthropic.com/)
+Setup a 3 terminali con proxy diretto al server LangGraph.
 
-### Setup RigEngine
-
-```bash
-cd /home/crist/infraware-terminal
-
-# Imposta la API key Anthropic
-export ANTHROPIC_API_KEY="sk-ant-api03-..."
-
-# Avvia il backend con RigEngine (abilitare feature 'rig')
-ENGINE_TYPE=rig cargo run -p infraware-backend --features rig
-# Server parte su http://localhost:8080
+```
+┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
+│   Terminal 1    │    │   Terminal 2    │    │   Terminal 3    │
+│                 │    │                 │    │                 │
+│   LangGraph     │◄───│  Rust Backend   │◄───│  Terminal App   │
+│   (porta 2024)  │    │  (porta 8080)   │    │    (egui)       │
+└─────────────────┘    └─────────────────┘    └─────────────────┘
 ```
 
-### Avvia il Terminal (in altro terminale)
-
 ```bash
-cd /home/crist/infraware-terminal
+# Terminal 1: LangGraph Server
+cd backend
+pip install -r requirements.txt  # Prima volta
+langgraph dev
+# Server su http://localhost:2024
+
+# Terminal 2: Backend Rust (HttpEngine)
+ENGINE_TYPE=http \
+LANGGRAPH_URL=http://localhost:2024 \
+cargo run -p infraware-backend
+
+# Terminal 3: Terminal App
 cargo run -p infraware-terminal
 ```
 
-### Test Interattivo
-
-Nel terminale egui, digita:
-```
-? list files in current directory
-```
-
-Vedrai:
-1. **AwaitingApproval**: "Execute: ls -la?" [y/n]
-2. Premi **y** per approvare
-3. Il comando esegue nel PTY
-4. L'agente decide se risposta diretta o continuazione
-5. **Normal**: Risultato visualizzato
-
----
-
-## Configurazioni Engine Alternative
-
-### 1. MockEngine (Default) - Testing
-
-Risposte simulate in-memory. Ideale per sviluppo UI e test.
-
-```bash
-ENGINE_TYPE=mock cargo run --bin infraware-backend
-```
-
-**Risposte pre-configurate:**
-| Input contiene | Risposta |
-|----------------|----------|
-| `ls`, `list files` | Esempi comandi `ls` |
-| `docker` | Esempi Docker |
-| `kubernetes`, `k8s` | Esempi kubectl |
-| `git` | Esempi Git |
-| altro | Risposta generica |
-
-### 2. HttpEngine - Produzione con LangGraph
-
-Proxy diretto al server LangGraph.
-
-```bash
-# Terminal 1: Avvia LangGraph
-cd backend
-langgraph dev  # Porta 2024
-
-# Terminal 2: Avvia backend Rust
-ENGINE_TYPE=http \
-LANGGRAPH_URL=http://localhost:2024 \
-cargo run --bin infraware-backend
-```
-
-### 3. ProcessEngine - Bridge Python
+### ProcessEngine - Bridge Python
 
 Comunicazione via subprocess (JSON-RPC over stdio).
 
@@ -189,53 +192,7 @@ cd backend && langgraph dev &
 ENGINE_TYPE=process \
 BRIDGE_SCRIPT=bin/engine-bridge/main.py \
 LANGGRAPH_URL=http://localhost:2024 \
-cargo run --bin infraware-backend
-```
-
-### 4. RigEngine - Agente Rust Nativo (Consigliato)
-
-Agente LLM implementato nativamente in Rust usando [rig-rs](https://github.com/0xPlaygrounds/rig) con function calling nativo. Chiama direttamente l'API Anthropic senza bisogno di LangGraph.
-
-**Setup API Key:**
-
-```bash
-# Imposta la variabile d'ambiente
-export ANTHROPIC_API_KEY="sk-ant-api03-..."
-
-# Oppure crea un file .env nella root del progetto
-echo "ANTHROPIC_API_KEY=sk-ant-api03-..." > .env
-```
-
-**Avvia il backend:**
-
-```bash
-# IMPORTANTE: la feature "rig" deve essere abilitata
-ENGINE_TYPE=rig cargo run -p infraware-backend --features rig
-```
-
-Il server parte su `http://localhost:8080` con il RigEngine (Anthropic Claude API).
-
-**Come funziona RigEngine:**
-
-1. **Tool Registration**: ShellCommandTool e AskUserTool registrati nativamente
-2. **HITL Interception**: PromptHook intercetta le tool call per approvazione utente
-3. **needs_continuation Flag**: Intelligente routing:
-   - `false` → comando output IS the answer (e.g., ls, whoami)
-   - `true` → comando output is INPUT per agent (e.g., uname -s → then OS-specific instructions)
-
-**Esempio di flusso:**
-
-```
-User: "Come installo Redis?"
-         ↓
-Agent chiama: execute_shell_command("uname -s", needs_continuation=true)
-         ↓
-[Backend invia HITL interrupt - User approves]
-         ↓
-Terminal esegue: uname -s → "Linux"
-         ↓
-Agent riceve output e continua:
-"Su Linux, installa con: sudo apt-get install redis-server"
+cargo run -p infraware-backend
 ```
 
 ---
@@ -427,17 +384,26 @@ RUST_LOG=infraware_backend::routes=debug cargo run --bin infraware-backend
 
 ## Troubleshooting
 
-### "Connection refused" su LangGraph
+### RigEngine: "ANTHROPIC_API_KEY not set"
 
 ```bash
-# Verifica che LangGraph sia in esecuzione
-curl http://localhost:2024/health
+# Imposta la variabile d'ambiente
+export ANTHROPIC_API_KEY="sk-ant-api03-..."
 
-# Se non risponde, avvialo:
-cd backend && langgraph dev
+# Oppure crea file .env nella root
+echo "ANTHROPIC_API_KEY=sk-ant-api03-..." > .env
 ```
 
-### "Unauthorized" (401)
+### RigEngine: "invalid_api_key" o 401 da Anthropic
+
+```bash
+# Verifica che la chiave sia valida
+curl -H "x-api-key: $ANTHROPIC_API_KEY" \
+     -H "anthropic-version: 2023-06-01" \
+     https://api.anthropic.com/v1/models
+```
+
+### "Unauthorized" (401) dal backend
 
 ```bash
 # Se API_KEY è configurata, devi passare l'header:
@@ -448,10 +414,20 @@ curl -H "X-Api-Key: $API_KEY" http://localhost:8080/threads
 
 ```bash
 # Rate limit superato. Attendi o disabilita:
-RATE_LIMIT_RPM=0 cargo run --bin infraware-backend
+RATE_LIMIT_RPM=0 cargo run -p infraware-backend
 ```
 
-### Bridge Python non risponde
+### LangGraph: "Connection refused" (solo HttpEngine/ProcessEngine)
+
+```bash
+# Verifica che LangGraph sia in esecuzione
+curl http://localhost:2024/health
+
+# Se non risponde, avvialo:
+cd backend && langgraph dev
+```
+
+### ProcessEngine: Bridge Python non risponde
 
 ```bash
 # Verifica dipendenze
