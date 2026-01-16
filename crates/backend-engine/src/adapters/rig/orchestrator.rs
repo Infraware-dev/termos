@@ -23,6 +23,19 @@ use super::tools::{AskUserArgs, AskUserTool, HitlMarker, ShellCommandArgs, Shell
 
 use infraware_shared::{AgentEvent, Message, MessageEvent, MessageRole, RunInput};
 
+/// Safely truncate a UTF-8 string to at most `max_bytes` bytes,
+/// ensuring the result ends at a valid char boundary.
+fn truncate_utf8(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
 /// Type alias for the base rig-core agent
 pub type RigAgent = Agent<anthropic::completion::CompletionModel>;
 
@@ -189,7 +202,7 @@ pub fn create_run_stream(
         // History is still stored for resume operations.
         eprintln!(
             ">>> CALLING AGENT with prompt='{}' (history ignored, was {})",
-            &prompt[..prompt.len().min(100)],
+            truncate_utf8(&prompt, 100),
             chat_history.len()
         );
         let result = agent

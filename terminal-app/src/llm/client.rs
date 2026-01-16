@@ -6,6 +6,20 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
+/// Safely truncate a UTF-8 string to at most `max_bytes` bytes,
+/// ensuring the result ends at a valid char boundary.
+fn truncate_utf8(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    // Find the last valid char boundary at or before max_bytes
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
 /// Request to create a new LLM thread
 #[derive(Debug, Serialize)]
 struct CreateThreadRequest {
@@ -446,7 +460,7 @@ impl HttpLLMClient {
         } else {
             log::debug!(
                 "Final result preview: {}...",
-                &result[..result.len().min(200)]
+                truncate_utf8(&result, 200)
             );
         }
 
@@ -618,7 +632,7 @@ impl HttpLLMClient {
         let Ok(values) = serde_json::from_str::<serde_json::Value>(data) else {
             log::warn!(
                 "Failed to parse 'values' event JSON: {}",
-                &data[..data.len().min(200)]
+                truncate_utf8(&data, 200)
             );
             return;
         };
@@ -652,7 +666,7 @@ impl HttpLLMClient {
                     log::info!(
                         "Found AI message content ({} chars): {}...",
                         content.len(),
-                        &content[..content.len().min(100)]
+                        truncate_utf8(&content, 100)
                     );
                     result.clear(); // Replace with latest AI message
                     result.push_str(&content);
@@ -660,7 +674,7 @@ impl HttpLLMClient {
                 } else {
                     log::debug!(
                         "Skipping invalid AI content: {}...",
-                        &content[..content.len().min(50)]
+                        truncate_utf8(&content, 50)
                     );
                 }
             } else {
@@ -1046,7 +1060,7 @@ impl LLMClientTrait for MockLLMClient {
             "Mock received command output.\nCommand: {}\nOutput ({} chars): {}...",
             command,
             output.len(),
-            &output[..output.len().min(100)]
+            truncate_utf8(&output, 100)
         )))
     }
 

@@ -23,6 +23,19 @@ use std::time::Instant;
 use tokio::runtime::Runtime;
 use tokio::sync::Mutex as TokioMutex;
 
+/// Safely truncate a UTF-8 string to at most `max_bytes` bytes,
+/// ensuring the result ends at a valid char boundary.
+fn truncate_utf8(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
 /// Events coming from background tasks (LLM, etc.)
 #[derive(Debug)]
 pub enum AppBackgroundEvent {
@@ -429,7 +442,7 @@ impl InfrawareApp {
                                 log::debug!(
                                     "Captured output ({} chars): {}...",
                                     output.len(),
-                                    &output[..output.len().min(100)]
+                                    truncate_utf8(&output, 100)
                                 );
                                 let cmd = command.clone();
 
