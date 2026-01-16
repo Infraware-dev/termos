@@ -1,8 +1,12 @@
 # RigEngine Implementation Plan
 
+## Status: COMPLETED
+
+RigEngine is now fully implemented and is the **primary recommended engine** for Infraware Terminal. This document describes the architecture and implementation details.
+
 ## Overview
 
-Implement a native Rust agentic engine using **rig-rs** library as an alternative to the LangGraph-based HttpEngine. The RigEngine will implement the existing `AgenticEngine` trait and coexist with other engines via `ENGINE_TYPE=rig`.
+RigEngine is a native Rust agentic engine using **rig-rs** library that implements the existing `AgenticEngine` trait and coexists with HttpEngine and ProcessEngine via `ENGINE_TYPE=rig`.
 
 ### Scope Decisions
 - **Provider**: Anthropic (Claude) only
@@ -295,3 +299,38 @@ curl http://localhost:8080/health
 | Anthropic rate limits | Implement exponential backoff |
 | Tool output parsing | Robust HitlMarker detection with fallbacks |
 | Memory growth (threads) | Add thread TTL/cleanup (future enhancement) |
+
+---
+
+## Implementation Complete (2026-01-16)
+
+RigEngine is fully functional with the following features:
+
+- **Native Rust agent** using rig-rs with Anthropic Claude API
+- **HITL (Human-in-the-Loop)** via tool calling interception
+- **needs_continuation flag** for intelligent command result handling
+- **ExecutingCommand state** in terminal state machine for output capture
+- **Integrated with terminal-app** via SSE streaming from backend
+
+### Current Implementation Details
+
+- Location: `crates/backend-engine/src/adapters/rig/`
+- Tools: ShellCommandTool (with needs_continuation), AskUserTool
+- Feature flag: `--features rig` required at build time
+- State storage: In-memory (thread state in RigEngine)
+- Terminal integration: Full HITL workflow with approval/answer states
+
+### Testing Verified
+
+- Unit tests passing
+- Integration with backend-api working
+- Terminal app displaying HITL prompts correctly
+- needs_continuation flow directing agent continuation properly
+- Command execution in PTY with output capture functioning
+
+### Next Phase Enhancements (Future)
+
+- Persistent state storage (thread history, conversation logs)
+- Advanced tool result parsing
+- Memory management for long-running sessions
+- Additional tool support (file operations, API calls, etc.)

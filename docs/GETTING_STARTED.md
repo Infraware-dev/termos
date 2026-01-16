@@ -96,7 +96,51 @@ curl -N -X POST http://localhost:8080/threads/mock-thread-1/runs/stream \
 
 ---
 
-## Configurazioni Engine
+## Quick Start Consigliato: RigEngine (Real LLM Agent)
+
+**RigEngine** è il motore primario raccomandato per Infraware Terminal. Utilizza rig-rs con API Anthropic Claude per un vero agente IA, senza dipendenze esterne (LangGraph non richiesto).
+
+### Prerequisiti
+
+1. **API Key Anthropic** - Scarica da [console.anthropic.com](https://console.anthropic.com/)
+
+### Setup RigEngine
+
+```bash
+cd /home/crist/infraware-terminal
+
+# Imposta la API key Anthropic
+export ANTHROPIC_API_KEY="sk-ant-api03-..."
+
+# Avvia il backend con RigEngine (abilitare feature 'rig')
+ENGINE_TYPE=rig cargo run -p infraware-backend --features rig
+# Server parte su http://localhost:8080
+```
+
+### Avvia il Terminal (in altro terminale)
+
+```bash
+cd /home/crist/infraware-terminal
+cargo run -p infraware-terminal
+```
+
+### Test Interattivo
+
+Nel terminale egui, digita:
+```
+? list files in current directory
+```
+
+Vedrai:
+1. **AwaitingApproval**: "Execute: ls -la?" [y/n]
+2. Premi **y** per approvare
+3. Il comando esegue nel PTY
+4. L'agente decide se risposta diretta o continuazione
+5. **Normal**: Risultato visualizzato
+
+---
+
+## Configurazioni Engine Alternative
 
 ### 1. MockEngine (Default) - Testing
 
@@ -148,63 +192,73 @@ LANGGRAPH_URL=http://localhost:2024 \
 cargo run --bin infraware-backend
 ```
 
-### 4. RigEngine - Agente Rust Nativo
+### 4. RigEngine - Agente Rust Nativo (Consigliato)
 
-Agente LLM implementato nativamente in Rust usando [rig-rs](https://github.com/0xPlaygrounds/rig). Chiama direttamente l'API Anthropic senza bisogno di LangGraph.
+Agente LLM implementato nativamente in Rust usando [rig-rs](https://github.com/0xPlaygrounds/rig) con function calling nativo. Chiama direttamente l'API Anthropic senza bisogno di LangGraph.
 
 **Setup API Key:**
 
 ```bash
-cd crates/backend-api
+# Imposta la variabile d'ambiente
+export ANTHROPIC_API_KEY="sk-ant-api03-..."
 
-# Copia il template dei secrets
-cp .env.secrets.example .env.secrets
-
-# Edita .env.secrets e inserisci la tua API key Anthropic
-# ANTHROPIC_API_KEY=sk-ant-api03-...
+# Oppure crea un file .env nella root del progetto
+echo "ANTHROPIC_API_KEY=sk-ant-api03-..." > .env
 ```
 
 **Avvia il backend:**
 
 ```bash
-# IMPORTANTE: la feature "rig" deve essere abilitata esplicitamente
+# IMPORTANTE: la feature "rig" deve essere abilitata
 ENGINE_TYPE=rig cargo run -p infraware-backend --features rig
 ```
 
-> **Nota:** Senza `--features rig`, il backend usa MockEngine come fallback.
+Il server parte su `http://localhost:8080` con il RigEngine (Anthropic Claude API).
 
-**File di configurazione:**
-```
-crates/backend-api/
-├── .env                 # Config generale (PORT, ENGINE_TYPE, etc.)
-├── .env.secrets         # Secrets (ANTHROPIC_API_KEY) - in .gitignore
-├── .env.example         # Template per .env
-└── .env.secrets.example # Template per .env.secrets
-```
+**Come funziona RigEngine:**
 
-> **Nota:** `.env.secrets` non viene committato nel repository. Assicurati di crearlo manualmente.
+1. **Tool Registration**: ShellCommandTool e AskUserTool registrati nativamente
+2. **HITL Interception**: PromptHook intercetta le tool call per approvazione utente
+3. **needs_continuation Flag**: Intelligente routing:
+   - `false` → comando output IS the answer (e.g., ls, whoami)
+   - `true` → comando output is INPUT per agent (e.g., uname -s → then OS-specific instructions)
+
+**Esempio di flusso:**
+
+```
+User: "Come installo Redis?"
+         ↓
+Agent chiama: execute_shell_command("uname -s", needs_continuation=true)
+         ↓
+[Backend invia HITL interrupt - User approves]
+         ↓
+Terminal esegue: uname -s → "Linux"
+         ↓
+Agent riceve output e continua:
+"Su Linux, installa con: sudo apt-get install redis-server"
+```
 
 ---
 
 ## Variabili d'Ambiente
 
 ```bash
-# === Engine ===
+# === Engine Selection ===
 ENGINE_TYPE=mock|http|process|rig  # Default: mock
 
 # === Server ===
 PORT=8080                          # Default: 8080
 
-# === LangGraph (per http/process) ===
+# === RigEngine (Consigliato - Anthropic Claude API) ===
+ANTHROPIC_API_KEY=sk-ant-api03-...  # Richiesta per ENGINE_TYPE=rig
+
+# === LangGraph (per http/process engines) ===
 LANGGRAPH_URL=http://localhost:2024
 
 # === ProcessEngine ===
 BRIDGE_COMMAND=python3
 BRIDGE_SCRIPT=bin/engine-bridge/main.py
 BRIDGE_WORKING_DIR=/path/to/dir   # Opzionale
-
-# === RigEngine (in .env.secrets) ===
-ANTHROPIC_API_KEY=sk-ant-api03-...  # Richiesta per ENGINE_TYPE=rig
 
 # === Sicurezza ===
 API_KEY=your-secret-key           # Vuoto = auth disabilitata
@@ -213,6 +267,17 @@ RATE_LIMIT_RPM=100                # 0 = disabilitato
 
 # === Debug ===
 RUST_LOG=infraware_backend=debug,tower_http=debug
+```
+
+**Quick Setup per RigEngine:**
+```bash
+# Opzione 1: Environment variable
+export ANTHROPIC_API_KEY="sk-ant-api03-..."
+ENGINE_TYPE=rig cargo run -p infraware-backend --features rig
+
+# Opzione 2: .env file
+echo "ANTHROPIC_API_KEY=sk-ant-api03-..." > .env
+ENGINE_TYPE=rig cargo run -p infraware-backend --features rig
 ```
 
 ---
@@ -401,10 +466,27 @@ echo '{"jsonrpc":"2.0","id":"1","method":"health_check","params":{}}' | \
 
 ## Prossimi Passi
 
-1. **Test con MockEngine** - Familiarizza con l'API
-2. **Setup LangGraph** - Per risposte reali da LLM
-3. **Configura auth** - Imposta `API_KEY` per produzione
-4. **Monitora metriche** - Scrape `/metrics` con Prometheus
+### Quick Start Path
+1. **Test con MockEngine** - Familiarizza con l'API senza costi
+   ```bash
+   cargo run -p infraware-backend
+   ```
+2. **Setup RigEngine** - Usa agente nativo Rust (consigliato)
+   ```bash
+   export ANTHROPIC_API_KEY="sk-..."
+   ENGINE_TYPE=rig cargo run -p infraware-backend --features rig
+   ```
+3. **Avvia Terminal** - Prova query in linguaggio naturale
+   ```bash
+   cargo run -p infraware-terminal
+   # Type: ? list files
+   ```
+
+### Production Deployment
+1. **Configura autenticazione** - Imposta `API_KEY` per proteggere il backend
+2. **Monitora metriche** - Scrape `/metrics` endpoint con Prometheus
+3. **Setup monitoring** - Configura alerting per Anthropic API rate limits
+4. **Graceful shutdown** - Backend supporta SIGTERM e Ctrl+C
 
 ---
 

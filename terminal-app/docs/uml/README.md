@@ -1,26 +1,28 @@
 # Infraware Terminal - UML Architecture Diagrams
 
-This directory contains comprehensive UML diagrams documenting the architecture of the Infraware Terminal emulator—a PTY-based egui application with VTE parsing, asynchronous I/O, and optimized rendering.
+This directory contains comprehensive UML diagrams documenting the architecture of the Infraware Terminal emulator—a PTY-based egui application with VTE parsing, asynchronous I/O, optimized rendering, and RigEngine integration for LLM-assisted DevOps workflows.
 
 ## Diagram Overview
 
 ### 00-architecture-overview.puml
-**High-level system architecture showing all major components and their relationships.**
+**High-level system architecture showing all major components and their RigEngine integration.**
 
 - **egui/eframe Application**: Main InfrawareApp struct implementing eframe::App
-- **Application State**: AppMode enum with state machine and events
+- **Application State**: AppMode enum with RigEngine-aware state machine (includes ExecutingCommand state)
 - **PTY Subsystem**: Complete PTY module with PtyManager, PtySession, PtyReader/Writer
 - **VTE Parser Pipeline**: vte::Parser and TerminalHandler implementing Perform trait
 - **Terminal State**: TerminalGrid with Cell, Color, and CellAttrs structures
 - **egui Rendering**: Theme and rendering functions (backgrounds, text, cursor, scrollbar)
 - **Input Handling**: KeyboardHandler for keyboard event processing
+- **LLM Backend**: RigEngine with HITL tool execution for command approval
 
-**Key relationships:**
-- InfrawareApp owns all major components (theme, state, handlers, PTY manager)
+**Key relationships (with RigEngine):**
+- InfrawareApp owns all major components and coordinates with RigEngine backend
+- RigEngine HITL flow: Tool call → AwaitingApproval → ExecutingCommand → needs_continuation decision
 - Data flows: Keyboard → PTY Writer → Shell / Shell output → mpsc channel → InfrawareApp → VTE Parser → TerminalHandler → TerminalGrid → egui Rendering
-- Thread model: Main thread (eframe), PTY reader thread (dedicated I/O), Tokio runtime (async tasks)
+- Thread model: Main thread (eframe), PTY reader thread (dedicated I/O), Tokio runtime (async tasks, backend SSE)
 
-**When to use:** Overview documentation, architecture discussions, system design reviews.
+**When to use:** Overview documentation, RigEngine integration architecture, system design reviews.
 
 ---
 
@@ -83,25 +85,29 @@ This directory contains comprehensive UML diagrams documenting the architecture 
 ---
 
 ### 03-state-machine.puml
-**Application state machine with valid transitions and event handling.**
+**Application state machine with RigEngine support and command execution flow.**
 
-- **AppMode enum**: Four states (Normal, WaitingLLM, AwaitingApproval, AwaitingAnswer)
-- **AppModeEvent enum**: Seven events triggering state transitions
+- **AppMode enum**: Five states (Normal, WaitingLLM, AwaitingApproval, ExecutingCommand, AwaitingAnswer)
+- **AppModeEvent enum**: Events triggering state transitions
 - **State transitions**: Visualized as directed graph with edge labels
 
 **States:**
 1. **Normal**: Default state, user can type, terminal live
-2. **WaitingLLM**: Querying backend, terminal frozen, animated throbber
-3. **AwaitingApproval**: LLM suggested command, waiting for y/n
-4. **AwaitingAnswer**: LLM asked question, waiting for text input
+2. **WaitingLLM**: Querying RigEngine backend, terminal frozen, animated throbber
+3. **AwaitingApproval**: RigEngine requested command approval via tool call (HITL), waiting for y/n
+4. **ExecutingCommand**: Command approved by user, executing in PTY, capturing output (NEW with RigEngine)
+5. **AwaitingAnswer**: RigEngine asked question, waiting for text input
 
-**Valid transitions:**
-- Normal → WaitingLLM (QueryLLM event)
-- WaitingLLM → Normal (LLMCompleted)
-- WaitingLLM → AwaitingApproval (LLMRequestsApproval event)
-- WaitingLLM → AwaitingAnswer (LLMAsksQuestion event)
-- AwaitingApproval/AwaitingAnswer → Normal (UserResponded/UserAnswered)
-- Any state → Normal (Cancel event - Ctrl+C)
+**Valid transitions (RigEngine flow):**
+- Normal → WaitingLLM (user types `? query`)
+- WaitingLLM → Normal (no further action needed)
+- WaitingLLM → AwaitingApproval (tool call: execute_shell_command)
+- WaitingLLM → AwaitingAnswer (tool call: ask_user)
+- AwaitingApproval → ExecutingCommand (user approved, command sent to PTY)
+- ExecutingCommand → WaitingLLM (needs_continuation=true, agent continues with output)
+- ExecutingCommand → Normal (needs_continuation=false, output is final answer)
+- AwaitingAnswer → WaitingLLM (user answered, agent continues)
+- Any state → Normal (Cancel - Ctrl+C)
 
 **Implementation details:**
 - **Enum variants carry data**: AwaitingApproval stores command+message
@@ -241,6 +247,17 @@ plantuml docs/uml/00-architecture-overview.puml -tpng -o docs/uml/rendered/
 - **VS Code**: PlantUML extension (Alt+D) for live preview
 - **IntelliJ**: Built-in PlantUML support
 - **GitHub**: Automatic rendering in markdown
+
+## RigEngine Integration
+
+**RigEngine** is the primary LLM backend for Infraware Terminal, providing:
+- Native Rust agent using rig-rs framework
+- Direct Anthropic Claude API integration
+- HITL (Human-in-the-Loop) tool calling for command approval
+- needs_continuation flag for intelligent command result handling
+- Tighter integration with the terminal state machine via ExecutingCommand state
+
+The state machine diagrams reflect the complete RigEngine flow, including the new ExecutingCommand state that captures shell output and determines whether to resume the agent loop or complete the interaction.
 
 ## Architecture Highlights
 

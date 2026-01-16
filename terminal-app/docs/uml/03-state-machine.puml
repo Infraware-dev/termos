@@ -8,7 +8,7 @@ skinparam stateBorderColor #333333
 skinparam stateBackgroundColor #fff4e6
 skinparam arrowColor #333333
 
-title "Application State Machine (AppMode)"
+title "Application State Machine (AppMode) with RigEngine"
 
 state "Normal" as Normal {
     Idle state
@@ -28,6 +28,12 @@ state "AwaitingApproval" as AwaitingApproval {
     Command displayed
 }
 
+state "ExecutingCommand" as ExecutingCommand {
+    Command approved by user
+    Executing in PTY
+    Capturing output
+}
+
 state "AwaitingAnswer" as AwaitingAnswer {
     LLM asked question
     Waiting for text input
@@ -35,30 +41,34 @@ state "AwaitingAnswer" as AwaitingAnswer {
 }
 
 ' From Normal
-Normal --> WaitingLLM : QueryLLM\n(user typed unknown command)
+Normal --> WaitingLLM : QueryLLM\n(user typed ? query)
 
 ' From WaitingLLM
-WaitingLLM --> Normal : LLMCompleted\n(LLM returned final result)
+WaitingLLM --> Normal : LLMCompleted\n(no further action)
 
-WaitingLLM --> AwaitingApproval : LLMRequestsApproval\n{ command, message }\n(LLM suggests dangerous cmd)
+WaitingLLM --> AwaitingApproval : LLMRequestsApproval\n{ command, message }\n(RigEngine tool call)
 
-WaitingLLM --> AwaitingAnswer : LLMAsksQuestion\n{ question, options }\n(LLM needs clarification)
+WaitingLLM --> AwaitingAnswer : LLMAsksQuestion\n{ question, options }\n(RigEngine asks for input)
 
 ' From AwaitingApproval
-AwaitingApproval --> Normal : UserResponded\n(user pressed y/n)
+AwaitingApproval --> ExecutingCommand : UserApprovedCommand\n(user pressed y)
 
-AwaitingApproval --> WaitingLLM : (resume with approval)\n[deferred - future feature]
+AwaitingApproval --> Normal : Cancel\n(user pressed n or Ctrl+C)
+
+' From ExecutingCommand (new in RigEngine)
+ExecutingCommand --> WaitingLLM : CommandExecuted\n(needs_continuation=true)\nOutput sent to agent
+ExecutingCommand --> Normal : CommandExecuted\n(needs_continuation=false)\nOutput is final answer
 
 ' From AwaitingAnswer
-AwaitingAnswer --> Normal : UserAnswered\n(user typed answer + Enter)
+AwaitingAnswer --> WaitingLLM : UserAnswered\n(user typed answer + Enter)
 
-AwaitingAnswer --> WaitingLLM : (resume with answer)\n[deferred - future feature]
-
-' From Any (Cancel)
-Normal --> Normal : Cancel\n(idempotent)
-WaitingLLM --> Normal : Cancel\n(Ctrl+C - abort LLM query)
-AwaitingApproval --> Normal : Cancel\n(Ctrl+C - reject command)
 AwaitingAnswer --> Normal : Cancel\n(Ctrl+C - abort question)
+
+' From WaitingLLM (cancel)
+WaitingLLM --> Normal : Cancel\n(Ctrl+C - abort LLM query)
+
+' Idempotent transition
+Normal --> Normal : Cancel\n(idempotent)
 
 note right of Normal
     **Default state:**
@@ -73,15 +83,25 @@ note right of WaitingLLM
     - Terminal output frozen
     - Animated throbber shows wait state
     - User can press Ctrl+C to cancel
-    - Streaming response display (future)
+    - Streaming response display
 end note
 
 note right of AwaitingApproval
-    **Command Approval Needed:**
+    **Command Approval Needed (HITL):**
     - LLM command shown
-    - Explanation/warning displayed
+    - Explanation displayed
     - Waiting for y/n/Ctrl+C
-    - Example: dangerous rm/dd commands
+    - RigEngine: triggered by execute_shell_command tool call
+end note
+
+note right of ExecutingCommand
+    **Command Executing (NEW):**
+    - User approved execution
+    - Command runs in PTY
+    - Output captured
+    - Agent decides next step via needs_continuation
+    - If true: agent continues with output
+    - If false: output is final answer
 end note
 
 note right of AwaitingAnswer
@@ -89,7 +109,7 @@ note right of AwaitingAnswer
     - Question displayed
     - Free-text or multiple choice
     - Waiting for user input + Enter
-    - Example: "Which file?"
+    - RigEngine: triggered by ask_user tool call
 end note
 
 note bottom
@@ -105,44 +125,28 @@ note bottom
        - Returns new state or error
        - No intermediate states
 
-    3. **Idempotent Same-State:**
-       - Normal → Normal is valid (idempotent)
-       - Allows safe retries
+    3. **RigEngine HITL Flow:**
+       - Tools intercept before execution
+       - AwaitingApproval → ExecutingCommand (new)
+       - needs_continuation flag controls next state
+       - ExecutingCommand → WaitingLLM or Normal
 
-    4. **Cancel from Any State:**
-       - Cancel event always → Normal
-       - Provides user escape hatch
-       - Ctrl+C triggers cancel
-
-    5. **Direct Transitions Only:**
-       - No chaining (Normal → AwaitingApproval forbidden)
-       - Must go through WaitingLLM
-       - Prevents accidental state bypass
+    4. **Cancel from Most States:**
+       - Cancel always → Normal (except Normal itself)
+       - Ctrl+C provides user escape hatch
 
     **Implementation:**
-    AppMode enum variants store data:
-    - AwaitingApproval { command, message }
-    - AwaitingAnswer { question, options }
-    Data consumed on transition (no clone)
-end note
-
-' Show state data
-note left of AwaitingApproval
     pub enum AppMode {
         Normal,
-
         WaitingLLM,
-
-        AwaitingApproval {
-            command: String,
-            message: String,
-        },
-
-        AwaitingAnswer {
-            question: String,
-            options: Option<Vec<String>>,
-        },
+        AwaitingApproval { command, message },
+        AwaitingAnswer { question, options },
+        ExecutingCommand { command },
     }
+
+    **RigEngine Specific:**
+    ExecutingCommand state NEW with RigEngine
+    Captures command output for needs_continuation decision
 end note
 
 @enduml

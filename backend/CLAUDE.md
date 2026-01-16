@@ -1,10 +1,10 @@
-# CLAUDE.md
+# CLAUDE.md - Legacy Python Backend
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+**DEPRECATED**: This Python backend is being replaced by the Rust `infraware-backend` crate.
 
-## Overview
+**Status**: Maintenance mode only. For new development, use the Rust backend with RigEngine.
 
-This is the **legacy Python backend** (being replaced by Rust `infraware-backend`). It's a FastAPI application wrapping a LangGraph supervisor agent system that coordinates AWS, GCP, and command execution agents.
+This file documents the legacy FastAPI application wrapping a LangGraph supervisor agent system (no longer the primary architecture).
 
 ## Commands
 

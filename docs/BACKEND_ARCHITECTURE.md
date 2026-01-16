@@ -194,7 +194,7 @@ BRIDGE_SCRIPT=bin/engine-bridge/main.py
 
 ---
 
-### Opzione 3: RigEngine (Nativo Rust) - Futuro
+### Opzione 3: RigEngine (Nativo Rust) - Implementato
 
 ```mermaid
 flowchart TB
@@ -224,8 +224,11 @@ flowchart TB
 
 **Come funziona:**
 - Tutto in un unico processo Rust
-- rig-rs gestisce la logica agentica
-- Chiamate dirette all'API del provider LLM
+- rig-rs gestisce la logica agentica con function calling nativo
+- Strumenti registrati: ShellCommandTool, AskUserTool
+- PromptHook intercetta le tool call per HITL (Human-in-the-Loop)
+- needs_continuation flag distingue tra comandi con risposta diretta vs quelli che richiedono continuazione
+- Chiamate dirette all'API del provider LLM (Anthropic Claude)
 
 **Configurazione:**
 ```bash
@@ -234,21 +237,192 @@ ANTHROPIC_API_KEY=sk-...
 ```
 
 **Pro:**
-- Performance massima: nessun overhead di rete interna
+- Performance massima: nessun overhead di rete interna, nessun subprocess
 - Type-safe: tutto compilato insieme
 - Semplicità deployment: un solo binario
 - Memoria condivisa: nessuna serializzazione tra componenti
+- HITL integrato: PromptHook intercetta le tool call per approvazione utente
+- needs_continuation flag: intelligente routing tra risposte dirette e agentive
+- Scalabilità: nessun server LangGraph da gestire
 
 **Contro:**
 - Meno flessibile: devi ricompilare per cambiare logica
 - Lock-in Rust: la logica agentica deve essere in Rust
-- Maturità: rig-rs è più giovane di LangGraph
+- Maturità: rig-rs 0.28 è giovane, API potrebbe cambiare
 
-**Quando usarlo:**
-- Quando vuoi massima performance
-- Per deployment semplificato (single binary)
-- Se preferisci scrivere agenti in Rust
-- Per applicazioni embedded o resource-constrained
+**Quando usarlo (consigliato per):**
+- Uso primario: migliore bilanciamento tra performance, semplicità e features
+- Deployment su macchine singole o cluster Kubernetes
+- Quando HITL e intelligenza di continuazione sono importanti
+- Se non hai bisogno di usare LangGraph
+
+---
+
+## needs_continuation Flag
+
+The `needs_continuation` flag is a critical feature that controls how the RigEngine handles command output after user approval.
+
+### What It Means
+
+When the agent proposes a shell command, it sets `needs_continuation` to indicate whether the output should be:
+
+- **false** (default): Output IS the final answer to the user's query
+  - Example: `ls -la` → list files → done
+  - Example: `whoami` → show current user → done
+  - The agent doesn't need to see the output; terminal shows it directly
+
+- **true**: Output is INPUT for the agent to continue reasoning
+  - Example: `uname -s` → get OS → then provide OS-specific instructions
+  - Example: `node --version` → get version → then suggest upgrade if outdated
+  - The agent receives the output and continues the conversation
+
+### Why It Matters
+
+This flag allows the agent to distinguish between:
+1. **Query commands** (output is the answer): "list files", "show my username"
+2. **Decision commands** (output guides next steps): "detect OS", "check Python version", "see if service is running"
+
+### Implementation Details
+
+**In Interrupt (crates/shared/src/events.rs):**
+```rust
+pub enum Interrupt {
+    CommandApproval {
+        command: String,
+        message: String,
+        needs_continuation: bool,  // <-- This field
+    },
+    // ...
+}
+```
+
+**In Tool Args (crates/backend-engine/src/adapters/rig/tools/shell.rs):**
+```rust
+pub struct ShellCommandArgs {
+    pub command: String,
+    pub explanation: String,
+    pub needs_continuation: bool,  // <-- LLM sets this
+}
+```
+
+**In Resume Flow (crates/backend-engine/src/adapters/rig/orchestrator.rs):**
+```rust
+match resume_response {
+    ResumeResponse::Approved => {
+        let output = execute_command(&command).await;
+
+        if needs_continuation {
+            // Send output back to LLM for further processing
+            agent.continuation(output).await
+        } else {
+            // Output IS the answer - return directly to user
+            emit_final_response(output).await
+        }
+    }
+}
+```
+
+## RigEngine Execution Flow with needs_continuation
+
+The `needs_continuation` flag enables intelligent command handling in RigEngine:
+
+### Sequence Diagram: RigEngine HITL with needs_continuation
+
+```mermaid
+sequenceDiagram
+    participant User as Terminal User
+    participant Terminal as Terminal App
+    participant Backend as RigEngine Backend
+    participant LLM as Anthropic Claude
+    participant PTY as PTY Session
+
+    User->>Terminal: ? list files in /tmp
+    Terminal->>Backend: stream_run(query)
+
+    Backend->>LLM: "list files in /tmp"
+    activate LLM
+    LLM-->>Backend: ToolCall("execute_shell_command", {command: "ls /tmp", needs_continuation: false})
+    deactivate LLM
+
+    Backend->>Terminal: AgentEvent::Updates(CommandApproval)
+    Terminal->>Terminal: State: AwaitingApproval
+    Terminal-->>User: Show: "Execute: ls /tmp?" [y/n]
+
+    User->>Terminal: [press y]
+    Terminal->>Terminal: State: ExecutingCommand
+    Terminal->>PTY: Execute: ls /tmp
+
+    activate PTY
+    PTY-->>Terminal: Output (file list)
+    deactivate PTY
+
+    Terminal->>Backend: resume_run(Approved, CommandOutput)
+
+    alt needs_continuation = false
+        Backend->>Backend: Output IS the answer
+        Backend-->>Terminal: AgentEvent::Values{messages: [user_query, final_response]}
+        Backend-->>Terminal: AgentEvent::End
+        Terminal->>Terminal: State: Normal
+        Terminal-->>User: Display file list
+    else needs_continuation = true
+        Backend->>LLM: "Command output: ..., continue processing"
+        activate LLM
+        LLM-->>Backend: Tool call or Message with instructions
+        deactivate LLM
+        Backend-->>Terminal: Continue agent loop
+        Terminal->>Terminal: State: WaitingLLM
+    end
+```
+
+### Example Scenarios
+
+**Scenario 1: Direct Answer (needs_continuation=false)**
+```
+User: "List all Python files"
+  ↓
+Agent: execute_shell_command("find . -name '*.py'", needs_continuation=false)
+  ↓
+[User approves execution in PTY]
+  ↓
+Output: "file1.py file2.py file3.py"
+  ↓
+Agent: [Output is the complete answer - return directly to user]
+  ↓
+User sees: The list of Python files
+```
+
+**Scenario 2: Processing Needed (needs_continuation=true)**
+```
+User: "Help me setup Node.js with the right version"
+  ↓
+Agent: execute_shell_command("node --version", needs_continuation=true)
+  ↓
+[User approves execution in PTY]
+  ↓
+Output: "v14.21.0"
+  ↓
+Agent receives version and continues:
+  "I see you have Node v14. Let me help you upgrade to v18..."
+  ↓
+Agent: execute_shell_command("nvm install 18", needs_continuation=true)
+  ↓
+[User approves]
+  ↓
+Agent continues with next steps based on output...
+```
+
+**Scenario 3: Question Handling (No Command)**
+```
+User: "Help me install Redis"
+  ↓
+Agent: AskUserTool("Which Linux distribution?", options=["Ubuntu", "Debian", "CentOS"])
+  ↓
+Terminal: State: AwaitingAnswer
+  ↓
+User: [Select "Ubuntu"]
+  ↓
+Agent: [Receives answer and continues with Ubuntu-specific instructions]
+```
 
 ---
 
@@ -302,13 +476,16 @@ ENGINE_TYPE=mock
 
 | Aspetto | HttpEngine | ProcessEngine | RigEngine | MockEngine |
 |---------|------------|---------------|-----------|------------|
+| **Status** | Stabile | Stabile | Implementato (primary) | Testing |
 | **Latenza** | Bassa | Media | Minima | Minima |
 | **Complessità** | Bassa | Media | Bassa | Minima |
 | **Isolamento** | No | Sì | No | N/A |
 | **Flessibilità** | Media | Alta | Media | Bassa |
 | **Debug** | Facile | Medio | Facile | Facile |
+| **HITL** | LangGraph-based | LangGraph-based | Native PromptHook | Simulato |
+| **needs_continuation** | No | No | Sì | Sì |
 | **Deployment** | 2 processi | 3 processi | 1 processo | 1 processo |
-| **Dipendenze** | LangGraph | LangGraph + Bridge | rig-rs | Nessuna |
+| **Dipendenze** | LangGraph | LangGraph + Bridge | rig-rs 0.28+ | Nessuna |
 
 ---
 
@@ -743,10 +920,8 @@ BRIDGE_SCRIPT=bin/engine-bridge/main.py
 BRIDGE_WORKING_DIR=/path/to/project
 LANGGRAPH_URL=http://localhost:2024  # passato al bridge
 
-# === RigEngine (futuro) ===
-ANTHROPIC_API_KEY=sk-ant-...
-# oppure
-OPENAI_API_KEY=sk-...
+# === RigEngine (Implementato - Primario) ===
+ANTHROPIC_API_KEY=sk-ant-...  # Richiesta per ENGINE_TYPE=rig
 
 # === Debug ===
 RUST_LOG=debug
@@ -839,8 +1014,17 @@ myengine = ["dep-if-needed"]
 - [ ] **Fase 6**: State Persistence (crates/backend-state)
   - SQLite per sviluppo
   - Redis/PostgreSQL per produzione
-- [ ] **Fase 7**: RigEngine (rig-rs nativo)
-- [ ] **Fase 8**: Advanced Resilience
+  - Persistenza interrupts e chat history
+- [ ] **Fase 7**: Advanced Resilience
   - Retry con exponential backoff
-  - Circuit breaker
-  - Health check avanzato (deep health)
+  - Circuit breaker per Anthropic API
+  - Health check avanzato (deep health check)
+  - Graceful degradation per API timeouts
+- [ ] **Fase 8**: Performance Optimization
+  - Token streaming optimization
+  - Connection pooling per Anthropic API
+  - Batch interrupt processing
+- [ ] **Fase 9**: Advanced Features
+  - Tool result caching
+  - Multi-model support (Claude 3, 4 variants)
+  - Custom tool registration API

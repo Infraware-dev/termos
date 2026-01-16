@@ -56,6 +56,7 @@ Nel terminale, prefissa con `?` per query in linguaggio naturale:
 | **MockEngine** | Testing/sviluppo (default) | `cargo run -p infraware-backend` |
 | **HttpEngine** | Produzione con LangGraph | `ENGINE_TYPE=http LANGGRAPH_URL=http://localhost:2024 cargo run -p infraware-backend` |
 | **ProcessEngine** | Bridge Python | `ENGINE_TYPE=process BRIDGE_SCRIPT=bin/engine-bridge/main.py cargo run -p infraware-backend` |
+| **RigEngine** | Agente Rust nativo con rig-rs | `ENGINE_TYPE=rig ANTHROPIC_API_KEY=sk-... cargo run -p infraware-backend --features rig` |
 
 ### Produzione con LangGraph
 

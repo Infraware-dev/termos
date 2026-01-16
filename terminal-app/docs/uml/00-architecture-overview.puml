@@ -44,6 +44,7 @@ package "Application State" {
         Normal
         WaitingLLM
         AwaitingApproval { command, message }
+        ExecutingCommand { command }
         AwaitingAnswer { question, options }
     }
 
