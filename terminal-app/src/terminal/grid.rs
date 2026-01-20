@@ -215,6 +215,8 @@ impl TerminalGrid {
     /// Get visible rows for rendering, combining scrollback and current screen.
     /// Returns rows from (scrollback + cells) based on scroll_offset.
     /// Uses ring buffer for correct logical row ordering.
+    ///
+    /// DEPRECATED: Use `visible_row()` and `visible_row_count()` for zero-allocation access.
     pub fn visible_rows(&self) -> Vec<&[Cell]> {
         let total = self.scrollback.len() + self.cells.len();
         let visible_count = self.rows as usize;
@@ -238,6 +240,40 @@ impl TerminalGrid {
         }
 
         result
+    }
+
+    /// Get the number of visible rows (for zero-allocation iteration).
+    #[inline]
+    #[must_use]
+    pub fn visible_row_count(&self) -> usize {
+        let total = self.scrollback.len() + self.cells.len();
+        let visible_count = self.rows as usize;
+        let end = total.saturating_sub(self.scroll_offset);
+        let start = end.saturating_sub(visible_count);
+        end - start
+    }
+
+    /// Get a single visible row by index (for zero-allocation iteration).
+    /// Index 0 is the topmost visible row.
+    #[inline]
+    #[must_use]
+    pub fn visible_row(&self, visible_idx: usize) -> Option<&[Cell]> {
+        let total = self.scrollback.len() + self.cells.len();
+        let visible_count = self.rows as usize;
+        let end = total.saturating_sub(self.scroll_offset);
+        let start = end.saturating_sub(visible_count);
+
+        let absolute_idx = start + visible_idx;
+        if absolute_idx >= end {
+            return None;
+        }
+
+        if absolute_idx < self.scrollback.len() {
+            Some(self.scrollback[absolute_idx].as_slice())
+        } else {
+            let logical_idx = absolute_idx - self.scrollback.len();
+            self.row(logical_idx).map(|r| r.as_slice())
+        }
     }
 
     /// Check if alternate screen is active.

@@ -57,7 +57,8 @@ pub fn render_backgrounds(
     }
 }
 
-/// Render a batch of text runs.
+/// Render a batch of text runs (legacy - uses owned Strings).
+#[allow(dead_code)]
 pub fn render_text_runs(
     painter: &Painter,
     rect: Rect,
@@ -73,6 +74,34 @@ pub fn render_text_runs(
             font_id.clone(),
             *color,
         );
+    }
+}
+
+/// Render text runs from a shared buffer (zero-allocation version).
+/// Each run is (x_offset, end_index_in_buffer, color).
+/// Text is extracted from buffer using previous end index as start.
+#[inline]
+pub fn render_text_runs_buffered(
+    painter: &Painter,
+    rect: Rect,
+    y: f32,
+    font_id: &FontId,
+    text_buffer: &str,
+    text_runs: &[(f32, usize, Color32)],
+) {
+    let mut prev_end = 0;
+    for &(start_x, end_idx, color) in text_runs {
+        let text = &text_buffer[prev_end..end_idx];
+        if !text.is_empty() {
+            painter.text(
+                Pos2::new(rect.left() + start_x, y),
+                egui::Align2::LEFT_TOP,
+                text,
+                font_id.clone(),
+                color,
+            );
+        }
+        prev_end = end_idx;
     }
 }
 
