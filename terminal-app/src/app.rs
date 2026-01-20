@@ -1581,70 +1581,122 @@ impl InfrawareApp {
         }
     }
 
-    /// Split the current pane horizontally (new pane to the right).
+    /// Split the active pane horizontally (new pane to the right).
+    ///
+    /// Uses a flatter tree structure by splitting the active pane rather than
+    /// wrapping the entire root. This results in better performance with many splits:
+    /// - Old: Container[Container[Container[P1, P2], P3], P4] (deep nesting)
+    /// - New: Container[P1, Container[P2, Container[P3, P4]]] (flatter)
     pub fn split_horizontal(&mut self) {
-        let new_session_id = self.create_session();
-
-        if let Some(ref mut tree) = self.tiles
-            && let Some(root_id) = tree.root()
-        {
-            // Insert the new pane into the tiles
-            let new_pane_id = tree.tiles.insert_pane(new_session_id);
-
-            // Track the tile ID for this session
-            self.session_tile_ids.insert(new_session_id, new_pane_id);
-
-            // Create a horizontal container with the existing content and new pane
-            let container = egui_tiles::Linear::new(
-                egui_tiles::LinearDir::Horizontal,
-                vec![root_id, new_pane_id],
-            );
-            let container_id = tree.tiles.insert_container(container);
-
-            // Replace the root with the new container
-            *tree = Tree::new(
-                "terminal_tiles",
-                container_id,
-                std::mem::take(&mut tree.tiles),
-            );
-            log::info!(
-                "Split horizontal: created session {} in new pane {:?}",
-                new_session_id,
-                new_pane_id
-            );
-        }
+        self.split_active_pane(egui_tiles::LinearDir::Horizontal);
     }
 
-    /// Split the current pane vertically (new pane below).
+    /// Split the active pane vertically (new pane below).
+    ///
+    /// Uses a flatter tree structure by splitting the active pane rather than
+    /// wrapping the entire root. See `split_horizontal` for details.
     pub fn split_vertical(&mut self) {
+        self.split_active_pane(egui_tiles::LinearDir::Vertical);
+    }
+
+    /// Internal: Split the active pane in the specified direction.
+    ///
+    /// Creates a container holding [active_pane, new_pane] and replaces the
+    /// active pane in the tree with this container.
+    fn split_active_pane(&mut self, direction: egui_tiles::LinearDir) {
         let new_session_id = self.create_session();
 
-        if let Some(ref mut tree) = self.tiles
-            && let Some(root_id) = tree.root()
-        {
-            let new_pane_id = tree.tiles.insert_pane(new_session_id);
-
-            // Track the tile ID for this session
-            self.session_tile_ids.insert(new_session_id, new_pane_id);
-
-            // Create a vertical container
-            let container = egui_tiles::Linear::new(
-                egui_tiles::LinearDir::Vertical,
-                vec![root_id, new_pane_id],
+        // Get the active pane's tile ID
+        let Some(&active_tile_id) = self.session_tile_ids.get(&self.active_session_id) else {
+            log::warn!(
+                "Split failed: no tile found for active session {}",
+                self.active_session_id
             );
-            let container_id = tree.tiles.insert_container(container);
+            return;
+        };
 
+        let Some(ref mut tree) = self.tiles else {
+            return;
+        };
+
+        // Insert the new pane
+        let new_pane_id = tree.tiles.insert_pane(new_session_id);
+        self.session_tile_ids.insert(new_session_id, new_pane_id);
+
+        // Create container holding [active_pane, new_pane]
+        let container = egui_tiles::Linear::new(direction, vec![active_tile_id, new_pane_id]);
+        let container_id = tree.tiles.insert_container(container);
+
+        // Find parent of active pane and replace it with the container
+        if let Some(parent_id) = tree.tiles.parent_of(active_tile_id) {
+            // Replace active_tile_id with container_id in parent's children
+            if let Some(egui_tiles::Tile::Container(parent_container)) =
+                tree.tiles.get_mut(parent_id)
+            {
+                Self::replace_child_in_container(parent_container, active_tile_id, container_id);
+            }
+        } else {
+            // Active pane is root - make container the new root
             *tree = Tree::new(
                 "terminal_tiles",
                 container_id,
                 std::mem::take(&mut tree.tiles),
             );
-            log::info!(
-                "Split vertical: created session {} in new pane {:?}",
-                new_session_id,
-                new_pane_id
-            );
         }
+
+        let dir_name = match direction {
+            egui_tiles::LinearDir::Horizontal => "horizontal",
+            egui_tiles::LinearDir::Vertical => "vertical",
+        };
+        log::info!(
+            "Split {}: session {} in pane {:?}, container {:?}",
+            dir_name,
+            new_session_id,
+            new_pane_id,
+            container_id
+        );
+    }
+
+    /// Replace a child tile ID in a container's children list.
+    ///
+    /// Handles Linear and Tabs containers by directly modifying their
+    /// public `children` fields. Grid containers use `replace_at` method.
+    fn replace_child_in_container(
+        container: &mut egui_tiles::Container,
+        old_child: egui_tiles::TileId,
+        new_child: egui_tiles::TileId,
+    ) {
+        match container {
+            egui_tiles::Container::Linear(linear) => {
+                for child in &mut linear.children {
+                    if *child == old_child {
+                        *child = new_child;
+                        return;
+                    }
+                }
+            }
+            egui_tiles::Container::Tabs(tabs) => {
+                for child in &mut tabs.children {
+                    if *child == old_child {
+                        *child = new_child;
+                        return;
+                    }
+                }
+            }
+            egui_tiles::Container::Grid(grid) => {
+                // Grid doesn't expose children directly; find index then use replace_at
+                let idx = grid.children().position(|&c| c == old_child);
+                if let Some(idx) = idx {
+                    let _ = grid.replace_at(idx, new_child);
+                    return;
+                }
+            }
+        }
+        log::warn!(
+            "Failed to replace child {:?} with {:?} in container",
+            old_child,
+            new_child
+        );
     }
 }
 
