@@ -117,41 +117,54 @@ impl NamedColor {
     }
 }
 
-/// Convert 256-color index to egui Color32.
+use std::sync::OnceLock;
+
+/// Convert 256-color index to egui Color32 using a cached lookup table.
+/// PERFORMANCE: O(1) lookup after first initialization.
 fn indexed_to_egui(idx: u8) -> Color32 {
-    match idx {
-        // Standard colors (0-15)
-        0 => NamedColor::Black.to_egui(),
-        1 => NamedColor::Red.to_egui(),
-        2 => NamedColor::Green.to_egui(),
-        3 => NamedColor::Yellow.to_egui(),
-        4 => NamedColor::Blue.to_egui(),
-        5 => NamedColor::Magenta.to_egui(),
-        6 => NamedColor::Cyan.to_egui(),
-        7 => NamedColor::White.to_egui(),
-        8 => NamedColor::BrightBlack.to_egui(),
-        9 => NamedColor::BrightRed.to_egui(),
-        10 => NamedColor::BrightGreen.to_egui(),
-        11 => NamedColor::BrightYellow.to_egui(),
-        12 => NamedColor::BrightBlue.to_egui(),
-        13 => NamedColor::BrightMagenta.to_egui(),
-        14 => NamedColor::BrightCyan.to_egui(),
-        15 => NamedColor::BrightWhite.to_egui(),
+    static CELL_COLOR_TABLE: OnceLock<[Color32; 256]> = OnceLock::new();
+
+    let table = CELL_COLOR_TABLE.get_or_init(|| {
+        let mut t = [Color32::BLACK; 256];
+
+        // Standard colors (0-15) - map to NamedColors
+        t[0] = NamedColor::Black.to_egui();
+        t[1] = NamedColor::Red.to_egui();
+        t[2] = NamedColor::Green.to_egui();
+        t[3] = NamedColor::Yellow.to_egui();
+        t[4] = NamedColor::Blue.to_egui();
+        t[5] = NamedColor::Magenta.to_egui();
+        t[6] = NamedColor::Cyan.to_egui();
+        t[7] = NamedColor::White.to_egui();
+        t[8] = NamedColor::BrightBlack.to_egui();
+        t[9] = NamedColor::BrightRed.to_egui();
+        t[10] = NamedColor::BrightGreen.to_egui();
+        t[11] = NamedColor::BrightYellow.to_egui();
+        t[12] = NamedColor::BrightBlue.to_egui();
+        t[13] = NamedColor::BrightMagenta.to_egui();
+        t[14] = NamedColor::BrightCyan.to_egui();
+        t[15] = NamedColor::BrightWhite.to_egui();
+
         // 216 colors (6x6x6 cube): indices 16-231
-        16..=231 => {
-            let idx = idx - 16;
+        for i in 16..=231 {
+            let idx = i - 16;
             let r = (idx / 36) % 6;
             let g = (idx / 6) % 6;
             let b = idx % 6;
             let to_rgb = |v: u8| if v == 0 { 0 } else { 55 + v * 40 };
-            Color32::from_rgb(to_rgb(r), to_rgb(g), to_rgb(b))
+            t[i as usize] = Color32::from_rgb(to_rgb(r), to_rgb(g), to_rgb(b));
         }
+
         // Grayscale: indices 232-255
-        232..=255 => {
-            let gray = 8 + (idx - 232) * 10;
-            Color32::from_rgb(gray, gray, gray)
+        for i in 232..=255 {
+            let gray = 8 + (i - 232) * 10;
+            t[i as usize] = Color32::from_rgb(gray, gray, gray);
         }
-    }
+
+        t
+    });
+
+    table[idx as usize]
 }
 
 bitflags::bitflags! {
