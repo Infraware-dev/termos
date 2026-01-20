@@ -1253,6 +1253,8 @@ impl InfrawareApp {
 
         // Check for layout desync: if the grid is smaller than the available space,
         // we might need a reactive repaint to let the resize logic catch up.
+        // The 1-column tolerance (saturating_sub(1)) accounts for floating-point
+        // rounding differences between egui's available_size and our char_width calc.
         let expected_cols = (available.x / self.char_width).floor() as u16;
         let (_, current_cols) = session.terminal_handler.grid().size();
         if current_cols < expected_cols.saturating_sub(1) {

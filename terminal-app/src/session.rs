@@ -165,7 +165,9 @@ impl TerminalSession {
             terminal_egui_id: EguiId::new(("terminal_pane", id)),
             // Cached tab title (avoids format! allocation every frame)
             cached_title: format!("Terminal {}", id),
-            // Last resize time - start in the past to allow immediate first resize
+            // Initialize to 1 second ago to bypass debounce on first resize.
+            // This ensures the terminal can resize immediately after creation
+            // without waiting for RESIZE_DEBOUNCE (100ms) to elapse.
             last_resize: Instant::now() - std::time::Duration::from_secs(1),
         }
     }
@@ -205,12 +207,14 @@ impl TerminalSession {
     ///
     /// # Sync/Async Boundary
     /// - Grid resize is immediate (sync)
-    /// - PTY resize is spawned as async task
+    /// - PTY resize is spawned as async task (best-effort, may fail silently)
     ///
     /// # Debouncing
     /// Small changes (≤1 row/col) are debounced. Large changes bypass debounce.
     ///
-    /// Returns true if resize was performed, false if debounced or unchanged.
+    /// # Returns
+    /// `true` if grid was resized, `false` if debounced or unchanged.
+    /// Note: Returns `true` even if PTY is unavailable (grid-only resize).
     pub fn resize_pty(&mut self, cols: u16, rows: u16, runtime_handle: &Handle) -> bool {
         let (grid_rows, grid_cols) = self.terminal_handler.grid().size();
 
@@ -256,7 +260,7 @@ impl TerminalSession {
         // Resize terminal handler (immediate, sync)
         self.terminal_handler.resize(rows, cols);
 
-        // Resize PTY (async)
+        // Resize PTY (async) - spawned task, may complete after this returns
         if let Some(ref manager) = self.pty_manager {
             let manager = manager.clone();
             runtime_handle.spawn(async move {
@@ -265,9 +269,12 @@ impl TerminalSession {
                     log::error!("Failed to resize PTY: {}", e);
                 }
             });
+        } else {
+            // Grid was resized but PTY is unavailable (likely failed to initialize)
+            log::warn!("Session {}: PTY unavailable, only grid resized", self.id);
         }
 
-        true
+        true // Grid resize always succeeds; PTY resize is best-effort async
     }
 
     /// Poll PTY output and feed to VTE parser.
