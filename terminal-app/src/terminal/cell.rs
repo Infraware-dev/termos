@@ -84,30 +84,36 @@ impl Color {
     }
 }
 
+/// PERFORMANCE: Static lookup table for named colors.
+/// Array index matches enum discriminant for O(1) lookup instead of match.
+static NAMED_COLOR_TABLE: [Color32; 18] = [
+    Color32::from_rgb(0, 0, 0),       // Black
+    Color32::from_rgb(204, 0, 0),     // Red
+    Color32::from_rgb(78, 154, 6),    // Green
+    Color32::from_rgb(196, 160, 0),   // Yellow
+    Color32::from_rgb(52, 101, 164),  // Blue
+    Color32::from_rgb(117, 80, 123),  // Magenta
+    Color32::from_rgb(6, 152, 154),   // Cyan
+    Color32::from_rgb(211, 215, 207), // White
+    Color32::from_rgb(85, 87, 83),    // BrightBlack
+    Color32::from_rgb(239, 41, 41),   // BrightRed
+    Color32::from_rgb(138, 226, 52),  // BrightGreen
+    Color32::from_rgb(252, 233, 79),  // BrightYellow
+    Color32::from_rgb(114, 159, 207), // BrightBlue
+    Color32::from_rgb(173, 127, 168), // BrightMagenta
+    Color32::from_rgb(52, 226, 226),  // BrightCyan
+    Color32::from_rgb(238, 238, 236), // BrightWhite
+    Color32::from_rgb(211, 215, 207), // Foreground
+    Color32::from_rgb(0, 0, 0),       // Background
+];
+
 impl NamedColor {
     /// Convert to egui Color32 with typical terminal theme.
+    /// PERFORMANCE: Uses static lookup table for O(1) access.
+    #[inline]
     #[must_use]
     pub fn to_egui(self) -> Color32 {
-        match self {
-            Self::Black => Color32::from_rgb(0, 0, 0),
-            Self::Red => Color32::from_rgb(204, 0, 0),
-            Self::Green => Color32::from_rgb(78, 154, 6),
-            Self::Yellow => Color32::from_rgb(196, 160, 0),
-            Self::Blue => Color32::from_rgb(52, 101, 164),
-            Self::Magenta => Color32::from_rgb(117, 80, 123),
-            Self::Cyan => Color32::from_rgb(6, 152, 154),
-            Self::White => Color32::from_rgb(211, 215, 207),
-            Self::BrightBlack => Color32::from_rgb(85, 87, 83),
-            Self::BrightRed => Color32::from_rgb(239, 41, 41),
-            Self::BrightGreen => Color32::from_rgb(138, 226, 52),
-            Self::BrightYellow => Color32::from_rgb(252, 233, 79),
-            Self::BrightBlue => Color32::from_rgb(114, 159, 207),
-            Self::BrightMagenta => Color32::from_rgb(173, 127, 168),
-            Self::BrightCyan => Color32::from_rgb(52, 226, 226),
-            Self::BrightWhite => Color32::from_rgb(238, 238, 236),
-            Self::Foreground => Color32::from_rgb(211, 215, 207),
-            Self::Background => Color32::from_rgb(0, 0, 0),
-        }
+        NAMED_COLOR_TABLE[self as usize]
     }
 }
 
@@ -148,23 +154,100 @@ fn indexed_to_egui(idx: u8) -> Color32 {
     }
 }
 
-/// Cell attributes (bold, italic, underline, etc.).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct CellAttrs {
-    pub bold: bool,
-    pub italic: bool,
-    pub underline: bool,
-    pub strikethrough: bool,
-    pub dim: bool,
-    pub reverse: bool,
-    pub hidden: bool,
-    pub blink: bool,
+bitflags::bitflags! {
+    /// Cell attributes packed into a single byte for better cache locality.
+    ///
+    /// PERFORMANCE: Reduces Cell size from ~16 bytes to ~9 bytes.
+    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+    pub struct CellAttrs: u8 {
+        const BOLD          = 0b0000_0001;
+        const ITALIC        = 0b0000_0010;
+        const UNDERLINE     = 0b0000_0100;
+        const STRIKETHROUGH = 0b0000_1000;
+        const DIM           = 0b0001_0000;
+        const REVERSE       = 0b0010_0000;
+        const HIDDEN        = 0b0100_0000;
+        const BLINK         = 0b1000_0000;
+    }
 }
 
 impl CellAttrs {
     /// Reset all attributes.
+    #[inline]
     pub fn reset(&mut self) {
-        *self = Self::default();
+        *self = Self::empty();
+    }
+
+    // Getter methods (replaces field access)
+    #[inline]
+    #[expect(dead_code, reason = "API completeness")]
+    pub fn bold(&self) -> bool {
+        self.contains(Self::BOLD)
+    }
+    #[inline]
+    #[expect(dead_code, reason = "API completeness")]
+    pub fn italic(&self) -> bool {
+        self.contains(Self::ITALIC)
+    }
+    #[inline]
+    pub fn underline(&self) -> bool {
+        self.contains(Self::UNDERLINE)
+    }
+    #[inline]
+    pub fn strikethrough(&self) -> bool {
+        self.contains(Self::STRIKETHROUGH)
+    }
+    #[inline]
+    pub fn dim(&self) -> bool {
+        self.contains(Self::DIM)
+    }
+    #[inline]
+    pub fn reverse(&self) -> bool {
+        self.contains(Self::REVERSE)
+    }
+    #[inline]
+    pub fn hidden(&self) -> bool {
+        self.contains(Self::HIDDEN)
+    }
+    #[inline]
+    #[expect(dead_code, reason = "API completeness")]
+    pub fn blink(&self) -> bool {
+        self.contains(Self::BLINK)
+    }
+
+    // Setter methods (replaces field assignment)
+    #[inline]
+    pub fn set_bold(&mut self, on: bool) {
+        self.set(Self::BOLD, on);
+    }
+    #[inline]
+    pub fn set_italic(&mut self, on: bool) {
+        self.set(Self::ITALIC, on);
+    }
+    #[inline]
+    pub fn set_underline(&mut self, on: bool) {
+        self.set(Self::UNDERLINE, on);
+    }
+    #[inline]
+    pub fn set_strikethrough(&mut self, on: bool) {
+        self.set(Self::STRIKETHROUGH, on);
+    }
+    #[inline]
+    pub fn set_dim(&mut self, on: bool) {
+        self.set(Self::DIM, on);
+    }
+    #[inline]
+    pub fn set_reverse(&mut self, on: bool) {
+        self.set(Self::REVERSE, on);
+    }
+    #[inline]
+    pub fn set_hidden(&mut self, on: bool) {
+        self.set(Self::HIDDEN, on);
+    }
+    #[inline]
+    #[expect(dead_code, reason = "API completeness")]
+    pub fn set_blink(&mut self, on: bool) {
+        self.set(Self::BLINK, on);
     }
 }
 

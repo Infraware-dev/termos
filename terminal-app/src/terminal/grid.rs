@@ -111,8 +111,9 @@ impl TerminalGrid {
 
     /// Create empty grid filled with default cells.
     fn create_empty_grid(rows: u16, cols: u16) -> Vec<Vec<Cell>> {
+        let cols_usize = cols as usize;
         (0..rows)
-            .map(|_| (0..cols).map(|_| Cell::default()).collect())
+            .map(|_| vec![Cell::default(); cols_usize])
             .collect()
     }
 
@@ -255,6 +256,9 @@ impl TerminalGrid {
 
     /// Get a single visible row by index (for zero-allocation iteration).
     /// Index 0 is the topmost visible row.
+    ///
+    /// NOTE: For iterating all visible rows, prefer `visible_rows_iter()` which
+    /// calculates bounds once instead of on every call.
     #[inline]
     #[must_use]
     pub fn visible_row(&self, visible_idx: usize) -> Option<&[Cell]> {
@@ -273,6 +277,26 @@ impl TerminalGrid {
         } else {
             let logical_idx = absolute_idx - self.scrollback.len();
             self.row(logical_idx).map(|r| r.as_slice())
+        }
+    }
+
+    /// Create an iterator over visible rows (zero-allocation, calculates bounds once).
+    ///
+    /// This is more efficient than calling `visible_row(idx)` in a loop because
+    /// it calculates `start`, `end`, and `scrollback.len()` only once.
+    #[inline]
+    #[must_use]
+    pub fn visible_rows_iter(&self) -> VisibleRowsIter<'_> {
+        let total = self.scrollback.len() + self.cells.len();
+        let visible_count = self.rows as usize;
+        let end = total.saturating_sub(self.scroll_offset);
+        let start = end.saturating_sub(visible_count);
+
+        VisibleRowsIter {
+            grid: self,
+            end,
+            scrollback_len: self.scrollback.len(),
+            current: start,
         }
     }
 
@@ -445,11 +469,12 @@ impl TerminalGrid {
             if is_full_screen {
                 // O(1) ring buffer rotation for full-screen scroll
                 let physical_top = self.cells_offset;
-                let cols = self.cols;
+                let cols = self.cols as usize;
 
                 // Move top line to scrollback
-                let empty_row: Vec<Cell> = (0..cols).map(|_| Cell::default()).collect();
-                let top_row = std::mem::replace(&mut self.cells[physical_top], empty_row);
+                // PERFORMANCE: vec![...; n] is faster than iterator-based allocation
+                let top_row =
+                    std::mem::replace(&mut self.cells[physical_top], vec![Cell::default(); cols]);
                 self.scrollback.push_back(top_row);
 
                 // Trim scrollback if too large - O(1) with VecDeque
@@ -525,7 +550,7 @@ impl TerminalGrid {
     /// Create an empty row with default cells.
     #[inline]
     fn create_empty_row(&self) -> Vec<Cell> {
-        (0..self.cols).map(|_| Cell::default()).collect()
+        vec![Cell::default(); self.cols as usize]
     }
 
     /// Set scroll region (1-indexed).
@@ -729,37 +754,37 @@ impl TerminalGrid {
 
     /// Set bold attribute.
     pub fn set_bold(&mut self, on: bool) {
-        self.current_attrs.bold = on;
+        self.current_attrs.set_bold(on);
     }
 
     /// Set italic attribute.
     pub fn set_italic(&mut self, on: bool) {
-        self.current_attrs.italic = on;
+        self.current_attrs.set_italic(on);
     }
 
     /// Set underline attribute.
     pub fn set_underline(&mut self, on: bool) {
-        self.current_attrs.underline = on;
+        self.current_attrs.set_underline(on);
     }
 
     /// Set dim attribute.
     pub fn set_dim(&mut self, on: bool) {
-        self.current_attrs.dim = on;
+        self.current_attrs.set_dim(on);
     }
 
     /// Set reverse attribute.
     pub fn set_reverse(&mut self, on: bool) {
-        self.current_attrs.reverse = on;
+        self.current_attrs.set_reverse(on);
     }
 
     /// Set hidden attribute.
     pub fn set_hidden(&mut self, on: bool) {
-        self.current_attrs.hidden = on;
+        self.current_attrs.set_hidden(on);
     }
 
     /// Set strikethrough attribute.
     pub fn set_strikethrough(&mut self, on: bool) {
-        self.current_attrs.strikethrough = on;
+        self.current_attrs.set_strikethrough(on);
     }
 
     /// Set foreground color.
@@ -871,14 +896,17 @@ impl TerminalGrid {
         end_col: usize,
     ) -> String {
         let mut result = String::new();
-        let visible = self.visible_rows();
+        // PERFORMANCE: Use visible_row() instead of visible_rows() to avoid Vec allocation
+        let visible_count = self.visible_row_count();
 
         for row_idx in start_row..=end_row {
-            if row_idx >= visible.len() {
+            if row_idx >= visible_count {
                 break;
             }
 
-            let row = visible[row_idx];
+            let Some(row) = self.visible_row(row_idx) else {
+                continue;
+            };
             let (col_start, col_end) = if start_row == end_row {
                 // Single line selection
                 (start_col, end_col)
@@ -975,6 +1003,47 @@ impl TerminalGrid {
         }
     }
 }
+
+/// Iterator over visible rows that caches bounds calculation.
+///
+/// More efficient than calling `visible_row(idx)` in a loop because bounds
+/// are calculated only once during iterator creation.
+#[derive(Debug)]
+pub struct VisibleRowsIter<'a> {
+    grid: &'a TerminalGrid,
+    end: usize,
+    scrollback_len: usize,
+    current: usize,
+}
+
+impl<'a> Iterator for VisibleRowsIter<'a> {
+    type Item = &'a [Cell];
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.current >= self.end {
+            return None;
+        }
+
+        let absolute_idx = self.current;
+        self.current += 1;
+
+        if absolute_idx < self.scrollback_len {
+            Some(self.grid.scrollback[absolute_idx].as_slice())
+        } else {
+            let logical_idx = absolute_idx - self.scrollback_len;
+            self.grid.row(logical_idx).map(|r| r.as_slice())
+        }
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = self.end.saturating_sub(self.current);
+        (remaining, Some(remaining))
+    }
+}
+
+impl ExactSizeIterator for VisibleRowsIter<'_> {}
 
 #[cfg(test)]
 mod tests {

@@ -20,6 +20,7 @@ use crate::ui::{
 };
 use egui::{Color32, FontFamily, FontId, Pos2, Rect, Sense, Vec2, ViewportCommand};
 use egui_tiles::{Tiles, Tree, UiResponse};
+use smallvec::SmallVec;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::mpsc;
@@ -399,11 +400,12 @@ impl InfrawareApp {
     /// Returns true if any output was processed (for smart repaint).
     fn poll_all_sessions(&mut self) -> bool {
         let mut any_output = false;
-        let mut sessions_to_close = Vec::new();
-        let mut completed_commands: Vec<(SessionId, String, String)> = Vec::new();
+        // PERFORMANCE: SmallVec avoids heap allocation for common cases
+        let mut sessions_to_close: SmallVec<[SessionId; 2]> = SmallVec::new();
+        let mut completed_commands: SmallVec<[(SessionId, String, String); 1]> = SmallVec::new();
 
         // Collect session IDs first to avoid borrow conflicts
-        let session_ids: Vec<SessionId> = self.sessions.keys().copied().collect();
+        let session_ids: SmallVec<[SessionId; 4]> = self.sessions.keys().copied().collect();
 
         for session_id in session_ids {
             let session = match self.sessions.get_mut(&session_id) {
@@ -1213,7 +1215,7 @@ impl InfrawareApp {
 
         // Extract immutable data from session (avoids repeated HashMap lookups)
         let terminal_id = session.terminal_egui_id;
-        let column_x_coords = session.column_x_coords.clone(); // Clone once, use many times
+        // NOTE: column_x_coords is accessed via reference in Phase 5 (no clone needed)
         let show_throbber = session.should_show_throbber();
         let shell_initialized = session.shell_initialized;
 
@@ -1309,6 +1311,8 @@ impl InfrawareApp {
             None => return,
         };
         let grid = session.terminal_handler.grid();
+        // PERFORMANCE: Use reference instead of clone (saves ~320 bytes/frame)
+        let column_x_coords: &[f32] = &session.column_x_coords;
 
         // Fill background once
         painter.rect_filled(rect, 0.0, self.theme.background);
@@ -1324,11 +1328,8 @@ impl InfrawareApp {
         let theme_selection = self.theme.selection;
 
         // === PHASE 5: Row-by-row rendering (zero-allocation iteration) ===
-        for row_idx in 0..visible_row_count {
-            let Some(row) = grid.visible_row(row_idx) else {
-                continue;
-            };
-
+        // PERFORMANCE: visible_rows_iter() calculates bounds once instead of per-row
+        for (row_idx, row) in grid.visible_rows_iter().enumerate() {
             let y = rect.top() + row_idx as f32 * char_height;
 
             // Clear buffers (O(1) - reuses capacity)
@@ -1372,7 +1373,7 @@ impl InfrawareApp {
                 // --- Background batching ---
                 let bg = if is_selected {
                     theme_selection
-                } else if cell.attrs.reverse {
+                } else if cell.attrs.reverse() {
                     self.color_to_egui(cell.fg)
                 } else {
                     self.color_to_egui(cell.bg)
@@ -1384,7 +1385,7 @@ impl InfrawareApp {
                         Some((start, color)) => {
                             let width = (col_idx - start) as f32 * char_width;
                             self.render_bg_rects.push((
-                                col_x(start, &column_x_coords, char_width),
+                                col_x(start, column_x_coords, char_width),
                                 width,
                                 color,
                             ));
@@ -1397,32 +1398,32 @@ impl InfrawareApp {
                 } else if let Some((start, color)) = bg_start.take() {
                     let width = (col_idx - start) as f32 * char_width;
                     self.render_bg_rects.push((
-                        col_x(start, &column_x_coords, char_width),
+                        col_x(start, column_x_coords, char_width),
                         width,
                         color,
                     ));
                 }
 
                 // --- Text batching (using shared buffer) ---
-                if cell.ch == ' ' || cell.attrs.hidden {
+                if cell.ch == ' ' || cell.attrs.hidden() {
                     if let Some((start, color)) = run_start.take() {
                         let end_idx = self.render_text_buffer.len();
                         if end_idx > 0 {
                             self.render_text_runs.push((
-                                col_x(start, &column_x_coords, char_width),
+                                col_x(start, column_x_coords, char_width),
                                 end_idx,
                                 color,
                             ));
                         }
                     }
                 } else {
-                    let mut fg = if cell.attrs.reverse {
+                    let mut fg = if cell.attrs.reverse() {
                         self.color_to_egui(cell.bg)
                     } else {
                         self.color_to_egui(cell.fg)
                     };
 
-                    if cell.attrs.dim {
+                    if cell.attrs.dim() {
                         fg = Color32::from_rgba_unmultiplied(fg.r(), fg.g(), fg.b(), 128);
                     }
 
@@ -1434,7 +1435,7 @@ impl InfrawareApp {
                             let end_idx = self.render_text_buffer.len();
                             if end_idx > 0 {
                                 self.render_text_runs.push((
-                                    col_x(start, &column_x_coords, char_width),
+                                    col_x(start, column_x_coords, char_width),
                                     end_idx,
                                     color,
                                 ));
@@ -1450,16 +1451,16 @@ impl InfrawareApp {
                 }
 
                 // --- Decorations ---
-                if cell.attrs.underline || cell.attrs.strikethrough {
-                    let fg = if cell.attrs.reverse {
+                if cell.attrs.underline() || cell.attrs.strikethrough() {
+                    let fg = if cell.attrs.reverse() {
                         self.color_to_egui(cell.bg)
                     } else {
                         self.color_to_egui(cell.fg)
                     };
                     self.render_decorations.push((
-                        col_x(col_idx, &column_x_coords, char_width),
-                        cell.attrs.underline,
-                        cell.attrs.strikethrough,
+                        col_x(col_idx, column_x_coords, char_width),
+                        cell.attrs.underline(),
+                        cell.attrs.strikethrough(),
                         fg,
                     ));
                 }
@@ -1469,7 +1470,7 @@ impl InfrawareApp {
             if let Some((start, color)) = bg_start {
                 let width = (row_len - start) as f32 * char_width;
                 self.render_bg_rects.push((
-                    col_x(start, &column_x_coords, char_width),
+                    col_x(start, column_x_coords, char_width),
                     width,
                     color,
                 ));
@@ -1482,7 +1483,7 @@ impl InfrawareApp {
                     && end_idx > 0
                 {
                     self.render_text_runs.push((
-                        col_x(start, &column_x_coords, char_width),
+                        col_x(start, column_x_coords, char_width),
                         end_idx,
                         color,
                     ));
@@ -1623,7 +1624,12 @@ struct TerminalBehavior<'a> {
 
 impl egui_tiles::Behavior<SessionId> for TerminalBehavior<'_> {
     fn tab_title_for_pane(&mut self, pane: &SessionId) -> egui::WidgetText {
-        format!("Terminal {}", pane).into()
+        // PERFORMANCE: Use cached title from session to avoid format! allocation
+        if let Some(session) = self.app.sessions.get(pane) {
+            session.cached_title.as_str().into()
+        } else {
+            format!("Terminal {}", pane).into()
+        }
     }
 
     fn pane_ui(
@@ -1734,7 +1740,7 @@ impl eframe::App for InfrawareApp {
         let pty_had_data = self.poll_all_sessions();
 
         // Initialize shells for all sessions
-        let session_ids: Vec<SessionId> = self.sessions.keys().copied().collect();
+        let session_ids: SmallVec<[SessionId; 4]> = self.sessions.keys().copied().collect();
         for session_id in session_ids {
             self.initialize_shell(session_id);
         }

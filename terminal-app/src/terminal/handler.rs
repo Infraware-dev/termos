@@ -3,6 +3,7 @@
 use super::cell::Color;
 use super::grid::TerminalGrid;
 use log::debug;
+use smallvec::SmallVec;
 
 /// Terminal handler that implements vte::Perform to process escape sequences.
 #[derive(Debug)]
@@ -222,7 +223,8 @@ impl vte::Perform for TerminalHandler {
         action: char,
     ) {
         // Convert params to a more convenient format
-        let params: Vec<&[u16]> = params.iter().collect();
+        // PERFORMANCE: SmallVec avoids heap allocation (most CSI sequences have <8 params)
+        let params: SmallVec<[&[u16]; 8]> = params.iter().collect();
 
         // Helper to get a parameter with a default value
         let param = |idx: usize, default: u16| -> u16 {

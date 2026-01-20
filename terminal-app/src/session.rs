@@ -87,6 +87,9 @@ pub struct TerminalSession {
     /// Cached egui Id for this terminal pane (avoids format! every frame)
     pub terminal_egui_id: EguiId,
 
+    /// Cached tab title (avoids format! allocation every frame)
+    pub cached_title: String,
+
     /// Last resize time for debouncing (per-session to avoid blocking other sessions)
     pub last_resize: Instant,
 }
@@ -160,6 +163,8 @@ impl TerminalSession {
                 .collect(),
             // Cached egui Id (avoids format! allocation every frame)
             terminal_egui_id: EguiId::new(("terminal_pane", id)),
+            // Cached tab title (avoids format! allocation every frame)
+            cached_title: format!("Terminal {}", id),
             // Last resize time - start in the past to allow immediate first resize
             last_resize: Instant::now() - std::time::Duration::from_secs(1),
         }
