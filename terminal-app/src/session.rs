@@ -8,7 +8,7 @@
 //! Multiple sessions can run concurrently in split view.
 
 use crate::config::{pty as pty_config, rendering, size};
-use crate::input::{OutputCapture, PromptDetector};
+use crate::input::{OutputCapture, PromptDetector, TextSelection};
 use crate::pty::{PtyManager, PtyReader, PtyWrite, PtyWriter};
 use crate::state::{AgentState, AppMode};
 use crate::terminal::TerminalHandler;
@@ -92,6 +92,9 @@ pub struct TerminalSession {
 
     /// Last resize time for debouncing (per-session to avoid blocking other sessions)
     pub last_resize: Instant,
+
+    /// Current text selection for this session (None if no selection active)
+    pub selection: Option<TextSelection>,
 }
 
 impl std::fmt::Debug for TerminalSession {
@@ -169,6 +172,7 @@ impl TerminalSession {
             // This ensures the terminal can resize immediately after creation
             // without waiting for RESIZE_DEBOUNCE (100ms) to elapse.
             last_resize: Instant::now() - std::time::Duration::from_secs(1),
+            selection: None,
         }
     }
 

@@ -126,10 +126,6 @@ pub struct InfrawareApp {
     /// Decorations buffer (reused each frame with .clear())
     render_decorations: Vec<(f32, bool, bool, egui::Color32)>,
 
-    // === Text Selection ===
-    /// Current text selection (None if no selection active)
-    selection: Option<TextSelection>,
-
     // === Clipboard (arboard for direct OS access) ===
     /// Clipboard instance for immediate copy operations (bypasses egui's delayed sync)
     clipboard: Option<arboard::Clipboard>,
@@ -281,8 +277,6 @@ impl InfrawareApp {
             render_text_runs: Vec::with_capacity(32),
             render_text_buffer: String::with_capacity(256),
             render_decorations: Vec::with_capacity(8),
-            // Text selection (initialized on first drag)
-            selection: None,
             // Clipboard (kept alive for immediate OS access)
             clipboard,
             // Scrollbar logic
@@ -1093,71 +1087,65 @@ impl InfrawareApp {
         (row.min(max_row), col.min(max_col))
     }
 
-    /// Check if a cell is within the current selection.
-    #[allow(dead_code)]
-    fn is_cell_selected(&self, row: usize, col: usize) -> bool {
-        self.selection
-            .as_ref()
-            .is_some_and(|sel| sel.contains(row, col))
-    }
-
-    /// Copy selected text to clipboard using arboard for immediate OS access.
+    /// Copy selected text from active session to clipboard using arboard.
     fn copy_selection_to_clipboard(&mut self, ctx: &egui::Context) {
+        let Some(session) = self.sessions.get(&self.active_session_id) else {
+            log::info!("No active session for copy");
+            return;
+        };
+
         log::info!(
             "copy_selection_to_clipboard called, selection: {:?}",
-            self.selection
+            session.selection
         );
 
-        if let Some(ref sel) = self.selection {
-            if sel.is_empty() {
-                log::info!("Selection is empty, nothing to copy");
-                return;
-            }
-
-            let (start, end) = sel.normalized();
-            log::info!(
-                "Extracting text from ({},{}) to ({},{})",
-                start.row,
-                start.col,
-                end.row,
-                end.col
-            );
-
-            let text = if let Some(session) = self.active_session() {
-                session
-                    .terminal_handler
-                    .grid()
-                    .extract_selection_text(start.row, start.col, end.row, end.col)
-            } else {
-                return;
-            };
-
-            log::info!("Extracted text: '{}' ({} chars)", text, text.len());
-
-            if !text.is_empty() {
-                // Use arboard for immediate OS clipboard write (bypasses egui's delayed sync)
-                if let Some(ref mut cb) = self.clipboard {
-                    match cb.set_text(&text) {
-                        Ok(()) => {
-                            log::info!(
-                                "Text copied to OS clipboard via arboard ({} chars)",
-                                text.len()
-                            );
-                        }
-                        Err(e) => {
-                            log::error!("Arboard copy error: {}", e);
-                            // Fallback to egui if arboard fails
-                            ctx.copy_text(text);
-                        }
-                    }
-                } else {
-                    // Fallback to egui if arboard init failed
-                    log::warn!("Arboard not available, using egui fallback");
-                    ctx.copy_text(text);
-                }
-            }
-        } else {
+        let Some(ref sel) = session.selection else {
             log::info!("No selection exists");
+            return;
+        };
+
+        if sel.is_empty() {
+            log::info!("Selection is empty, nothing to copy");
+            return;
+        }
+
+        let (start, end) = sel.normalized();
+        log::info!(
+            "Extracting text from ({},{}) to ({},{})",
+            start.row,
+            start.col,
+            end.row,
+            end.col
+        );
+
+        let text = session
+            .terminal_handler
+            .grid()
+            .extract_selection_text(start.row, start.col, end.row, end.col);
+
+        log::info!("Extracted text: '{}' ({} chars)", text, text.len());
+
+        if !text.is_empty() {
+            // Use arboard for immediate OS clipboard write (bypasses egui's delayed sync)
+            if let Some(ref mut cb) = self.clipboard {
+                match cb.set_text(&text) {
+                    Ok(()) => {
+                        log::info!(
+                            "Text copied to OS clipboard via arboard ({} chars)",
+                            text.len()
+                        );
+                    }
+                    Err(e) => {
+                        log::error!("Arboard copy error: {}", e);
+                        // Fallback to egui if arboard fails
+                        ctx.copy_text(text);
+                    }
+                }
+            } else {
+                // Fallback to egui if arboard init failed
+                log::warn!("Arboard not available, using egui fallback");
+                ctx.copy_text(text);
+            }
         }
     }
 
@@ -1272,32 +1260,49 @@ impl InfrawareApp {
         {
             ui.memory_mut(|mem| mem.request_focus(terminal_id));
             self.active_session_id = session_id;
-            self.selection = None;
+            // Clear selection on this session
+            if let Some(session) = self.sessions.get_mut(&session_id) {
+                session.selection = None;
+            }
         }
 
-        // Handle mouse drag for text selection (re-get session for screen_to_grid)
+        // Handle mouse drag for text selection (per-session selection)
         if response.drag_started()
             && let Some(pos) = response.interact_pointer_pos()
             && !scrollbar_area.contains(pos)
-            && let Some(session) = self.sessions.get(&session_id)
         {
-            let (row, col) = self.screen_to_grid(pos, rect, session);
-            self.selection = Some(TextSelection::new(row, col));
+            // Calculate grid position first (immutable borrow), then update selection (mutable)
+            let grid_pos = self
+                .sessions
+                .get(&session_id)
+                .map(|s| self.screen_to_grid(pos, rect, s));
+            if let Some((row, col)) = grid_pos
+                && let Some(session) = self.sessions.get_mut(&session_id)
+            {
+                session.selection = Some(TextSelection::new(row, col));
+            }
         }
 
         if response.dragged()
             && let Some(pos) = response.interact_pointer_pos()
             && !self.scrollbar.is_dragging()
-            && let Some(session) = self.sessions.get(&session_id)
         {
-            let (row, col) = self.screen_to_grid(pos, rect, session);
-            if let Some(ref mut sel) = self.selection {
+            // Calculate grid position first (immutable borrow), then update selection (mutable)
+            let grid_pos = self
+                .sessions
+                .get(&session_id)
+                .map(|s| self.screen_to_grid(pos, rect, s));
+            if let Some((row, col)) = grid_pos
+                && let Some(session) = self.sessions.get_mut(&session_id)
+                && let Some(ref mut sel) = session.selection
+            {
                 sel.update_end(row, col);
             }
         }
 
         if response.drag_stopped()
-            && let Some(ref mut sel) = self.selection
+            && let Some(session) = self.sessions.get_mut(&session_id)
+            && let Some(ref mut sel) = session.selection
         {
             sel.active = false;
         }
@@ -1350,8 +1355,8 @@ impl InfrawareApp {
         // Fill background once
         painter.rect_filled(rect, 0.0, self.theme.background);
 
-        // PERFORMANCE: Pre-compute selection bounds once if selection exists
-        let selection_bounds = self.selection.as_ref().map(|sel| sel.normalized());
+        // PERFORMANCE: Pre-compute selection bounds once if selection exists (per-session)
+        let selection_bounds = session.selection.as_ref().map(|sel| sel.normalized());
 
         // Cache font_id reference
         let font_id = &self.font_id;
