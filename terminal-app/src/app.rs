@@ -1272,17 +1272,20 @@ impl InfrawareApp {
             sel.active = false;
         }
 
-        // Handle mouse wheel scrolling
-        let scroll_delta = ui.input(|i| i.smooth_scroll_delta.y);
-        if scroll_delta != 0.0
-            && let Some(session) = self.sessions.get_mut(&session_id)
-        {
-            let lines = (scroll_delta / self.char_height).round() as i32;
-            let grid = session.terminal_handler.grid_mut();
-            if lines > 0 {
-                grid.scroll_view_up(lines as usize);
-            } else if lines < 0 {
-                grid.scroll_view_down((-lines) as usize);
+        // Handle mouse wheel scrolling - ONLY if mouse is over THIS pane
+        // IMPORTANT: smooth_scroll_delta is global, so we must check hovered() first
+        if response.hovered() {
+            let scroll_delta = ui.input(|i| i.smooth_scroll_delta.y);
+            if scroll_delta != 0.0 {
+                if let Some(session) = self.sessions.get_mut(&session_id) {
+                    let lines = (scroll_delta / self.char_height).round() as i32;
+                    let grid = session.terminal_handler.grid_mut();
+                    if lines > 0 {
+                        grid.scroll_view_up(lines as usize);
+                    } else if lines < 0 {
+                        grid.scroll_view_down((-lines) as usize);
+                    }
+                }
             }
         }
 
