@@ -201,8 +201,16 @@ impl TerminalSession {
         }
     }
 
-    /// Resize PTY to match pane size.
-    /// Returns true if the resize was performed, false if debounced or no change needed.
+    /// Resize terminal grid and PTY to match pane size.
+    ///
+    /// # Sync/Async Boundary
+    /// - Grid resize is immediate (sync)
+    /// - PTY resize is spawned as async task
+    ///
+    /// # Debouncing
+    /// Small changes (≤1 row/col) are debounced. Large changes bypass debounce.
+    ///
+    /// Returns true if resize was performed, false if debounced or unchanged.
     pub fn resize_pty(&mut self, cols: u16, rows: u16, runtime_handle: &Handle) -> bool {
         let (grid_rows, grid_cols) = self.terminal_handler.grid().size();
 

@@ -86,6 +86,7 @@ impl Color {
 
 /// PERFORMANCE: Static lookup table for named colors.
 /// Array index matches enum discriminant for O(1) lookup instead of match.
+/// SAFETY: Compile-time assertions below verify enum discriminants match indices.
 static NAMED_COLOR_TABLE: [Color32; 18] = [
     Color32::from_rgb(0, 0, 0),       // Black
     Color32::from_rgb(204, 0, 0),     // Red
@@ -106,6 +107,26 @@ static NAMED_COLOR_TABLE: [Color32; 18] = [
     Color32::from_rgb(204, 204, 204), // Foreground (#cccccc)
     Color32::from_rgb(45, 45, 45),    // Background (#2d2d2d)
 ];
+
+// Compile-time assertions: enum discriminants must match array indices.
+const _: () = assert!(NamedColor::Black as usize == 0);
+const _: () = assert!(NamedColor::Red as usize == 1);
+const _: () = assert!(NamedColor::Green as usize == 2);
+const _: () = assert!(NamedColor::Yellow as usize == 3);
+const _: () = assert!(NamedColor::Blue as usize == 4);
+const _: () = assert!(NamedColor::Magenta as usize == 5);
+const _: () = assert!(NamedColor::Cyan as usize == 6);
+const _: () = assert!(NamedColor::White as usize == 7);
+const _: () = assert!(NamedColor::BrightBlack as usize == 8);
+const _: () = assert!(NamedColor::BrightRed as usize == 9);
+const _: () = assert!(NamedColor::BrightGreen as usize == 10);
+const _: () = assert!(NamedColor::BrightYellow as usize == 11);
+const _: () = assert!(NamedColor::BrightBlue as usize == 12);
+const _: () = assert!(NamedColor::BrightMagenta as usize == 13);
+const _: () = assert!(NamedColor::BrightCyan as usize == 14);
+const _: () = assert!(NamedColor::BrightWhite as usize == 15);
+const _: () = assert!(NamedColor::Foreground as usize == 16);
+const _: () = assert!(NamedColor::Background as usize == 17);
 
 impl NamedColor {
     /// Convert to egui Color32 with typical terminal theme.

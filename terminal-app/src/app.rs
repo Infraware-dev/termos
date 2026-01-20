@@ -1696,7 +1696,7 @@ impl egui_tiles::Behavior<SessionId> for TerminalBehavior<'_> {
     }
 
     fn gap_width(&self, _style: &egui::Style) -> f32 {
-        4.0 // Spessore aumentato per facilitare il drag
+        4.0 // Increased width for easier drag interaction
     }
 
     fn simplification_options(&self) -> egui_tiles::SimplificationOptions {
