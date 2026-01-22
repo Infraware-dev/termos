@@ -970,6 +970,25 @@ impl TerminalGrid {
             }
         }
 
+        // If expanding, fill empty top rows from scrollback (like Alacritty)
+        if new_rows > old_rows && !self.scrollback.is_empty() {
+            let empty_rows = dst_start;
+            let fill_count = empty_rows.min(self.scrollback.len());
+            let scrollback_start = self.scrollback.len() - fill_count;
+
+            // Pull from end of scrollback (most recent) to top of grid
+            for (i, new_row) in new_cells.iter_mut().take(fill_count).enumerate() {
+                if let Some(src_row) = self.scrollback.get(scrollback_start + i) {
+                    for (c, cell) in src_row.iter().enumerate().take(cols as usize) {
+                        new_row[c] = cell.clone();
+                    }
+                }
+            }
+
+            // Remove those lines from scrollback (they're now in grid)
+            self.scrollback.truncate(scrollback_start);
+        }
+
         // Adjust cursor to stay at same position relative to bottom
         let cursor_from_bottom = old_rows.saturating_sub(1).saturating_sub(self.cursor_row as usize);
         let new_cursor = new_rows.saturating_sub(1).saturating_sub(cursor_from_bottom.min(new_rows - 1));
