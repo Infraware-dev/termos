@@ -953,11 +953,27 @@ impl TerminalGrid {
             return;
         }
 
+        let old_rows = self.rows as usize;
+        let new_rows = rows as usize;
+
+        // If shrinking, save top rows to scrollback before discarding (like Alacritty)
+        if new_rows < old_rows {
+            let excess_rows = old_rows - new_rows;
+            for i in 0..excess_rows {
+                if let Some(src_row) = self.row(i) {
+                    let row_copy: Vec<Cell> = src_row.to_vec();
+                    self.scrollback.push_back(row_copy);
+                }
+            }
+            // Trim scrollback if too large
+            while self.scrollback.len() > MAX_SCROLLBACK {
+                self.scrollback.pop_front();
+            }
+        }
+
         let mut new_cells = Self::create_empty_grid(rows, cols);
 
         // Copy from bottom of old grid to bottom of new grid
-        let old_rows = self.rows as usize;
-        let new_rows = rows as usize;
         let copy_rows = old_rows.min(new_rows);
         let src_start = old_rows.saturating_sub(copy_rows);
         let dst_start = new_rows.saturating_sub(copy_rows);
