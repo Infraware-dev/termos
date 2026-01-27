@@ -17,8 +17,20 @@ mod terminal;
 mod ui;
 
 use app::InfrawareApp;
-use eframe::egui::ViewportBuilder;
+use eframe::egui::{IconData, ViewportBuilder};
 use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Load the application icon from embedded PNG.
+fn load_icon() -> Option<IconData> {
+    let icon_bytes = include_bytes!("../resources/logo-corner.png");
+    let image = image::load_from_memory(icon_bytes).ok()?.into_rgba8();
+    let (width, height) = image.dimensions();
+    Some(IconData {
+        rgba: image.into_raw(),
+        width,
+        height,
+    })
+}
 
 /// Global flag set when SIGINT (Ctrl+C) is received from the system
 pub static SIGINT_RECEIVED: AtomicBool = AtomicBool::new(false);
@@ -50,11 +62,18 @@ fn main() -> eframe::Result<()> {
     .expect("Error setting Ctrl+C handler");
 
     // Window options
+    let icon = load_icon();
+    let mut viewport = ViewportBuilder::default()
+        .with_title("Infraware Terminal")
+        .with_inner_size([800.0, 600.0])
+        .with_min_inner_size([400.0, 300.0]);
+
+    if let Some(icon_data) = icon {
+        viewport = viewport.with_icon(std::sync::Arc::new(icon_data));
+    }
+
     let options = eframe::NativeOptions {
-        viewport: ViewportBuilder::default()
-            .with_title("Infraware Terminal")
-            .with_inner_size([800.0, 600.0])
-            .with_min_inner_size([400.0, 300.0]),
+        viewport,
         ..Default::default()
     };
 

@@ -1881,6 +1881,7 @@ dependencies = [
  "env_logger",
  "futures",
  "hostname",
+ "image",
  "infraware-shared",
  "libc",
  "log",
