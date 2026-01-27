@@ -372,14 +372,14 @@ impl InfrawareApp {
 
         session.shell_initialized = true;
 
-        // Set custom prompt with |~| prefix (green)
+        // Set custom prompt with |~| prefix (#c6d0d6 = rgb 198,208,214)
         // Also inject command_not_found hooks to trigger LLM on error
         let init_commands = if std::env::var("SHELL").unwrap_or_default().contains("zsh") {
-            "export PROMPT='%F{green}|~| %n@%m:%~%# %f'\n\
+            "export PROMPT=$'%{\\e[38;2;198;208;214m%}|~| %n@%m:%~%# %{\\e[0m%}'\n\
              command_not_found_handler() { printf \"\\033]777;CommandNotFound;%s\\033\\\\\" \"$1\"; return 127; }\n\
              clear\n"
         } else {
-            "export PS1=$'\\[\\e[32m\\]|~| \\u@\\h:\\w\\$ \\[\\e[0m\\]'\n\
+            "export PS1=$'\\[\\e[38;2;198;208;214m\\]|~| \\u@\\h:\\w\\$ \\[\\e[0m\\]'\n\
              command_not_found_handle() { printf \"\\033]777;CommandNotFound;%s\\033\\\\\" \"$1\"; return 127; }\n\
              clear\n"
         };
@@ -1734,7 +1734,7 @@ impl egui_tiles::Behavior<SessionId> for TerminalBehavior<'_> {
         let session_id = *pane;
 
         // Use a Frame with outer_margin to create the visible gap (split separator)
-        // The gap reveals the CentralPanel background (Theme::split_separator/White)
+        // The gap reveals the CentralPanel background (Theme::split_separator)
         egui::Frame::NONE
             .outer_margin(2.0) // 2px margin per side = 4px total gap between panes
             .show(ui, |ui| {
@@ -1758,7 +1758,7 @@ impl egui_tiles::Behavior<SessionId> for TerminalBehavior<'_> {
     }
 
     fn gap_width(&self, _style: &egui::Style) -> f32 {
-        4.0 // Increased width for easier drag interaction
+        4.0 // 4px separator width
     }
 
     fn simplification_options(&self) -> egui_tiles::SimplificationOptions {

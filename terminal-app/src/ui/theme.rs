@@ -40,17 +40,17 @@ impl Theme {
     /// Dark theme matching the UI mockups.
     pub fn dark() -> Self {
         Self {
-            background: Color32::from_rgb(45, 45, 45),       // #2d2d2d
+            background: Color32::from_rgb(27, 27, 27),       // #1b1b1b
             text: Color32::from_rgb(204, 204, 204),          // #cccccc
-            prompt_prefix: Color32::from_rgb(204, 204, 204), // #cccccc (same as text)
-            prompt_path: Color32::from_rgb(152, 195, 121),   // #98c379 (green)
+            prompt_prefix: Color32::from_rgb(198, 208, 214), // #c6d0d6
+            prompt_path: Color32::from_rgb(198, 208, 214),   // #c6d0d6
             cursor: Color32::from_rgb(204, 204, 204),        // #cccccc
             selection: Color32::from_rgba_unmultiplied(97, 175, 239, 100), // #61afef with alpha
             llm_response: Color32::from_rgb(204, 204, 204),  // #cccccc
             error: Color32::from_rgb(224, 108, 117),         // #e06c75 (red)
-            titlebar_bg: Color32::from_rgb(37, 37, 38),      // #252526
+            titlebar_bg: Color32::from_rgb(27, 27, 27),      // #1b1b1b
             titlebar_text: Color32::from_rgb(204, 204, 204), // #cccccc
-            split_separator: Color32::WHITE,                 // White separator for high visibility
+            split_separator: Color32::from_rgb(97, 97, 97),  // #616161
         }
     }
 

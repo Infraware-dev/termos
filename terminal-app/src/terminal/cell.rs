@@ -105,7 +105,7 @@ static NAMED_COLOR_TABLE: [Color32; 18] = [
     Color32::from_rgb(52, 226, 226),  // BrightCyan
     Color32::from_rgb(238, 238, 236), // BrightWhite
     Color32::from_rgb(204, 204, 204), // Foreground (#cccccc)
-    Color32::from_rgb(45, 45, 45),    // Background (#2d2d2d)
+    Color32::from_rgb(27, 27, 27),    // Background (#1b1b1b)
 ];
 
 // Compile-time assertions: enum discriminants must match array indices.
