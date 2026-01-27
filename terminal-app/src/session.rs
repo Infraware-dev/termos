@@ -90,7 +90,6 @@ pub struct TerminalSession {
     /// Cached tab title (avoids format! allocation every frame)
     pub cached_title: String,
 
-
     /// Current text selection for this session (None if no selection active)
     pub selection: Option<TextSelection>,
 }

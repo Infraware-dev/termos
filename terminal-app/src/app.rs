@@ -146,6 +146,15 @@ pub struct InfrawareApp {
 
     /// Mapping from SessionId to TileId for pane removal
     session_tile_ids: HashMap<SessionId, egui_tiles::TileId>,
+
+    /// Session that needs focus in the next frame (after tab creation)
+    pending_focus_session: Option<SessionId>,
+
+    /// Tab tile that should be activated in the next frame
+    pending_active_tab: Option<egui_tiles::TileId>,
+
+    /// Cached logo texture for tab icons
+    logo_texture: Option<egui::TextureHandle>,
 }
 
 impl std::fmt::Debug for InfrawareApp {
@@ -159,9 +168,32 @@ impl std::fmt::Debug for InfrawareApp {
 
 impl InfrawareApp {
     /// Create a new application instance.
-    pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let runtime = Runtime::new().expect("Failed to create tokio runtime");
         let theme = Theme::dark();
+
+        // Load logo texture
+        let logo_texture = {
+            let image_data = include_bytes!("../resources/logo-corner.png");
+            match image::load_from_memory(image_data) {
+                Ok(image) => {
+                    let size = [image.width() as usize, image.height() as usize];
+                    let image_buffer = image.to_rgba8();
+                    let pixels = image_buffer.as_flat_samples();
+                    let color_image =
+                        egui::ColorImage::from_rgba_unmultiplied(size, pixels.as_slice());
+                    Some(cc.egui_ctx.load_texture(
+                        "logo-corner",
+                        color_image,
+                        egui::TextureOptions::LINEAR,
+                    ))
+                }
+                Err(e) => {
+                    log::warn!("Failed to load logo-corner.png: {}", e);
+                    None
+                }
+            }
+        };
 
         // Create initial session
         let initial_session_id: SessionId = 0;
@@ -292,6 +324,11 @@ impl InfrawareApp {
             tiles: Some(tree),
             // Session to TileId mapping (for pane removal)
             session_tile_ids,
+            // No pending focus initially
+            pending_focus_session: None,
+            // No pending tab activation initially
+            pending_active_tab: None,
+            logo_texture,
         }
     }
 
@@ -318,39 +355,103 @@ impl InfrawareApp {
     }
 
     /// Close a session by ID.
+    ///
+    /// When closing a tab:
+    /// - Activates the tab to the left (or first remaining if closing leftmost)
+    /// - If only one tab remains, unwraps it from Tabs container (returns to single pane view)
     fn close_session(&mut self, session_id: SessionId) {
-        if self.sessions.remove(&session_id).is_some() {
-            log::info!("Closed session {}", session_id);
+        if self.sessions.remove(&session_id).is_none() {
+            return;
+        }
 
-            // Remove the pane from egui_tiles using remove_recursively
-            // IMPORTANT: tree.tiles.remove() only removes from storage but leaves
-            // dangling references in the tree structure. remove_recursively() properly
-            // cleans up parent-child relationships.
-            if let Some(tile_id) = self.session_tile_ids.remove(&session_id)
-                && let Some(ref mut tree) = self.tiles
-            {
-                tree.remove_recursively(tile_id);
-                log::debug!("Removed tile {:?} for session {}", tile_id, session_id);
+        log::info!("Closed session {}", session_id);
+
+        let Some(tile_id) = self.session_tile_ids.remove(&session_id) else {
+            return;
+        };
+
+        let Some(ref mut tree) = self.tiles else {
+            return;
+        };
+
+        // Find the root and check if it's a Tabs container
+        let Some(root_id) = tree.root() else {
+            return;
+        };
+
+        // Handle tab-specific logic if root is a Tabs container
+        let mut next_active_tile: Option<egui_tiles::TileId> = None;
+        let mut should_unwrap_single_tab = false;
+        let mut single_remaining_tile: Option<egui_tiles::TileId> = None;
+
+        if let Some(egui_tiles::Tile::Container(egui_tiles::Container::Tabs(tabs))) =
+            tree.tiles.get_mut(root_id)
+        {
+            // Find the index of the tab being closed
+            if let Some(closing_idx) = tabs.children.iter().position(|&id| id == tile_id) {
+                // Remove from children list
+                tabs.children.remove(closing_idx);
+
+                // Determine which tab to activate next
+                if !tabs.children.is_empty() {
+                    // Activate the tab to the left, or the first one if closing leftmost
+                    let next_idx = if closing_idx > 0 { closing_idx - 1 } else { 0 };
+                    let next_tile_id = tabs.children[next_idx];
+                    tabs.active = Some(next_tile_id);
+                    next_active_tile = Some(next_tile_id);
+
+                    // If only one tab remains, mark for unwrapping
+                    if tabs.children.len() == 1 {
+                        should_unwrap_single_tab = true;
+                        single_remaining_tile = Some(tabs.children[0]);
+                    }
+                }
             }
+        }
 
-            // If we closed the active session, switch to another one
-            if self.active_session_id == session_id
-                && let Some(&new_id) = self.sessions.keys().next()
-            {
+        // Find the session for the next active tab (after mutable borrow ends)
+        let next_active_session =
+            next_active_tile.and_then(|tid| Self::find_first_pane_session(&tree.tiles, tid));
+
+        // Remove the closed tile from storage
+        tree.tiles.remove(tile_id);
+        log::debug!("Removed tile {:?} for session {}", tile_id, session_id);
+
+        // Unwrap single remaining tab to return to single pane view
+        if should_unwrap_single_tab && let Some(remaining_tile_id) = single_remaining_tile {
+            // Remove the Tabs container and make the remaining tile the new root
+            tree.tiles.remove(root_id);
+            *tree = Tree::new(
+                "terminal_tiles",
+                remaining_tile_id,
+                std::mem::take(&mut tree.tiles),
+            );
+            log::info!("Unwrapped single tab to single pane view");
+        }
+
+        // Update active session
+        if let Some(new_session_id) = next_active_session {
+            self.active_session_id = new_session_id;
+            self.pending_focus_session = Some(new_session_id);
+            log::info!("Switched to session {}", new_session_id);
+        } else if self.active_session_id == session_id {
+            // Fallback: pick any remaining session
+            if let Some(&new_id) = self.sessions.keys().next() {
                 self.active_session_id = new_id;
-                log::info!("Switched to session {}", new_id);
+                self.pending_focus_session = Some(new_id);
+                log::info!("Fallback: switched to session {}", new_id);
             }
+        }
 
-            // If no sessions left, quit
-            if self.sessions.is_empty() {
-                log::info!("All sessions closed, quitting application");
-                self.should_quit = true;
-            }
+        // If no sessions left, quit
+        if self.sessions.is_empty() {
+            log::info!("All sessions closed, quitting application");
+            self.should_quit = true;
+        }
 
-            // Mark remaining sessions for repaint after pane close
-            for session in self.sessions.values_mut() {
-                session.needs_repaint = true;
-            }
+        // Mark remaining sessions for repaint after pane close
+        for session in self.sessions.values_mut() {
+            session.needs_repaint = true;
         }
     }
 
@@ -415,12 +516,12 @@ impl InfrawareApp {
 
         // Adaptive PTY throttle: use lower limit during keyboard activity for Ctrl+C responsiveness
         // After 200ms of no keyboard input, switch to higher throughput mode
-        let byte_limit = if self.last_keyboard_time.elapsed() < std::time::Duration::from_millis(200)
-        {
-            rendering::MAX_BYTES_PER_FRAME_ACTIVE
-        } else {
-            rendering::MAX_BYTES_PER_FRAME_IDLE
-        };
+        let byte_limit =
+            if self.last_keyboard_time.elapsed() < std::time::Duration::from_millis(200) {
+                rendering::MAX_BYTES_PER_FRAME_ACTIVE
+            } else {
+                rendering::MAX_BYTES_PER_FRAME_IDLE
+            };
 
         // Collect session IDs first to avoid borrow conflicts
         let session_ids: SmallVec<[SessionId; 4]> = self.sessions.keys().copied().collect();
@@ -789,6 +890,28 @@ impl InfrawareApp {
                 }
                 KeyboardAction::SplitVertical => {
                     self.split_vertical();
+                }
+                KeyboardAction::NewTab => {
+                    self.create_new_tab();
+                }
+                KeyboardAction::CloseTab => {
+                    self.close_session(self.active_session_id);
+                }
+                KeyboardAction::NextTab => {
+                    self.next_tab();
+                }
+                KeyboardAction::PrevTab => {
+                    self.prev_tab();
+                }
+                KeyboardAction::EnterLLMMode => {
+                    // Clear current line (Ctrl+U) to ensure we start fresh
+                    self.send_to_pty(b"\x15");
+                    
+                    // Insert "? " prefix to enter LLM query mode
+                    self.current_command_buffer.clear();
+                    self.current_command_buffer.push_str("? ");
+                    self.send_to_pty(b"? ");
+                    log::info!("Entered LLM mode via Ctrl+?");
                 }
             }
         }
@@ -1428,7 +1551,11 @@ impl InfrawareApp {
                 });
 
                 // --- Background batching ---
-                let bg = if is_selected { theme_selection } else { cell_bg };
+                let bg = if is_selected {
+                    theme_selection
+                } else {
+                    cell_bg
+                };
 
                 if is_selected || bg != theme_background {
                     match bg_start {
@@ -1448,11 +1575,8 @@ impl InfrawareApp {
                     }
                 } else if let Some((start, color)) = bg_start.take() {
                     let width = (col_idx - start) as f32 * char_width;
-                    self.render_bg_rects.push((
-                        col_x(start, column_x_coords),
-                        width,
-                        color,
-                    ));
+                    self.render_bg_rects
+                        .push((col_x(start, column_x_coords), width, color));
                 }
 
                 // --- Text batching (using shared buffer) ---
@@ -1505,11 +1629,8 @@ impl InfrawareApp {
             // Flush remaining background
             if let Some((start, color)) = bg_start {
                 let width = (row_len - start) as f32 * char_width;
-                self.render_bg_rects.push((
-                    col_x(start, column_x_coords),
-                    width,
-                    color,
-                ));
+                self.render_bg_rects
+                    .push((col_x(start, column_x_coords), width, color));
             }
 
             // Flush remaining text
@@ -1518,11 +1639,8 @@ impl InfrawareApp {
                 if let Some((start, color)) = run_start
                     && end_idx > 0
                 {
-                    self.render_text_runs.push((
-                        col_x(start, column_x_coords),
-                        end_idx,
-                        color,
-                    ));
+                    self.render_text_runs
+                        .push((col_x(start, column_x_coords), end_idx, color));
                 }
             }
 
@@ -1665,6 +1783,152 @@ impl InfrawareApp {
         );
     }
 
+    /// Create a new tab at the root level.
+    ///
+    /// Tabs are only created at the root level of the tile tree.
+    /// If the root is already a Tabs container, adds a new tab there.
+    /// Otherwise, wraps the entire root in a new Tabs container.
+    pub fn create_new_tab(&mut self) {
+        let new_session_id = self.create_session();
+
+        let Some(ref mut tree) = self.tiles else {
+            return;
+        };
+
+        let root_id = tree.root().expect("tree must have a root");
+        let new_pane_id = tree.tiles.insert_pane(new_session_id);
+        self.session_tile_ids.insert(new_session_id, new_pane_id);
+
+        // If root is already a Tabs container, add the new pane there
+        if let Some(egui_tiles::Tile::Container(egui_tiles::Container::Tabs(tabs))) =
+            tree.tiles.get_mut(root_id)
+        {
+            tabs.children.push(new_pane_id);
+            self.active_session_id = new_session_id;
+            self.pending_focus_session = Some(new_session_id);
+            self.pending_active_tab = Some(new_pane_id);
+            log::info!(
+                "Added tab to root tabs container, session {}, tile {:?}",
+                new_session_id,
+                new_pane_id
+            );
+            return;
+        }
+
+        // Root is not a Tabs container - wrap it in a new Tabs container
+        let tabs = egui_tiles::Tabs::new(vec![root_id, new_pane_id]);
+        let container_id = tree
+            .tiles
+            .insert_container(egui_tiles::Container::Tabs(tabs));
+
+        // Make the new Tabs container the root
+        *tree = Tree::new(
+            "terminal_tiles",
+            container_id,
+            std::mem::take(&mut tree.tiles),
+        );
+
+        self.active_session_id = new_session_id;
+        self.pending_focus_session = Some(new_session_id);
+        self.pending_active_tab = Some(new_pane_id);
+        log::info!(
+            "Created root tab group, session {}, tile {:?}",
+            new_session_id,
+            new_pane_id
+        );
+    }
+
+    /// Switch to the next tab at root level.
+    pub fn next_tab(&mut self) {
+        let Some(ref mut tree) = self.tiles else {
+            return;
+        };
+
+        let Some(root_id) = tree.root() else {
+            return;
+        };
+
+        // Only works if root is a Tabs container
+        if let Some(egui_tiles::Tile::Container(egui_tiles::Container::Tabs(tabs))) =
+            tree.tiles.get_mut(root_id)
+        {
+            let current_active = tabs.active;
+            if let Some(current_idx) =
+                current_active.and_then(|active| tabs.children.iter().position(|&id| id == active))
+            {
+                let next_idx = (current_idx + 1) % tabs.children.len();
+                let next_tile_id = tabs.children[next_idx];
+                tabs.active = Some(next_tile_id);
+
+                // Find the first pane in the next tab (could be a container with splits)
+                let Some(ref tree) = self.tiles else {
+                    return;
+                };
+                if let Some(session_id) = Self::find_first_pane_session(&tree.tiles, next_tile_id) {
+                    self.active_session_id = session_id;
+                    log::debug!("Switched to next tab, session {}", self.active_session_id);
+                }
+            }
+        }
+    }
+
+    /// Switch to the previous tab at root level.
+    pub fn prev_tab(&mut self) {
+        let Some(ref mut tree) = self.tiles else {
+            return;
+        };
+
+        let Some(root_id) = tree.root() else {
+            return;
+        };
+
+        // Only works if root is a Tabs container
+        if let Some(egui_tiles::Tile::Container(egui_tiles::Container::Tabs(tabs))) =
+            tree.tiles.get_mut(root_id)
+        {
+            let current_active = tabs.active;
+            if let Some(current_idx) =
+                current_active.and_then(|active| tabs.children.iter().position(|&id| id == active))
+            {
+                let prev_idx = if current_idx == 0 {
+                    tabs.children.len() - 1
+                } else {
+                    current_idx - 1
+                };
+                let prev_tile_id = tabs.children[prev_idx];
+                tabs.active = Some(prev_tile_id);
+
+                // Find the first pane in the prev tab (could be a container with splits)
+                let Some(ref tree) = self.tiles else {
+                    return;
+                };
+                if let Some(session_id) = Self::find_first_pane_session(&tree.tiles, prev_tile_id) {
+                    self.active_session_id = session_id;
+                    log::debug!("Switched to prev tab, session {}", self.active_session_id);
+                }
+            }
+        }
+    }
+
+    /// Find the first pane's session ID within a tile (recursively searches containers).
+    fn find_first_pane_session(
+        tiles: &Tiles<SessionId>,
+        tile_id: egui_tiles::TileId,
+    ) -> Option<SessionId> {
+        match tiles.get(tile_id)? {
+            egui_tiles::Tile::Pane(session_id) => Some(*session_id),
+            egui_tiles::Tile::Container(container) => {
+                // Get first child and recurse
+                let first_child = match container {
+                    egui_tiles::Container::Tabs(tabs) => tabs.children.first().copied(),
+                    egui_tiles::Container::Linear(linear) => linear.children.first().copied(),
+                    egui_tiles::Container::Grid(grid) => grid.children().next().copied(),
+                };
+                first_child.and_then(|child_id| Self::find_first_pane_session(tiles, child_id))
+            }
+        }
+    }
+
     /// Replace a child tile ID in a container's children list.
     ///
     /// Handles Linear and Tabs containers by directly modifying their
@@ -1684,9 +1948,16 @@ impl InfrawareApp {
                 }
             }
             egui_tiles::Container::Tabs(tabs) => {
+                // Check if the old child was the active one BEFORE replacing
+                let was_active = tabs.active == Some(old_child);
+
                 for child in &mut tabs.children {
                     if *child == old_child {
                         *child = new_child;
+                        // If it was active, update the active pointer to the new child
+                        if was_active {
+                            tabs.active = Some(new_child);
+                        }
                         return;
                     }
                 }
@@ -1723,6 +1994,105 @@ impl egui_tiles::Behavior<SessionId> for TerminalBehavior<'_> {
         } else {
             format!("Terminal {}", pane).into()
         }
+    }
+
+    fn tab_text_color(
+        &self,
+        _visuals: &egui::Visuals,
+        _tiles: &Tiles<SessionId>,
+        _tile_id: egui_tiles::TileId,
+        state: &egui_tiles::TabState,
+    ) -> Color32 {
+        if state.active {
+            // Active tab: White
+            Color32::WHITE
+        } else {
+            // Inactive tabs: #616161 (per user request)
+            Color32::from_rgb(97, 97, 97)
+        }
+    }
+
+    fn tab_bg_color(
+        &self,
+        visuals: &egui::Visuals,
+        _tiles: &Tiles<SessionId>,
+        _tile_id: egui_tiles::TileId,
+        state: &egui_tiles::TabState,
+    ) -> Color32 {
+        if state.active {
+            // Active tab: Standard dark background (blends with terminal)
+            visuals.window_fill()
+        } else {
+            // Inactive tabs: Dark gray
+            Color32::from_rgb(58, 58, 58)
+        }
+    }
+
+    fn tab_ui(
+        &mut self,
+        tiles: &mut Tiles<SessionId>,
+        ui: &mut egui::Ui,
+        _id: egui::Id,
+        id: egui_tiles::TileId,
+        state: &egui_tiles::TabState,
+    ) -> egui::Response {
+        let text = self.tab_title_for_tile(tiles, id);
+        let text_color = self.tab_text_color(ui.visuals(), tiles, id, state);
+        let bg_color = self.tab_bg_color(ui.visuals(), tiles, id, state);
+
+        // Apply color to text
+        let text = text.color(text_color);
+
+        let button = if let Some(texture) = &self.app.logo_texture {
+            egui::Button::image_and_text(egui::Image::new(texture).max_height(12.0), text)
+        } else {
+            egui::Button::new(text)
+        };
+
+        let button = button.fill(bg_color);
+
+        // Render the button
+        ui.add(button)
+    }
+
+    fn on_tab_button(
+        &mut self,
+        tiles: &Tiles<SessionId>,
+        tile_id: egui_tiles::TileId,
+        button_response: egui::Response,
+    ) -> egui::Response {
+        // Synchronize active session when a tab is clicked
+        if button_response.clicked()
+            && let Some(session_id) = InfrawareApp::find_first_pane_session(tiles, tile_id)
+            && self.app.active_session_id != session_id
+        {
+            self.app.active_session_id = session_id;
+            log::debug!("Tab clicked: switched to session {}", session_id);
+
+            // Force focus to the new session's terminal widget
+            if let Some(session) = self.app.sessions.get(&session_id) {
+                button_response
+                    .ctx
+                    .memory_mut(|mem| mem.request_focus(session.terminal_egui_id));
+            }
+        }
+        // Return the response so egui_tiles uses it
+        button_response
+    }
+
+    fn tab_title_for_tile(
+        &mut self,
+        tiles: &Tiles<SessionId>,
+        tile_id: egui_tiles::TileId,
+    ) -> egui::WidgetText {
+        // For containers (e.g., after split), find the first pane and use its title
+        if let Some(session_id) = InfrawareApp::find_first_pane_session(tiles, tile_id)
+            && let Some(session) = self.app.sessions.get(&session_id)
+        {
+            return session.cached_title.as_str().into();
+        }
+        // Fallback
+        format!("Tab {:?}", tile_id).into()
     }
 
     fn pane_ui(
@@ -1794,6 +2164,15 @@ impl eframe::App for InfrawareApp {
 
         self.had_window_focus = has_focus;
 
+        // Handle pending focus request (after tab creation)
+        if let Some(session_id) = self.pending_focus_session.take()
+            && let Some(session) = self.sessions.get(&session_id)
+        {
+            ctx.memory_mut(|mem| mem.request_focus(session.terminal_egui_id));
+            ctx.request_repaint();
+            log::debug!("Focused new tab session {}", session_id);
+        }
+
         // Check for quit
         if self.should_quit {
             ctx.send_viewport_cmd(ViewportCommand::Close);
@@ -1853,6 +2232,17 @@ impl eframe::App for InfrawareApp {
         let session_ids: SmallVec<[SessionId; 4]> = self.sessions.keys().copied().collect();
         for session_id in session_ids {
             self.initialize_shell(session_id);
+        }
+
+        // Activate pending tab before rendering (after tab creation)
+        if let Some(tile_id) = self.pending_active_tab.take()
+            && let Some(ref mut tree) = self.tiles
+            && let Some(root_id) = tree.root()
+            && let Some(egui_tiles::Tile::Container(egui_tiles::Container::Tabs(tabs))) =
+                tree.tiles.get_mut(root_id)
+        {
+            tabs.active = Some(tile_id);
+            log::debug!("Activated pending tab {:?}", tile_id);
         }
 
         // Render UI using egui_tiles for split view support

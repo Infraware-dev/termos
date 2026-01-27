@@ -1000,8 +1000,12 @@ impl TerminalGrid {
         }
 
         // Adjust cursor to stay at same position relative to bottom
-        let cursor_from_bottom = old_rows.saturating_sub(1).saturating_sub(self.cursor_row as usize);
-        let new_cursor = new_rows.saturating_sub(1).saturating_sub(cursor_from_bottom.min(new_rows - 1));
+        let cursor_from_bottom = old_rows
+            .saturating_sub(1)
+            .saturating_sub(self.cursor_row as usize);
+        let new_cursor = new_rows
+            .saturating_sub(1)
+            .saturating_sub(cursor_from_bottom.min(new_rows - 1));
 
         self.cells = new_cells;
         self.cells_offset = 0;

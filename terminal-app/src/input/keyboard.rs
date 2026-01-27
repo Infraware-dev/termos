@@ -19,6 +19,16 @@ pub enum KeyboardAction {
     SplitHorizontal,
     /// Split pane vertically (Ctrl+Shift+V or Cmd+Shift+V)
     SplitVertical,
+    /// Create new tab (Cmd+T on macOS, Ctrl+Shift+T on Linux)
+    NewTab,
+    /// Close current tab (Cmd+W on macOS, Ctrl+Shift+W on Linux)
+    CloseTab,
+    /// Switch to next tab (Ctrl+Tab)
+    NextTab,
+    /// Switch to previous tab (Ctrl+Shift+Tab)
+    PrevTab,
+    /// Enter LLM query mode (Ctrl+?)
+    EnterLLMMode,
 }
 
 /// Keyboard handler that processes egui input and returns terminal actions.
@@ -41,9 +51,23 @@ impl KeyboardHandler {
     pub fn process(&mut self, ctx: &egui::Context) -> Vec<KeyboardAction> {
         self.actions.clear();
 
-        // Process split pane shortcuts FIRST (Ctrl+Shift+H/J or Cmd+Shift+H/J)
+        // Process tab shortcuts FIRST (Cmd+T/W or Ctrl+Shift+T/W, Ctrl+Tab)
+        let tab_action = Self::process_tab_keys(ctx);
+        if let Some(action) = tab_action {
+            self.actions.push(action);
+            return std::mem::take(&mut self.actions);
+        }
+
+        // Process split pane shortcuts (Ctrl+Shift+H/J or Cmd+Shift+H/J)
         let split_action = Self::process_split_keys(ctx);
         if let Some(action) = split_action {
+            self.actions.push(action);
+            return std::mem::take(&mut self.actions);
+        }
+
+        // Process LLM mode shortcut (Ctrl+Shift+/ aka Ctrl+?)
+        let llm_action = Self::process_llm_keys(ctx);
+        if let Some(action) = llm_action {
             self.actions.push(action);
             return std::mem::take(&mut self.actions);
         }
@@ -156,6 +180,68 @@ impl KeyboardHandler {
                     log::info!("Ctrl+Shift+J detected (split vertical)");
                     return Some(KeyboardAction::SplitVertical);
                 }
+            }
+
+            None
+        })
+    }
+
+    /// Process tab management shortcuts.
+    ///
+    /// - macOS: Cmd+T (new tab), Cmd+W (close tab)
+    /// - Linux/Windows: Ctrl+Shift+T (new tab), Ctrl+Shift+W (close tab)
+    /// - All platforms: Ctrl+Tab (next tab), Ctrl+Shift+Tab (prev tab)
+    fn process_tab_keys(ctx: &egui::Context) -> Option<KeyboardAction> {
+        ctx.input(|i| {
+            // New Tab
+            #[cfg(target_os = "macos")]
+            if i.modifiers.command && !i.modifiers.shift && i.key_pressed(Key::T) {
+                log::info!("Cmd+T detected (new tab)");
+                return Some(KeyboardAction::NewTab);
+            }
+            #[cfg(not(target_os = "macos"))]
+            if i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(Key::T) {
+                log::info!("Ctrl+Shift+T detected (new tab)");
+                return Some(KeyboardAction::NewTab);
+            }
+
+            // Close Tab
+            #[cfg(target_os = "macos")]
+            if i.modifiers.command && !i.modifiers.shift && i.key_pressed(Key::W) {
+                log::info!("Cmd+W detected (close tab)");
+                return Some(KeyboardAction::CloseTab);
+            }
+            #[cfg(not(target_os = "macos"))]
+            if i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(Key::W) {
+                log::info!("Ctrl+Shift+W detected (close tab)");
+                return Some(KeyboardAction::CloseTab);
+            }
+
+            // Next Tab (Ctrl+Tab) - all platforms
+            if i.modifiers.ctrl && !i.modifiers.shift && i.key_pressed(Key::Tab) {
+                log::info!("Ctrl+Tab detected (next tab)");
+                return Some(KeyboardAction::NextTab);
+            }
+
+            // Prev Tab (Ctrl+Shift+Tab) - all platforms
+            if i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(Key::Tab) {
+                log::info!("Ctrl+Shift+Tab detected (prev tab)");
+                return Some(KeyboardAction::PrevTab);
+            }
+
+            None
+        })
+    }
+
+    /// Process LLM mode shortcut.
+    ///
+    /// - All platforms: Ctrl+Shift+/ (Ctrl+?) to enter LLM query mode
+    fn process_llm_keys(ctx: &egui::Context) -> Option<KeyboardAction> {
+        ctx.input(|i| {
+            // Ctrl+? (Ctrl+Shift+/) - enter LLM mode
+            if i.modifiers.ctrl && i.modifiers.shift && i.key_pressed(Key::Slash) {
+                log::info!("Ctrl+Shift+/ detected (enter LLM mode)");
+                return Some(KeyboardAction::EnterLLMMode);
             }
 
             None
