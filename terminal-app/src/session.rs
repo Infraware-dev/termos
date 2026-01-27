@@ -60,6 +60,9 @@ pub struct TerminalSession {
     /// Startup time for delayed init
     pub startup_time: Instant,
 
+    /// When init commands were sent (for two-phase initialization)
+    pub init_commands_sent_at: Option<Instant>,
+
     /// When set, pause output reading to let kernel process Ctrl+C
     pub output_pause_until: Option<Instant>,
 
@@ -151,6 +154,7 @@ impl TerminalSession {
             terminal_size: (cols, rows),
             shell_initialized: false,
             startup_time: Instant::now(),
+            init_commands_sent_at: None,
             output_pause_until: None,
             agent_state: AgentState::new(),
             prompt_detector: PromptDetector::new(),

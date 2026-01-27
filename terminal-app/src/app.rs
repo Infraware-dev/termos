@@ -136,9 +136,6 @@ pub struct InfrawareApp {
     /// Scrollbar logic and state (shared across sessions)
     scrollbar: Scrollbar,
 
-    /// Authentication status message (shown at startup)
-    auth_status_message: Option<String>,
-
     // === Split View (egui_tiles) ===
     /// Tile tree for split view layout (pane ID is session ID)
     /// Wrapped in Option to allow temporary removal for borrow-checker compatibility
@@ -214,8 +211,7 @@ impl InfrawareApp {
         // Reads from .env file (loaded in main.rs via dotenvy)
         let auth_config = AuthConfig::from_env();
 
-        let (llm_client, auth_status_message): (Arc<dyn LLMClientTrait>, Option<String>) =
-            if auth_config.is_configured() {
+        let llm_client: Arc<dyn LLMClientTrait> = if auth_config.is_configured() {
                 // Safe: is_configured() guarantees these are Some
                 let backend_url = auth_config
                     .backend_url
@@ -234,41 +230,20 @@ impl InfrawareApp {
                 match auth_result {
                     Ok(response) if response.success => {
                         log::info!("Authentication successful: {}", response.message);
-                        (
-                            Arc::new(HttpLLMClient::new(backend_url, api_key)),
-                            Some(format!(
-                                "\x1b[1;32mConnected to LLM Backend: {}\x1b[0m",
-                                response.message
-                            )),
-                        )
+                        Arc::new(HttpLLMClient::new(backend_url, api_key))
                     }
                     Ok(response) => {
                         log::warn!("Authentication rejected: {}", response.message);
-                        (
-                            Arc::new(crate::llm::MockLLMClient::new()),
-                            Some(format!(
-                                "\x1b[1;31mAuth rejected: {} (Using Mock LLM)\x1b[0m",
-                                response.message
-                            )),
-                        )
+                        Arc::new(crate::llm::MockLLMClient::new())
                     }
                     Err(e) => {
                         log::error!("Authentication failed: {}", e);
-                        (
-                            Arc::new(crate::llm::MockLLMClient::new()),
-                            Some(format!(
-                                "\x1b[1;31mAuth failed: {} (Using Mock LLM)\x1b[0m",
-                                e
-                            )),
-                        )
+                        Arc::new(crate::llm::MockLLMClient::new())
                     }
                 }
             } else {
                 log::warn!("No API key configured, using Mock LLM Client");
-                (
-                    Arc::new(crate::llm::MockLLMClient::new()),
-                    Some("\x1b[1;33mNo API key configured (Using Mock LLM - Set ANTHROPIC_API_KEY to connect)\x1b[0m".to_string())
-                )
+                Arc::new(crate::llm::MockLLMClient::new())
             };
 
         let orchestrator = Arc::new(NaturalLanguageOrchestrator::new(llm_client));
@@ -318,8 +293,6 @@ impl InfrawareApp {
             clipboard,
             // Scrollbar logic
             scrollbar: Scrollbar::new(),
-            // Authentication status
-            auth_status_message,
             // Split view tiles
             tiles: Some(tree),
             // Session to TileId mapping (for pane removal)
@@ -455,7 +428,10 @@ impl InfrawareApp {
         }
     }
 
-    /// Initialize shell with custom prompt for a session.
+    /// Initialize shell with custom prompt for a session (two-phase).
+    ///
+    /// Phase 1: After SHELL_INIT_DELAY, send init commands (rendering still disabled)
+    /// Phase 2: After INIT_COMMANDS_DELAY, enable rendering (init commands have been processed)
     fn initialize_shell(&mut self, session_id: SessionId) {
         let session = match self.sessions.get_mut(&session_id) {
             Some(s) => s,
@@ -466,36 +442,38 @@ impl InfrawareApp {
             return;
         }
 
-        // Wait for shell to fully initialize
-        if session.startup_time.elapsed() < timing::SHELL_INIT_DELAY {
+        // Phase 1: Send init commands after shell startup delay
+        if session.init_commands_sent_at.is_none() {
+            if session.startup_time.elapsed() < timing::SHELL_INIT_DELAY {
+                return;
+            }
+
+            // Set custom prompt with |~| prefix (#c6d0d6 = rgb 198,208,214)
+            // Also inject command_not_found hooks to trigger LLM on error
+            let init_commands = if std::env::var("SHELL").unwrap_or_default().contains("zsh") {
+                "export PROMPT=$'%{\\e[38;2;198;208;214m%}|~| %n@%m:%~%# %{\\e[0m%}'\n\
+                 command_not_found_handler() { printf \"\\033]777;CommandNotFound;%s\\033\\\\\" \"$1\"; return 127; }\n\
+                 clear\n"
+            } else {
+                "export PS1=$'\\[\\e[38;2;198;208;214m\\]|~| \\u@\\h:\\w\\$ \\[\\e[0m\\]'\n\
+                 command_not_found_handle() { printf \"\\033]777;CommandNotFound;%s\\033\\\\\" \"$1\"; return 127; }\n\
+                 clear\n"
+            };
+
+            session.send_to_pty(init_commands.as_bytes());
+            session.init_commands_sent_at = Some(std::time::Instant::now());
+            return;
+        }
+
+        // Phase 2: Enable rendering after init commands have been processed
+        // (shell's `clear` already ran, prompt is now in the grid - just enable rendering)
+        if let Some(sent_at) = session.init_commands_sent_at
+            && sent_at.elapsed() < timing::INIT_COMMANDS_DELAY
+        {
             return;
         }
 
         session.shell_initialized = true;
-
-        // Set custom prompt with |~| prefix (#c6d0d6 = rgb 198,208,214)
-        // Also inject command_not_found hooks to trigger LLM on error
-        let init_commands = if std::env::var("SHELL").unwrap_or_default().contains("zsh") {
-            "export PROMPT=$'%{\\e[38;2;198;208;214m%}|~| %n@%m:%~%# %{\\e[0m%}'\n\
-             command_not_found_handler() { printf \"\\033]777;CommandNotFound;%s\\033\\\\\" \"$1\"; return 127; }\n\
-             clear\n"
-        } else {
-            "export PS1=$'\\[\\e[38;2;198;208;214m\\]|~| \\u@\\h:\\w\\$ \\[\\e[0m\\]'\n\
-             command_not_found_handle() { printf \"\\033]777;CommandNotFound;%s\\033\\\\\" \"$1\"; return 127; }\n\
-             clear\n"
-        };
-
-        session.send_to_pty(init_commands.as_bytes());
-
-        // Print welcome message with auth status (only for first session)
-        if session_id == 0
-            && let Some(ref status_msg) = self.auth_status_message
-        {
-            let msg = format!("\r\nInfraware Terminal Ready - {}\r\n", status_msg);
-            session
-                .vte_parser
-                .advance(&mut session.terminal_handler, msg.as_bytes());
-        }
 
         log::info!(
             "Session {}: Shell initialized with custom prompt",
@@ -1484,6 +1462,11 @@ impl InfrawareApp {
 
         // Fill background once
         painter.rect_filled(rect, 0.0, self.theme.background);
+
+        // Skip content rendering during shell initialization (prevents flicker)
+        if !shell_initialized {
+            return;
+        }
 
         // PERFORMANCE: Pre-compute selection bounds once if selection exists (per-session)
         let selection_bounds = session.selection.as_ref().map(|sel| sel.normalized());

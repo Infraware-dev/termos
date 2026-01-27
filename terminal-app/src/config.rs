@@ -14,6 +14,10 @@ pub mod timing {
     /// Shell initialization delay after startup.
     pub const SHELL_INIT_DELAY: Duration = Duration::from_millis(500);
 
+    /// Delay after init commands before enabling rendering.
+    /// Allows shell's `clear` to execute before we start showing output.
+    pub const INIT_COMMANDS_DELAY: Duration = Duration::from_millis(100);
+
     /// Background window repaint interval (low CPU mode).
     pub const BACKGROUND_REPAINT: Duration = Duration::from_millis(500);
 }
