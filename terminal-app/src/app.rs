@@ -2121,7 +2121,8 @@ impl egui_tiles::Behavior<SessionId> for TerminalBehavior<'_> {
                 }
 
                 // Render the terminal for this session
-                self.app.render_terminal(ui, session_id, self.has_focus);
+                let is_active = session_id == self.app.active_session_id;
+                self.app.render_terminal(ui, session_id, self.has_focus && is_active);
             });
 
         UiResponse::None
