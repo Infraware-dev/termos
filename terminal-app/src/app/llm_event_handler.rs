@@ -181,6 +181,6 @@ mod tests {
     #[test]
     fn test_llm_event_handler_compiles() {
         // Verifies the struct and methods compile correctly
-        assert!(true);
+        // (compilation success is the test)
     }
 }

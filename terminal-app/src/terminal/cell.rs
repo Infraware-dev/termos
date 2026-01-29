@@ -214,12 +214,12 @@ impl CellAttrs {
 
     // Getter methods (replaces field access)
     #[inline]
-    #[expect(dead_code, reason = "API completeness")]
+    #[allow(dead_code)]
     pub fn bold(&self) -> bool {
         self.contains(Self::BOLD)
     }
     #[inline]
-    #[expect(dead_code, reason = "API completeness")]
+    #[allow(dead_code)]
     pub fn italic(&self) -> bool {
         self.contains(Self::ITALIC)
     }
@@ -244,7 +244,7 @@ impl CellAttrs {
         self.contains(Self::HIDDEN)
     }
     #[inline]
-    #[expect(dead_code, reason = "API completeness")]
+    #[allow(dead_code)]
     pub fn blink(&self) -> bool {
         self.contains(Self::BLINK)
     }
@@ -279,7 +279,7 @@ impl CellAttrs {
         self.set(Self::HIDDEN, on);
     }
     #[inline]
-    #[expect(dead_code, reason = "API completeness")]
+    #[allow(dead_code)]
     pub fn set_blink(&mut self, on: bool) {
         self.set(Self::BLINK, on);
     }

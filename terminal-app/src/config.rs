@@ -89,12 +89,14 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::assertions_on_constants)]
     fn test_timing_init_commands_delay() {
         // Init commands delay should be shorter than shell init
         assert!(timing::INIT_COMMANDS_DELAY < timing::SHELL_INIT_DELAY);
     }
 
     #[test]
+    #[allow(clippy::assertions_on_constants)]
     fn test_rendering_bytes_per_frame() {
         // Active mode should process at least 4KB per frame
         assert!(rendering::MAX_BYTES_PER_FRAME_ACTIVE >= 4 * 1024);
@@ -104,6 +106,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::assertions_on_constants)]
     fn test_rendering_font_metrics() {
         // Font size should be reasonable (8-24 points)
         assert!(rendering::FONT_SIZE >= 8.0);
@@ -118,6 +121,7 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::assertions_on_constants)]
     fn test_size_defaults() {
         // Default terminal size should be reasonable
         assert!(size::DEFAULT_ROWS >= 10);
@@ -127,12 +131,14 @@ mod tests {
     }
 
     #[test]
+    #[allow(clippy::assertions_on_constants)]
     fn test_pty_channel_capacity() {
         // Channel capacity should be large enough for buffering
         assert!(pty::CHANNEL_CAPACITY >= 64);
     }
 
     #[test]
+    #[allow(clippy::assertions_on_constants)]
     fn test_pty_reader_buffer_size() {
         // Reader buffer should be at least 1KB
         assert!(pty::READER_BUFFER_SIZE >= 1024);
