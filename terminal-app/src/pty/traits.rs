@@ -1,7 +1,7 @@
 //! Trait definitions for PTY abstraction.
 //!
 //! These traits enable dependency injection and testing without a real PTY.
-//! Implemented by `PtyWriter` (PtyWrite) and `PtySession` (PtyControl).
+//! Implemented by `PtyWriter` (PtyWrite).
 
 use anyhow::Result;
 
@@ -21,32 +21,6 @@ pub trait PtyWrite: Send + Sync {
     /// # Errors
     /// Returns error if the PTY is closed or the write operation fails.
     fn write_bytes(&self, data: &[u8]) -> Result<usize>;
-}
-
-/// Trait for PTY session management.
-///
-/// This abstraction allows for mock implementations in tests.
-#[expect(
-    dead_code,
-    reason = "Public API for DI/mocking - consumed by external tests"
-)]
-pub trait PtyControl: Send + Sync {
-    /// Resize the terminal.
-    ///
-    /// Sends SIGWINCH to the child process to notify it of size changes.
-    ///
-    /// # Errors
-    /// Returns error if the resize operation fails or the lock is held.
-    fn resize(&self, rows: u16, cols: u16) -> Result<()>;
-
-    /// Send SIGINT to the foreground process.
-    ///
-    /// On Unix, reads `/proc/<pid>/stat` to determine the foreground process group
-    /// and sends SIGINT to it. Falls back to the shell's process group if unavailable.
-    ///
-    /// # Errors
-    /// Returns error if the signal cannot be sent.
-    fn send_sigint(&self) -> Result<()>;
 }
 
 #[cfg(test)]

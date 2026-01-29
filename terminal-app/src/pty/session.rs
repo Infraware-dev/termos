@@ -4,7 +4,6 @@
 //! and the child process.
 
 use crate::pty::io::{PtyReader, PtyWriter};
-use crate::pty::traits::PtyControl;
 use anyhow::{Context, Result};
 use portable_pty::{Child, ExitStatus, MasterPty, PtyPair, PtySize};
 use std::collections::HashMap;
@@ -271,21 +270,6 @@ impl PtySession {
                 pixel_height: 0,
             })
             .context("Failed to resize PTY")
-    }
-}
-
-/// Implement PtyControl trait for dependency injection support.
-///
-/// Note: resize uses try_lock and may fail if the async lock is held.
-/// For production code, prefer the async resize() method.
-impl PtyControl for PtySession {
-    fn resize(&self, rows: u16, cols: u16) -> Result<()> {
-        self.resize_sync(rows, cols)
-    }
-
-    fn send_sigint(&self) -> Result<()> {
-        // Delegate to the inherent method
-        PtySession::send_sigint(self)
     }
 }
 

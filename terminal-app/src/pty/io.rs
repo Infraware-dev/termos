@@ -50,7 +50,7 @@ impl PtyReader {
 
         // Spawn a dedicated thread for reading from PTY
         std::thread::spawn(move || {
-            let mut buf = vec![0u8; 4096];
+            let mut buf = vec![0u8; crate::config::pty::READER_BUFFER_SIZE];
 
             loop {
                 // Check if we should stop

@@ -25,12 +25,15 @@ pub mod timing {
 /// Terminal rendering configuration.
 pub mod rendering {
     /// Maximum bytes to process from PTY per frame during keyboard activity.
-    /// Lower value ensures Ctrl+C responsiveness during fast output.
-    pub const MAX_BYTES_PER_FRAME_ACTIVE: usize = 4096;
+    /// Must be large enough to drain a full screen of escape sequences (~60KB)
+    /// in one frame, while still allowing keyboard checks every ~5ms.
+    pub const MAX_BYTES_PER_FRAME_ACTIVE: usize = 64 * 1024;
 
     /// Maximum bytes to process from PTY per frame when idle.
-    /// Higher value improves throughput for burst output (e.g., cat large_file).
-    pub const MAX_BYTES_PER_FRAME_IDLE: usize = 16384;
+    /// Must be large enough to drain a full screen of escape sequences (~60KB for
+    /// 80x24 with 256-color) in a single frame, otherwise throughput is bottlenecked
+    /// by multi-frame pipeline latency.
+    pub const MAX_BYTES_PER_FRAME_IDLE: usize = 1024 * 1024;
 
     /// Default font size in points.
     pub const FONT_SIZE: f32 = 14.0;
@@ -54,6 +57,13 @@ pub mod size {
 /// PTY channel configuration.
 pub mod pty {
     /// Sync channel capacity for backpressure.
-    /// Small value ensures Ctrl+C can interrupt heavy output.
-    pub const CHANNEL_CAPACITY: usize = 4;
+    /// macOS PTY kernel buffer is ~1KB, so each read yields ~1KB.
+    /// At 120 FPS with ~87KB/frame, the reader produces ~86 messages per frame.
+    /// Capacity must exceed this to prevent reader stalls between consumer drains.
+    /// 512 slots = ~6 frames of headroom at ~1KB/message.
+    pub const CHANNEL_CAPACITY: usize = 512;
+
+    /// PTY reader buffer size. Larger buffers reduce system call overhead
+    /// during heavy output (e.g., cat large_file, colorful TUI apps).
+    pub const READER_BUFFER_SIZE: usize = 64 * 1024;
 }

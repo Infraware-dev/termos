@@ -4,7 +4,6 @@ members = [
     "crates/shared",
     "crates/backend-api",
     "crates/backend-engine",
-    "crates/backend-state",
     "terminal-app",
 ]
 
@@ -78,7 +77,18 @@ metrics-exporter-prometheus = "0.16"
 # Internal crates
 infraware-shared = { path = "crates/shared" }
 infraware-engine = { path = "crates/backend-engine" }
-infraware-state = { path = "crates/backend-state" }
+
+# Optimize dev builds for acceptable frame rates in GUI applications.
+# opt-level 1 enables basic optimizations (inlining, dead code elimination)
+# while keeping debug info and reasonable compile times.
+# Without this, debug builds run at ~10 FPS due to unoptimized VTE parsing
+# and cell iteration loops (16K+ function calls per frame at opt-level 0).
+[profile.dev]
+opt-level = 1
+
+# Dependencies get full optimization - we don't debug into egui/vte internals.
+[profile.dev.package."*"]
+opt-level = 2
 
 [profile.release]
 strip = true

@@ -1855,17 +1855,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "infraware-state"
-version = "0.2.0"
-dependencies = [
- "infraware-shared",
- "serde",
- "serde_json",
- "thiserror 1.0.69",
- "tokio",
-]
-
-[[package]]
 name = "infraware-terminal"
 version = "0.2.0"
 dependencies = [

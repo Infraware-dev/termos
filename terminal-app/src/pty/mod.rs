@@ -23,10 +23,7 @@ pub use io::{PtyReader, PtyWriter};
 pub use manager::PtyManager;
 pub use session::PtySession;
 
-// Traits for DI support - implemented by PtyWriter (PtyWrite) and PtySession (PtyControl)
-// Re-exported for external use in tests/mocks (not used within this crate)
-#[allow(unused_imports)]
-pub use traits::{PtyControl, PtyWrite};
+pub use traits::PtyWrite;
 
 use anyhow::Result;
 use portable_pty::{CommandBuilder, PtySize, PtySystem, native_pty_system};

@@ -143,19 +143,9 @@ enum InterruptData {
 /// to be used interchangeably via dependency injection
 #[async_trait]
 pub trait LLMClientTrait: Send + Sync + std::fmt::Debug {
-    /// Query the LLM with natural language input
-    /// Returns LLMQueryResult which can be Complete or Interrupted (for HITL)
+    /// Query the LLM with natural language input.
+    /// Returns LLMQueryResult which can be Complete or Interrupted (for HITL).
     async fn query(&self, text: &str) -> Result<LLMQueryResult>;
-
-    /// Query with additional context
-    async fn query_with_context(
-        &self,
-        text: &str,
-        _context: Option<String>,
-    ) -> Result<LLMQueryResult> {
-        // Default implementation ignores context
-        self.query(text).await
-    }
 
     /// Resume an interrupted run after user approval (for command approval).
     async fn resume_run(&self) -> Result<LLMQueryResult>;
@@ -719,36 +709,12 @@ impl HttpLLMClient {
 #[async_trait]
 impl LLMClientTrait for HttpLLMClient {
     async fn query(&self, text: &str) -> Result<LLMQueryResult> {
-        self.query_with_context(text, None).await
-    }
+        log::info!("LLM query: {}", text);
 
-    async fn query_with_context(
-        &self,
-        text: &str,
-        context: Option<String>,
-    ) -> Result<LLMQueryResult> {
-        log::info!("LLM query: {} (context: {:?})", text, context.is_some());
-
-        // Use streaming endpoint via threads
         let thread_id = self.ensure_thread().await?;
-
-        // Combine context with text if provided
-        let full_query = match context {
-            Some(ctx) => format!("{}\n\nContext:\n{}", text, ctx),
-            None => text.to_string(),
-        };
-
-        // Create a default non-cancelled token for non-cancellable query
         let stream_result = self
-            .stream_run(
-                &thread_id,
-                Some(&full_query),
-                false,
-                CancellationToken::new(),
-            )
+            .stream_run(&thread_id, Some(text), false, CancellationToken::new())
             .await?;
-
-        // Convert internal StreamResult to public LLMQueryResult
         Self::convert_stream_result(stream_result)
     }
 

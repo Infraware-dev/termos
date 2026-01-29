@@ -11,7 +11,6 @@
 //!
 //! `AppMode` is derived from `EngineStatus` via `From` trait implementation.
 
-use anyhow::{Result, bail};
 use infraware_shared::{EngineStatus, Interrupt};
 
 /// Application mode states.
@@ -35,36 +34,6 @@ pub enum AppMode {
     },
     /// Executing approved command in PTY, capturing output
     ExecutingCommand { command: String },
-}
-
-/// Events that trigger state transitions.
-#[derive(Debug, Clone)]
-#[expect(
-    dead_code,
-    reason = "State machine events - used conditionally based on LLM responses"
-)]
-pub enum AppModeEvent {
-    /// User submitted a query that requires LLM
-    QueryLLM,
-    /// LLM returned and requires command approval
-    LLMRequestsApproval { command: String, message: String },
-    /// LLM returned and asks a question
-    LLMAsksQuestion {
-        question: String,
-        options: Option<Vec<String>>,
-    },
-    /// LLM completed without further interaction
-    LLMCompleted,
-    /// User approved or rejected command
-    UserResponded,
-    /// User approved command - start PTY execution
-    UserApprovedCommand { command: String },
-    /// Command finished executing in PTY
-    CommandExecuted,
-    /// User answered a question
-    UserAnswered,
-    /// Cancel current operation (Ctrl+C)
-    Cancel,
 }
 
 /// Derive AppMode from EngineStatus
@@ -116,14 +85,6 @@ impl AgentState {
         self.stream_started = None;
     }
 
-    /// Check if the stream has timed out.
-    #[must_use]
-    #[expect(dead_code, reason = "Reserved for future timeout detection")]
-    pub fn is_timed_out(&self, timeout: std::time::Duration) -> bool {
-        self.stream_started
-            .map(|started| started.elapsed() > timeout)
-            .unwrap_or(false)
-    }
 }
 
 #[allow(dead_code)] // State machine API used when LLM integration is active
@@ -190,53 +151,6 @@ impl AppMode {
             _ => false,
         }
     }
-
-    /// Attempt to transition to a new state based on an event.
-    ///
-    /// Consumes both self and event to avoid unnecessary cloning.
-    /// Returns the new state if the transition is valid, or an error otherwise.
-    #[must_use = "state transitions must be handled - ignoring may cause state desynchronization"]
-    pub fn transition(self, event: AppModeEvent) -> Result<Self> {
-        let from_name = self.name();
-
-        let new_state = match (self, event) {
-            // Normal state transitions
-            (Self::Normal, AppModeEvent::QueryLLM) => Self::WaitingLLM,
-
-            // WaitingLLM state transitions
-            (Self::WaitingLLM, AppModeEvent::LLMCompleted) => Self::Normal,
-            (Self::WaitingLLM, AppModeEvent::LLMRequestsApproval { command, message }) => {
-                Self::AwaitingApproval { command, message }
-            }
-            (Self::WaitingLLM, AppModeEvent::LLMAsksQuestion { question, options }) => {
-                Self::AwaitingAnswer { question, options }
-            }
-
-            // AwaitingApproval state transitions
-            (Self::AwaitingApproval { .. }, AppModeEvent::UserResponded) => Self::Normal,
-            (Self::AwaitingApproval { .. }, AppModeEvent::UserApprovedCommand { command }) => {
-                Self::ExecutingCommand { command }
-            }
-
-            // ExecutingCommand state transitions
-            (Self::ExecutingCommand { .. }, AppModeEvent::CommandExecuted) => Self::WaitingLLM,
-
-            // AwaitingAnswer state transitions
-            (Self::AwaitingAnswer { .. }, AppModeEvent::UserAnswered) => Self::Normal,
-
-            // Cancel from any state
-            (_, AppModeEvent::Cancel) => Self::Normal,
-
-            // Invalid transition
-            (state, event) => {
-                bail!("Invalid state transition: {} + {:?}", state.name(), event);
-            }
-        };
-
-        log::debug!("State transition: {} -> {}", from_name, new_state.name());
-
-        Ok(new_state)
-    }
 }
 
 #[cfg(test)]
@@ -289,35 +203,6 @@ mod tests {
     }
 
     #[test]
-    fn test_transition_with_event() {
-        let state = AppMode::Normal;
-
-        // Valid transition (clone state for second test)
-        let new_state = state.clone().transition(AppModeEvent::QueryLLM).unwrap();
-        assert_eq!(new_state, AppMode::WaitingLLM);
-
-        // Invalid transition (Normal + UserResponded)
-        let result = state.transition(AppModeEvent::UserResponded);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn test_cancel_from_any_state() {
-        // Cancel from WaitingLLM
-        let state = AppMode::WaitingLLM;
-        let new_state = state.transition(AppModeEvent::Cancel).unwrap();
-        assert_eq!(new_state, AppMode::Normal);
-
-        // Cancel from AwaitingApproval
-        let state = AppMode::AwaitingApproval {
-            command: "test".to_string(),
-            message: "msg".to_string(),
-        };
-        let new_state = state.transition(AppModeEvent::Cancel).unwrap();
-        assert_eq!(new_state, AppMode::Normal);
-    }
-
-    #[test]
     fn test_state_names() {
         assert_eq!(AppMode::Normal.name(), "Normal");
         assert_eq!(AppMode::WaitingLLM.name(), "WaitingLLM");
@@ -329,26 +214,6 @@ mod tests {
             .name(),
             "AwaitingApproval"
         );
-    }
-
-    #[test]
-    fn test_transition_moves_data() {
-        // Test that event data is moved, not cloned
-        let state = AppMode::WaitingLLM;
-        let event = AppModeEvent::LLMRequestsApproval {
-            command: "rm -rf /".to_string(),
-            message: "Are you sure?".to_string(),
-        };
-
-        let new_state = state.transition(event).unwrap();
-
-        match new_state {
-            AppMode::AwaitingApproval { command, message } => {
-                assert_eq!(command, "rm -rf /");
-                assert_eq!(message, "Are you sure?");
-            }
-            _ => panic!("Expected AwaitingApproval state"),
-        }
     }
 
     // Tests for From<EngineStatus> implementation

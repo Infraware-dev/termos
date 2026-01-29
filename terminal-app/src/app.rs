@@ -8,8 +8,7 @@ use crate::input::{
     InputClassifier, InputType, KeyboardAction, KeyboardHandler, TextSelection, ValidationResult,
     validate_command,
 };
-use crate::llm::{HttpLLMClient, LLMClientTrait, LLMQueryResult};
-use crate::orchestrators::NaturalLanguageOrchestrator;
+use crate::llm::{HttpLLMClient, LLMClientTrait, LLMQueryResult, ResponseRenderer};
 use crate::session::{SessionId, TerminalSession};
 use crate::state::AppMode;
 use crate::terminal::Color;
@@ -50,6 +49,94 @@ pub enum AppBackgroundEvent {
     LlmError(String),
 }
 
+/// Reusable render buffers and font metrics (cleared each frame).
+#[derive(Debug)]
+pub struct RenderState {
+    /// Font metrics
+    pub char_width: f32,
+    pub char_height: f32,
+    /// Cached font for rendering (avoids per-frame allocation)
+    pub font_id: FontId,
+    /// Background rectangles buffer
+    pub bg_rects: Vec<(f32, f32, egui::Color32)>,
+    /// Text runs buffer - stores (x_offset, end_index_in_text_buffer, color)
+    pub text_runs: Vec<(f32, usize, egui::Color32)>,
+    /// Single text buffer for all runs in a row
+    pub text_buffer: String,
+    /// Decorations buffer
+    pub decorations: Vec<(f32, bool, bool, egui::Color32)>,
+}
+
+impl RenderState {
+    fn new() -> Self {
+        Self {
+            char_width: rendering::CHAR_WIDTH,
+            char_height: rendering::CHAR_HEIGHT,
+            font_id: FontId::new(rendering::FONT_SIZE, FontFamily::Monospace),
+            bg_rects: Vec::with_capacity(32),
+            text_runs: Vec::with_capacity(32),
+            text_buffer: String::with_capacity(256),
+            decorations: Vec::with_capacity(8),
+        }
+    }
+
+    /// Clear all buffers for the next frame.
+    pub fn clear_buffers(&mut self) {
+        self.bg_rects.clear();
+        self.text_runs.clear();
+        self.text_buffer.clear();
+        self.decorations.clear();
+    }
+}
+
+/// LLM client, response renderer, and background event channels.
+pub struct LLMState {
+    /// LLM client for natural language queries
+    pub client: Arc<dyn LLMClientTrait>,
+    /// Response renderer (markdown → ANSI)
+    pub response_renderer: ResponseRenderer,
+    /// Channel for background events (sender)
+    pub bg_event_tx: mpsc::Sender<AppBackgroundEvent>,
+    /// Channel for background events (receiver)
+    pub bg_event_rx: mpsc::Receiver<AppBackgroundEvent>,
+    /// Cancellation token for active LLM queries (allows Ctrl+C to cancel)
+    pub cancel_token: Option<tokio_util::sync::CancellationToken>,
+}
+
+impl std::fmt::Debug for LLMState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LLMState")
+            .field("client", &self.client)
+            .field("cancel_token", &self.cancel_token.is_some())
+            .finish()
+    }
+}
+
+/// Cursor blink and timing state.
+#[derive(Debug)]
+pub struct TimingState {
+    /// Startup time for delayed init
+    pub startup_time: Instant,
+    /// Cursor blink state
+    pub cursor_blink_visible: bool,
+    /// Last cursor blink toggle time
+    pub last_cursor_blink: Instant,
+    /// Last keyboard input time (for adaptive PTY throttling)
+    pub last_keyboard_time: Instant,
+}
+
+impl TimingState {
+    fn new() -> Self {
+        Self {
+            startup_time: Instant::now(),
+            cursor_blink_visible: true,
+            last_cursor_blink: Instant::now(),
+            // Initialize to past so we start in "idle" mode (higher PTY throughput)
+            last_keyboard_time: Instant::now() - std::time::Duration::from_secs(1),
+        }
+    }
+}
+
 /// Main terminal application with VTE-based terminal emulation.
 pub struct InfrawareApp {
     // === Sessions (Split View Support) ===
@@ -74,27 +161,8 @@ pub struct InfrawareApp {
     /// Theme applied flag
     theme_applied: bool,
 
-    /// Font metrics
-    char_width: f32,
-    char_height: f32,
-
-    /// Startup time for delayed init
-    startup_time: Instant,
-
-    /// Cursor blink state
-    cursor_blink_visible: bool,
-
-    /// Last cursor blink toggle time
-    last_cursor_blink: Instant,
-
-    /// Last keyboard input time (for adaptive PTY throttling)
-    last_keyboard_time: Instant,
-
     /// Track window focus state to detect focus gain
     had_window_focus: bool,
-
-    /// Cached font for rendering (avoids per-frame allocation)
-    font_id: FontId,
 
     /// Keyboard input handler (extracted for testability)
     keyboard_handler: KeyboardHandler,
@@ -108,26 +176,14 @@ pub struct InfrawareApp {
     /// Buffer for tracking the current command line (for classification)
     current_command_buffer: String,
 
-    // === LLM & Orchestration ===
-    /// Orchestrator for natural language queries
-    orchestrator: Arc<NaturalLanguageOrchestrator>,
-    /// Channel for background events (sender)
-    bg_event_tx: mpsc::Sender<AppBackgroundEvent>,
-    /// Channel for background events (receiver)
-    bg_event_rx: mpsc::Receiver<AppBackgroundEvent>,
-    /// Cancellation token for active LLM queries (allows Ctrl+C to cancel)
-    llm_cancel_token: Option<tokio_util::sync::CancellationToken>,
+    /// Render buffers and font metrics
+    render: RenderState,
 
-    // === PERFORMANCE: Reusable render buffers (avoid per-frame allocations) ===
-    /// Background rectangles buffer (reused each frame with .clear())
-    render_bg_rects: Vec<(f32, f32, egui::Color32)>,
-    /// Text runs buffer - stores (x_offset, end_index_in_text_buffer, color)
-    /// The actual text is in render_text_buffer
-    render_text_runs: Vec<(f32, usize, egui::Color32)>,
-    /// Single text buffer for all runs in a row (avoids per-run String allocation)
-    render_text_buffer: String,
-    /// Decorations buffer (reused each frame with .clear())
-    render_decorations: Vec<(f32, bool, bool, egui::Color32)>,
+    /// LLM client and event channels
+    llm: LLMState,
+
+    /// Cursor blink and timing
+    timing: TimingState,
 
     // === Clipboard (arboard for direct OS access) ===
     /// Clipboard instance for immediate copy operations (bypasses egui's delayed sync)
@@ -246,8 +302,6 @@ impl InfrawareApp {
                 Arc::new(crate::llm::MockLLMClient::new())
             };
 
-        let orchestrator = Arc::new(NaturalLanguageOrchestrator::new(llm_client));
-
         // Create tiles and track the initial pane's tile ID
         let mut tiles = Tiles::default();
         let initial_tile_id = tiles.insert_pane(initial_session_id);
@@ -258,48 +312,32 @@ impl InfrawareApp {
         session_tile_ids.insert(initial_session_id, initial_tile_id);
 
         Self {
-            // Sessions
             sessions,
             active_session_id: initial_session_id,
-            next_session_id: 1, // Next ID after 0
+            next_session_id: 1,
             theme,
             should_quit: false,
             runtime,
             theme_applied: false,
-            char_width: rendering::CHAR_WIDTH,
-            char_height: rendering::CHAR_HEIGHT,
-            startup_time: Instant::now(),
-            cursor_blink_visible: true,
-            last_cursor_blink: Instant::now(),
-            // Initialize to past so we start in "idle" mode (higher PTY throughput)
-            last_keyboard_time: Instant::now() - std::time::Duration::from_secs(1),
             had_window_focus: false,
-            font_id: FontId::new(rendering::FONT_SIZE, FontFamily::Monospace),
             keyboard_handler: KeyboardHandler::new(),
             input_classifier: InputClassifier::new(),
             current_input_buffer: String::new(),
             current_command_buffer: String::new(),
-            // LLM & Orchestration
-            orchestrator,
-            bg_event_tx,
-            bg_event_rx,
-            llm_cancel_token: None,
-            // Pre-allocate render buffers (reused each frame to avoid allocations)
-            render_bg_rects: Vec::with_capacity(32),
-            render_text_runs: Vec::with_capacity(32),
-            render_text_buffer: String::with_capacity(256),
-            render_decorations: Vec::with_capacity(8),
-            // Clipboard (kept alive for immediate OS access)
+            render: RenderState::new(),
+            llm: LLMState {
+                client: llm_client,
+                response_renderer: ResponseRenderer::new(),
+                bg_event_tx,
+                bg_event_rx,
+                cancel_token: None,
+            },
+            timing: TimingState::new(),
             clipboard,
-            // Scrollbar logic
             scrollbar: Scrollbar::new(),
-            // Split view tiles
             tiles: Some(tree),
-            // Session to TileId mapping (for pane removal)
             session_tile_ids,
-            // No pending focus initially
             pending_focus_session: None,
-            // No pending tab activation initially
             pending_active_tab: None,
             logo_texture,
         }
@@ -493,9 +531,9 @@ impl InfrawareApp {
         let mut completed_commands: SmallVec<[(SessionId, String, String); 1]> = SmallVec::new();
 
         // Adaptive PTY throttle: use lower limit during keyboard activity for Ctrl+C responsiveness
-        // After 200ms of no keyboard input, switch to higher throughput mode
+        // After 100ms of no keyboard input, switch to higher throughput mode
         let byte_limit =
-            if self.last_keyboard_time.elapsed() < std::time::Duration::from_millis(200) {
+            if self.timing.last_keyboard_time.elapsed() < std::time::Duration::from_millis(100) {
                 rendering::MAX_BYTES_PER_FRAME_ACTIVE
             } else {
                 rendering::MAX_BYTES_PER_FRAME_IDLE
@@ -571,7 +609,7 @@ impl InfrawareApp {
 
     /// Poll background events (LLM results, etc.)
     fn poll_background_events(&mut self) {
-        while let Ok(event) = self.bg_event_rx.try_recv() {
+        while let Ok(event) = self.llm.bg_event_rx.try_recv() {
             let session = match self.active_session_mut() {
                 Some(s) => s,
                 None => continue,
@@ -602,11 +640,16 @@ impl InfrawareApp {
                                 continue;
                             }
 
-                            // Then render response lines
-                            let lines = self.orchestrator.render_response(&text);
+                            // Render response lines (markdown → ANSI)
+                            // Note: We need to end the session borrow before calling render
+                            let lines = {
+                                // Session borrow ends here
+                                let _ = session;
+                                self.llm.response_renderer.render(&text)
+                            };
                             log::debug!("Rendered {} lines to display", lines.len());
 
-                            // Re-acquire mutable borrow after orchestrator call
+                            // Re-acquire session for output
                             let session = self.active_session_mut().unwrap();
 
                             // Start with newline to avoid overwriting current prompt
@@ -712,17 +755,17 @@ impl InfrawareApp {
             session.agent_state.start_stream();
         }
 
-        let orchestrator = self.orchestrator.clone();
-        let tx = self.bg_event_tx.clone();
+        let llm_client = self.llm.client.clone();
+        let tx = self.llm.bg_event_tx.clone();
 
         // Create cancellation token and save it for Ctrl+C cancellation
         let cancel_token = tokio_util::sync::CancellationToken::new();
-        self.llm_cancel_token = Some(cancel_token.clone());
+        self.llm.cancel_token = Some(cancel_token.clone());
 
         self.runtime.spawn(async move {
             log::info!("Background task started for query: {}", query);
 
-            match orchestrator.query(&query, cancel_token).await {
+            match llm_client.query_cancellable(&query, cancel_token).await {
                 Ok(result) => {
                     log::info!("LLM query succeeded, sending result to channel");
                     if let Err(e) = tx.send(AppBackgroundEvent::LlmResult(result)) {
@@ -779,7 +822,7 @@ impl InfrawareApp {
 
         // Track keyboard activity for adaptive PTY throttling
         if !actions.is_empty() {
-            self.last_keyboard_time = Instant::now();
+            self.timing.last_keyboard_time = Instant::now();
             if let Some(session) = self.active_session() {
                 log::debug!(
                     "Keyboard actions: {} actions, mode: {:?}",
@@ -842,7 +885,7 @@ impl InfrawareApp {
                     self.send_to_pty(&[0x03]);
 
                     // Cancel LLM stream if active
-                    if let Some(token) = self.llm_cancel_token.take() {
+                    if let Some(token) = self.llm.cancel_token.take() {
                         log::info!("Cancelling active LLM stream");
                         token.cancel();
                         if let Some(session) = self.active_session_mut() {
@@ -969,7 +1012,7 @@ impl InfrawareApp {
 
         match mode {
             AppMode::AwaitingApproval { command, .. } => {
-                let approved = crate::orchestrators::HitlOrchestrator::parse_approval(&input);
+                let approved = crate::orchestrators::parse_approval(&input);
                 if approved {
                     // SECURITY: Validate command before execution
                     let validation = validate_command(&command);
@@ -1070,18 +1113,18 @@ impl InfrawareApp {
         if let Some(session) = self.active_session_mut() {
             session.agent_state.start_stream();
         }
-        let orchestrator = self.orchestrator.clone();
-        let tx = self.bg_event_tx.clone();
+        let llm_client = self.llm.client.clone();
+        let tx = self.llm.bg_event_tx.clone();
 
         let cancel_token = tokio_util::sync::CancellationToken::new();
-        self.llm_cancel_token = Some(cancel_token.clone());
+        self.llm.cancel_token = Some(cancel_token.clone());
 
         self.runtime.spawn(async move {
             tokio::select! {
                 _ = cancel_token.cancelled() => {
                     log::info!("Background LLM run cancelled");
                 }
-                result = orchestrator.resume_run() => {
+                result = llm_client.resume_run() => {
                     match result {
                         Ok(r) => { let _ = tx.send(AppBackgroundEvent::LlmResult(r)); }
                         Err(e) => { let _ = tx.send(AppBackgroundEvent::LlmError(e.to_string())); }
@@ -1097,19 +1140,19 @@ impl InfrawareApp {
             session.mode = AppMode::WaitingLLM;
             session.agent_state.start_stream();
         }
-        let orchestrator = self.orchestrator.clone();
-        let tx = self.bg_event_tx.clone();
+        let llm_client = self.llm.client.clone();
+        let tx = self.llm.bg_event_tx.clone();
 
         // Create cancellation token for Ctrl+C cancellation
         let cancel_token = tokio_util::sync::CancellationToken::new();
-        self.llm_cancel_token = Some(cancel_token.clone());
+        self.llm.cancel_token = Some(cancel_token.clone());
 
         self.runtime.spawn(async move {
             tokio::select! {
                 _ = cancel_token.cancelled() => {
                     log::info!("Background LLM answer run cancelled");
                 }
-                result = orchestrator.resume_with_answer(&answer) => {
+                result = llm_client.resume_with_answer(&answer) => {
                     match result {
                         Ok(r) => { let _ = tx.send(AppBackgroundEvent::LlmResult(r)); }
                         Err(e) => { let _ = tx.send(AppBackgroundEvent::LlmError(e.to_string())); }
@@ -1125,18 +1168,18 @@ impl InfrawareApp {
         if let Some(session) = self.active_session_mut() {
             session.agent_state.start_stream();
         }
-        let orchestrator = self.orchestrator.clone();
-        let tx = self.bg_event_tx.clone();
+        let llm_client = self.llm.client.clone();
+        let tx = self.llm.bg_event_tx.clone();
 
         let cancel_token = tokio_util::sync::CancellationToken::new();
-        self.llm_cancel_token = Some(cancel_token.clone());
+        self.llm.cancel_token = Some(cancel_token.clone());
 
         self.runtime.spawn(async move {
             tokio::select! {
                 _ = cancel_token.cancelled() => {
                     log::info!("Background LLM command output run cancelled");
                 }
-                result = orchestrator.resume_with_command_output(&command, &output) => {
+                result = llm_client.resume_with_command_output(&command, &output) => {
                     match result {
                         Ok(r) => { let _ = tx.send(AppBackgroundEvent::LlmResult(r)); }
                         Err(e) => { let _ = tx.send(AppBackgroundEvent::LlmError(e.to_string())); }
@@ -1152,18 +1195,18 @@ impl InfrawareApp {
             session.mode = AppMode::WaitingLLM;
             session.agent_state.start_stream();
         }
-        let orchestrator = self.orchestrator.clone();
-        let tx = self.bg_event_tx.clone();
+        let llm_client = self.llm.client.clone();
+        let tx = self.llm.bg_event_tx.clone();
 
         let cancel_token = tokio_util::sync::CancellationToken::new();
-        self.llm_cancel_token = Some(cancel_token.clone());
+        self.llm.cancel_token = Some(cancel_token.clone());
 
         self.runtime.spawn(async move {
             tokio::select! {
                 _ = cancel_token.cancelled() => {
                     log::info!("Background LLM rejected run cancelled");
                 }
-                result = orchestrator.resume_rejected() => {
+                result = llm_client.resume_rejected() => {
                     match result {
                         Ok(r) => { let _ = tx.send(AppBackgroundEvent::LlmResult(r)); }
                         Err(e) => { let _ = tx.send(AppBackgroundEvent::LlmError(e.to_string())); }
@@ -1185,8 +1228,8 @@ impl InfrawareApp {
     /// Convert screen coordinates to grid (row, col).
     /// Returns visible row index (0-based from top of visible area).
     fn screen_to_grid(&self, pos: Pos2, rect: Rect, session: &TerminalSession) -> (usize, usize) {
-        let col = ((pos.x - rect.left()) / self.char_width).max(0.0) as usize;
-        let row = ((pos.y - rect.top()) / self.char_height).max(0.0) as usize;
+        let col = ((pos.x - rect.left()) / self.render.char_width).max(0.0) as usize;
+        let row = ((pos.y - rect.top()) / self.render.char_height).max(0.0) as usize;
 
         // Clamp to valid range
         let max_col = session.terminal_size.0.saturating_sub(1) as usize;
@@ -1351,7 +1394,7 @@ impl InfrawareApp {
         // we might need a reactive repaint to let the resize logic catch up.
         // The 1-column tolerance (saturating_sub(1)) accounts for floating-point
         // rounding differences between egui's available_size and our char_width calc.
-        let expected_cols = (available.x / self.char_width).floor() as u16;
+        let expected_cols = (available.x / self.render.char_width).floor() as u16;
         let (_, current_cols) = session.terminal_handler.grid().size();
         if current_cols < expected_cols.saturating_sub(1) {
             ui.ctx().request_repaint();
@@ -1422,7 +1465,7 @@ impl InfrawareApp {
             if scroll_delta != 0.0
                 && let Some(session) = self.sessions.get_mut(&session_id)
             {
-                let lines = (scroll_delta / self.char_height).round() as i32;
+                let lines = (scroll_delta / self.render.char_height).round() as i32;
                 let grid = session.terminal_handler.grid_mut();
                 if lines > 0 {
                     grid.scroll_view_up(lines as usize);
@@ -1471,10 +1514,10 @@ impl InfrawareApp {
         // PERFORMANCE: Pre-compute selection bounds once if selection exists (per-session)
         let selection_bounds = session.selection.as_ref().map(|sel| sel.normalized());
 
-        // Cache font_id reference
-        let font_id = &self.font_id;
-        let char_width = self.char_width;
-        let char_height = self.char_height;
+        // Cache font metrics (clone FontId to avoid borrowing self.render across clear_buffers)
+        let font_id = self.render.font_id.clone();
+        let char_width = self.render.char_width;
+        let char_height = self.render.char_height;
         let theme_background = self.theme.background;
         let theme_selection = self.theme.selection;
 
@@ -1484,10 +1527,7 @@ impl InfrawareApp {
             let y = rect.top() + row_idx as f32 * char_height;
 
             // Clear buffers (O(1) - reuses capacity)
-            self.render_bg_rects.clear();
-            self.render_text_runs.clear();
-            self.render_text_buffer.clear();
-            self.render_decorations.clear();
+            self.render.clear_buffers();
 
             // State for batching
             let mut bg_start: Option<(usize, Color32)> = None;
@@ -1545,7 +1585,7 @@ impl InfrawareApp {
                         Some((_start, color)) if color == bg => {}
                         Some((start, color)) => {
                             let width = (col_idx - start) as f32 * char_width;
-                            self.render_bg_rects.push((
+                            self.render.bg_rects.push((
                                 col_x(start, column_x_coords),
                                 width,
                                 color,
@@ -1558,16 +1598,16 @@ impl InfrawareApp {
                     }
                 } else if let Some((start, color)) = bg_start.take() {
                     let width = (col_idx - start) as f32 * char_width;
-                    self.render_bg_rects
+                    self.render.bg_rects
                         .push((col_x(start, column_x_coords), width, color));
                 }
 
                 // --- Text batching (using shared buffer) ---
                 if cell.ch == ' ' || cell.attrs.hidden() {
                     if let Some((start, color)) = run_start.take() {
-                        let end_idx = self.render_text_buffer.len();
+                        let end_idx = self.render.text_buffer.len();
                         if end_idx > 0 {
-                            self.render_text_runs.push((
+                            self.render.text_runs.push((
                                 col_x(start, column_x_coords),
                                 end_idx,
                                 color,
@@ -1577,30 +1617,30 @@ impl InfrawareApp {
                 } else {
                     match run_start {
                         Some((_start, color)) if color == cell_fg => {
-                            self.render_text_buffer.push(cell.ch);
+                            self.render.text_buffer.push(cell.ch);
                         }
                         Some((start, color)) => {
-                            let end_idx = self.render_text_buffer.len();
+                            let end_idx = self.render.text_buffer.len();
                             if end_idx > 0 {
-                                self.render_text_runs.push((
+                                self.render.text_runs.push((
                                     col_x(start, column_x_coords),
                                     end_idx,
                                     color,
                                 ));
                             }
                             run_start = Some((col_idx, cell_fg));
-                            self.render_text_buffer.push(cell.ch);
+                            self.render.text_buffer.push(cell.ch);
                         }
                         None => {
                             run_start = Some((col_idx, cell_fg));
-                            self.render_text_buffer.push(cell.ch);
+                            self.render.text_buffer.push(cell.ch);
                         }
                     }
                 }
 
                 // --- Decorations ---
                 if cell.attrs.underline() || cell.attrs.strikethrough() {
-                    self.render_decorations.push((
+                    self.render.decorations.push((
                         col_x(col_idx, column_x_coords),
                         cell.attrs.underline(),
                         cell.attrs.strikethrough(),
@@ -1612,30 +1652,30 @@ impl InfrawareApp {
             // Flush remaining background
             if let Some((start, color)) = bg_start {
                 let width = (row_len - start) as f32 * char_width;
-                self.render_bg_rects
+                self.render.bg_rects
                     .push((col_x(start, column_x_coords), width, color));
             }
 
             // Flush remaining text
             if run_start.is_some() {
-                let end_idx = self.render_text_buffer.len();
+                let end_idx = self.render.text_buffer.len();
                 if let Some((start, color)) = run_start
                     && end_idx > 0
                 {
-                    self.render_text_runs
+                    self.render.text_runs
                         .push((col_x(start, column_x_coords), end_idx, color));
                 }
             }
 
             // === DRAW PHASE ===
-            render_backgrounds(&painter, rect, y, char_height, &self.render_bg_rects);
+            render_backgrounds(&painter, rect, y, char_height, &self.render.bg_rects);
             render_text_runs_buffered(
                 &painter,
                 rect,
                 y,
-                font_id,
-                &self.render_text_buffer,
-                &self.render_text_runs,
+                &font_id,
+                &self.render.text_buffer,
+                &self.render.text_runs,
             );
             render_decorations(
                 &painter,
@@ -1643,14 +1683,14 @@ impl InfrawareApp {
                 y,
                 char_width,
                 char_height,
-                &self.render_decorations,
+                &self.render.decorations,
             );
         }
 
         // === PHASE 6: Cursor/Throbber rendering ===
         if show_throbber && scroll_offset == 0 {
             let frame_idx =
-                (self.startup_time.elapsed().as_millis() / 250) as usize % SPINNER_FRAMES.len();
+                (self.timing.startup_time.elapsed().as_millis() / 250) as usize % SPINNER_FRAMES.len();
             let frame = SPINNER_FRAMES[frame_idx];
             let row_y = rect.top() + cursor_row as f32 * char_height;
             let spinner_x = rect.left() + cursor_col as f32 * char_width;
@@ -1663,7 +1703,7 @@ impl InfrawareApp {
                 Color32::from_rgb(0, 255, 255),
             );
         } else if cursor_visible
-            && self.cursor_blink_visible
+            && self.timing.cursor_blink_visible
             && scroll_offset == 0
             && has_focus
             && shell_initialized
@@ -1683,6 +1723,7 @@ impl InfrawareApp {
         if max_scroll > 0 {
             render_scrollbar(&painter, rect, scroll_offset, max_scroll, visible_row_count);
         }
+
     }
 
     /// Split the active pane horizontally (new pane to the right).
@@ -2093,8 +2134,8 @@ impl egui_tiles::Behavior<SessionId> for TerminalBehavior<'_> {
             .show(ui, |ui| {
                 // Calculate terminal size based on pane size
                 let available = ui.available_size();
-                let cols = ((available.x / self.app.char_width) as u16).max(20);
-                let rows = ((available.y / self.app.char_height) as u16).max(5);
+                let cols = ((available.x / self.app.render.char_width) as u16).max(20);
+                let rows = ((available.y / self.app.render.char_height) as u16).max(5);
 
                 // Check if resize is needed (triggers repaint if size changed)
                 let size_changed = self.app.resize_session_pty(session_id, cols, rows);
@@ -2168,15 +2209,15 @@ impl eframe::App for InfrawareApp {
 
         // Update cursor blink only when window has focus AND not minimized (530ms interval)
         if has_focus && !is_minimized {
-            if self.last_cursor_blink.elapsed() > timing::CURSOR_BLINK_INTERVAL {
-                self.cursor_blink_visible = !self.cursor_blink_visible;
-                self.last_cursor_blink = Instant::now();
+            if self.timing.last_cursor_blink.elapsed() > timing::CURSOR_BLINK_INTERVAL {
+                self.timing.cursor_blink_visible = !self.timing.cursor_blink_visible;
+                self.timing.last_cursor_blink = Instant::now();
             }
         } else {
             // When unfocused or minimized, keep cursor visible but static
             // Reset timer so blink starts fresh when focus returns
-            self.cursor_blink_visible = true;
-            self.last_cursor_blink = Instant::now();
+            self.timing.cursor_blink_visible = true;
+            self.timing.last_cursor_blink = Instant::now();
         }
 
         // Check for SIGINT (Ctrl+C) from system signal handler
@@ -2260,7 +2301,7 @@ impl eframe::App for InfrawareApp {
 
             // Calculate time until next cursor blink
             let blink_interval = timing::CURSOR_BLINK_INTERVAL;
-            let time_since_blink = self.last_cursor_blink.elapsed();
+            let time_since_blink = self.timing.last_cursor_blink.elapsed();
             let cursor_needs_blink = time_since_blink >= blink_interval;
 
             // Check if we need to animate the throbber (4 FPS / 250ms)
