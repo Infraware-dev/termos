@@ -249,4 +249,122 @@ mod tests {
         assert!(store.get_messages(&fake_id).await.is_none());
         assert!(!store.add_messages(&fake_id, vec![]).await);
     }
+
+    #[tokio::test]
+    async fn test_thread_count() {
+        let store = StateStore::new();
+        assert_eq!(store.thread_count().await, 0);
+
+        store.create_thread().await;
+        assert_eq!(store.thread_count().await, 1);
+
+        store.create_thread().await;
+        assert_eq!(store.thread_count().await, 2);
+    }
+
+    #[tokio::test]
+    async fn test_store_interrupt_nonexistent_thread() {
+        let store = StateStore::new();
+        let fake_id = ThreadId::new("nonexistent");
+        let interrupt = PendingInterrupt::command_approval_with_tool(
+            "ls".to_string(),
+            "list".to_string(),
+            false,
+            None,
+            None,
+        );
+        assert!(!store.store_interrupt(&fake_id, interrupt).await);
+    }
+
+    #[tokio::test]
+    async fn test_take_interrupt_nonexistent_thread() {
+        let store = StateStore::new();
+        let fake_id = ThreadId::new("nonexistent");
+        assert!(store.take_interrupt(&fake_id).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_get_messages_returns_clone() {
+        let store = StateStore::new();
+        let thread_id = store.create_thread().await;
+
+        let messages = vec![Message::user("Hello")];
+        store.add_messages(&thread_id, messages).await;
+
+        let retrieved1 = store.get_messages(&thread_id).await.unwrap();
+        let retrieved2 = store.get_messages(&thread_id).await.unwrap();
+        assert_eq!(retrieved1.len(), retrieved2.len());
+    }
+
+    #[test]
+    fn test_pending_interrupt_command_approval_with_tool() {
+        let interrupt = PendingInterrupt::command_approval_with_tool(
+            "ls -la".to_string(),
+            "List files".to_string(),
+            true,
+            Some("tool-123".to_string()),
+            Some(serde_json::json!({"command": "ls -la"})),
+        );
+
+        match interrupt.resume_context {
+            ResumeContext::CommandApproval {
+                command,
+                needs_continuation,
+            } => {
+                assert_eq!(command, "ls -la");
+                assert!(needs_continuation);
+            }
+            _ => panic!("Expected CommandApproval context"),
+        }
+    }
+
+    #[test]
+    fn test_pending_interrupt_question_with_tool() {
+        let interrupt = PendingInterrupt::question_with_tool(
+            "Which option?".to_string(),
+            Some(vec!["A".to_string(), "B".to_string()]),
+            Some("tool-456".to_string()),
+            None,
+        );
+
+        match interrupt.resume_context {
+            ResumeContext::Question { question } => {
+                assert_eq!(question, "Which option?");
+            }
+            _ => panic!("Expected Question context"),
+        }
+    }
+
+    #[test]
+    fn test_pending_interrupt_sudo_password() {
+        let interrupt = PendingInterrupt::sudo_password("apt update".to_string());
+
+        match interrupt.resume_context {
+            ResumeContext::SudoPassword { command } => {
+                assert_eq!(command, "apt update");
+            }
+            _ => panic!("Expected SudoPassword context"),
+        }
+        assert!(interrupt.tool_call_id.is_none());
+        assert!(interrupt.tool_args.is_none());
+    }
+
+    #[test]
+    fn test_resume_context_debug() {
+        let ctx = ResumeContext::CommandApproval {
+            command: "ls".to_string(),
+            needs_continuation: false,
+        };
+        let debug_str = format!("{:?}", ctx);
+        assert!(debug_str.contains("CommandApproval"));
+    }
+
+    #[test]
+    fn test_state_store_default() {
+        let store1 = StateStore::new();
+        let store2 = StateStore::default();
+        // Both should be empty initially (can't compare directly)
+        assert!(format!("{:?}", store1).contains("StateStore"));
+        assert!(format!("{:?}", store2).contains("StateStore"));
+    }
 }

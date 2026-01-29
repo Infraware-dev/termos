@@ -11,5 +11,4 @@ pub mod cell;
 pub mod grid;
 pub mod handler;
 
-pub use cell::Color;
 pub use handler::TerminalHandler;

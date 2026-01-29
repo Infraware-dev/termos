@@ -261,9 +261,9 @@ mod live_tests {
                                 break;
                             }
                         }
-                        if received_interrupt {
-                            break;
-                        }
+                    }
+                    if received_interrupt {
+                        break;
                     }
                 }
                 Ok(AgentEvent::Error { message }) => panic!("Unexpected error: {}", message),

@@ -227,12 +227,8 @@ pub async fn stream_run(
         let response = match command.resume.as_str() {
             "approved" => {
                 // Check if there's user input (answer to question)
-                if let Some(input) = &req.input {
-                    if let Some(msg) = input.messages.first() {
-                        ResumeResponse::answer(&msg.content)
-                    } else {
-                        ResumeResponse::approved()
-                    }
+                if let Some(msg) = req.input.as_ref().and_then(|i| i.messages.first()) {
+                    ResumeResponse::answer(&msg.content)
                 } else {
                     ResumeResponse::approved()
                 }
@@ -380,11 +376,11 @@ pub async fn stream_run(
                         interrupts: Some(ref ints),
                     } if !ints.is_empty() => {
                         // Emit Interrupted status with the first interrupt
-                        if let Some(int) = ints.first() {
-                            events.push(Ok(create_status_event(EngineStatus::interrupted(
-                                int.clone(),
-                            ))));
-                        }
+                        // Guard ensures ints is non-empty, so first() always succeeds
+                        let int = &ints[0];
+                        events.push(Ok(create_status_event(EngineStatus::interrupted(
+                            int.clone(),
+                        ))));
                     }
                     AgentEvent::End => {
                         // Emit Ready status when stream ends normally

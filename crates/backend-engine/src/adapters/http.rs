@@ -524,7 +524,9 @@ mod tests {
         });
         let interrupt = parse_interrupt(&value);
         match interrupt {
-            Interrupt::CommandApproval { command, message, .. } => {
+            Interrupt::CommandApproval {
+                command, message, ..
+            } => {
                 assert_eq!(command, "rm -rf temp/");
                 assert_eq!(message, "Clean up temp files");
             }

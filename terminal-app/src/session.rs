@@ -195,14 +195,15 @@ impl TerminalSession {
 
     /// Send SIGINT to the foreground process group.
     pub fn send_sigint(&self) {
-        if let Some(ref manager) = self.pty_manager {
-            if let Ok(mgr) = manager.try_lock() {
-                if let Err(e) = mgr.send_sigint() {
-                    log::error!("Session {}: Failed to send SIGINT: {}", self.id, e);
-                }
-            } else {
-                log::warn!("Session {}: Could not lock PTY manager for SIGINT", self.id);
-            }
+        let Some(ref manager) = self.pty_manager else {
+            return;
+        };
+        let Ok(mgr) = manager.try_lock() else {
+            log::warn!("Session {}: Could not lock PTY manager for SIGINT", self.id);
+            return;
+        };
+        if let Err(e) = mgr.send_sigint() {
+            log::error!("Session {}: Failed to send SIGINT: {}", self.id, e);
         }
     }
 
@@ -283,12 +284,12 @@ impl TerminalSession {
     /// - `command_completed`: true if a command in ExecutingCommand mode finished (prompt detected)
     pub fn poll_pty_output(&mut self, byte_limit: usize) -> (bool, bool) {
         // If paused (after Ctrl+C), skip reading
-        if let Some(until) = self.output_pause_until {
-            if Instant::now() < until {
-                return (false, false);
-            }
-            self.output_pause_until = None;
+        if let Some(until) = self.output_pause_until
+            && Instant::now() < until
+        {
+            return (false, false);
         }
+        self.output_pause_until = None;
 
         let mut bytes_processed = 0;
         let mut command_completed = false;

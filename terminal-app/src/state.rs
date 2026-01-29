@@ -84,7 +84,6 @@ impl AgentState {
     pub fn end_stream(&mut self) {
         self.stream_started = None;
     }
-
 }
 
 #[allow(dead_code)] // State machine API used when LLM integration is active

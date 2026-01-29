@@ -321,3 +321,246 @@ impl Cell {
         self.attrs.reset();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Color tests
+    #[test]
+    fn test_color_default() {
+        let color = Color::default();
+        assert_eq!(color, Color::Named(NamedColor::Foreground));
+    }
+
+    #[test]
+    fn test_color_rgb() {
+        let color = Color::Rgb(255, 128, 0);
+        let egui_color = color.to_egui(true);
+        assert_eq!(egui_color, Color32::from_rgb(255, 128, 0));
+    }
+
+    #[test]
+    fn test_color_indexed_standard() {
+        // Standard red (index 1)
+        let color = Color::Indexed(1);
+        let egui_color = color.to_egui(true);
+        assert_eq!(egui_color, NamedColor::Red.to_egui());
+    }
+
+    #[test]
+    fn test_color_indexed_216_cube() {
+        // Index 16 is first color in 6x6x6 cube (black)
+        let color = Color::Indexed(16);
+        let egui_color = color.to_egui(true);
+        assert_eq!(egui_color, Color32::from_rgb(0, 0, 0));
+
+        // Index 231 is last color in cube (white)
+        let color = Color::Indexed(231);
+        let egui_color = color.to_egui(true);
+        assert_eq!(egui_color, Color32::from_rgb(255, 255, 255));
+    }
+
+    #[test]
+    fn test_color_indexed_grayscale() {
+        // Index 232 is first grayscale
+        let color = Color::Indexed(232);
+        let egui_color = color.to_egui(true);
+        assert_eq!(egui_color, Color32::from_rgb(8, 8, 8));
+
+        // Index 255 is last grayscale
+        let color = Color::Indexed(255);
+        let egui_color = color.to_egui(true);
+        let expected_gray = 8 + (255 - 232) * 10;
+        assert_eq!(
+            egui_color,
+            Color32::from_rgb(expected_gray, expected_gray, expected_gray)
+        );
+    }
+
+    #[test]
+    fn test_color_from_sgr_basic_foreground() {
+        assert_eq!(
+            Color::from_sgr_basic(30),
+            Some(Color::Named(NamedColor::Black))
+        );
+        assert_eq!(
+            Color::from_sgr_basic(31),
+            Some(Color::Named(NamedColor::Red))
+        );
+        assert_eq!(
+            Color::from_sgr_basic(37),
+            Some(Color::Named(NamedColor::White))
+        );
+        assert_eq!(
+            Color::from_sgr_basic(39),
+            Some(Color::Named(NamedColor::Foreground))
+        );
+    }
+
+    #[test]
+    fn test_color_from_sgr_basic_background() {
+        assert_eq!(
+            Color::from_sgr_basic(40),
+            Some(Color::Named(NamedColor::Black))
+        );
+        assert_eq!(
+            Color::from_sgr_basic(41),
+            Some(Color::Named(NamedColor::Red))
+        );
+        assert_eq!(
+            Color::from_sgr_basic(47),
+            Some(Color::Named(NamedColor::White))
+        );
+        assert_eq!(
+            Color::from_sgr_basic(49),
+            Some(Color::Named(NamedColor::Background))
+        );
+    }
+
+    #[test]
+    fn test_color_from_sgr_basic_bright() {
+        assert_eq!(
+            Color::from_sgr_basic(90),
+            Some(Color::Named(NamedColor::BrightBlack))
+        );
+        assert_eq!(
+            Color::from_sgr_basic(97),
+            Some(Color::Named(NamedColor::BrightWhite))
+        );
+        assert_eq!(
+            Color::from_sgr_basic(100),
+            Some(Color::Named(NamedColor::BrightBlack))
+        );
+        assert_eq!(
+            Color::from_sgr_basic(107),
+            Some(Color::Named(NamedColor::BrightWhite))
+        );
+    }
+
+    #[test]
+    fn test_color_from_sgr_basic_invalid() {
+        assert_eq!(Color::from_sgr_basic(0), None);
+        assert_eq!(Color::from_sgr_basic(29), None);
+        assert_eq!(Color::from_sgr_basic(38), None);
+        assert_eq!(Color::from_sgr_basic(48), None);
+    }
+
+    // NamedColor tests
+    #[test]
+    fn test_named_color_to_egui() {
+        // Spot check a few colors
+        assert_eq!(NamedColor::Black.to_egui(), Color32::from_rgb(0, 0, 0));
+        assert_eq!(NamedColor::Red.to_egui(), Color32::from_rgb(204, 0, 0));
+        assert_eq!(
+            NamedColor::Foreground.to_egui(),
+            Color32::from_rgb(204, 204, 204)
+        );
+        assert_eq!(
+            NamedColor::Background.to_egui(),
+            Color32::from_rgb(27, 27, 27)
+        );
+    }
+
+    // CellAttrs tests
+    #[test]
+    fn test_cell_attrs_default() {
+        let attrs = CellAttrs::default();
+        assert!(attrs.is_empty());
+        assert!(!attrs.underline());
+        assert!(!attrs.dim());
+    }
+
+    #[test]
+    fn test_cell_attrs_set_and_get() {
+        let mut attrs = CellAttrs::default();
+
+        attrs.set_bold(true);
+        assert!(attrs.bold());
+
+        attrs.set_italic(true);
+        assert!(attrs.italic());
+
+        attrs.set_underline(true);
+        assert!(attrs.underline());
+
+        attrs.set_strikethrough(true);
+        assert!(attrs.strikethrough());
+
+        attrs.set_dim(true);
+        assert!(attrs.dim());
+
+        attrs.set_reverse(true);
+        assert!(attrs.reverse());
+
+        attrs.set_hidden(true);
+        assert!(attrs.hidden());
+
+        attrs.set_blink(true);
+        assert!(attrs.blink());
+    }
+
+    #[test]
+    fn test_cell_attrs_reset() {
+        let mut attrs = CellAttrs::all();
+        assert!(!attrs.is_empty());
+
+        attrs.reset();
+        assert!(attrs.is_empty());
+    }
+
+    #[test]
+    fn test_cell_attrs_toggle() {
+        let mut attrs = CellAttrs::default();
+        attrs.set_bold(true);
+        assert!(attrs.bold());
+
+        attrs.set_bold(false);
+        assert!(!attrs.bold());
+    }
+
+    // Cell tests
+    #[test]
+    fn test_cell_default() {
+        let cell = Cell::default();
+        assert_eq!(cell.ch, ' ');
+        assert_eq!(cell.fg, Color::Named(NamedColor::Foreground));
+        assert_eq!(cell.bg, Color::Named(NamedColor::Background));
+        assert!(cell.attrs.is_empty());
+    }
+
+    #[test]
+    fn test_cell_new() {
+        let attrs = CellAttrs::BOLD | CellAttrs::UNDERLINE;
+        let cell = Cell::new('A', Color::Rgb(255, 0, 0), Color::Rgb(0, 0, 255), attrs);
+        assert_eq!(cell.ch, 'A');
+        assert_eq!(cell.fg, Color::Rgb(255, 0, 0));
+        assert_eq!(cell.bg, Color::Rgb(0, 0, 255));
+        assert!(cell.attrs.contains(CellAttrs::BOLD));
+        assert!(cell.attrs.contains(CellAttrs::UNDERLINE));
+    }
+
+    #[test]
+    fn test_cell_reset() {
+        let mut cell = Cell::new(
+            'X',
+            Color::Rgb(255, 0, 0),
+            Color::Rgb(0, 255, 0),
+            CellAttrs::BOLD,
+        );
+
+        cell.reset();
+
+        assert_eq!(cell.ch, ' ');
+        assert_eq!(cell.fg, Color::Named(NamedColor::Foreground));
+        assert_eq!(cell.bg, Color::Named(NamedColor::Background));
+        assert!(cell.attrs.is_empty());
+    }
+
+    #[test]
+    fn test_cell_debug() {
+        let cell = Cell::default();
+        let debug_str = format!("{:?}", cell);
+        assert!(debug_str.contains("Cell"));
+    }
+}

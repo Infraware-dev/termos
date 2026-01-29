@@ -12,4 +12,4 @@ pub use command_validator::{ValidationResult, validate_command};
 pub use keyboard::{KeyboardAction, KeyboardHandler};
 pub use output_capture::OutputCapture;
 pub use prompt_detector::PromptDetector;
-pub use selection::TextSelection;
+pub use selection::{SelectionPoint, TextSelection};

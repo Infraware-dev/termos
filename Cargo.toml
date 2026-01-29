@@ -1,10 +1,10 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/shared",
-    "crates/backend-api",
-    "crates/backend-engine",
-    "terminal-app",
+  "crates/shared",
+  "crates/backend-api",
+  "crates/backend-engine",
+  "terminal-app",
 ]
 
 [workspace.package]
@@ -29,6 +29,8 @@ perf = "warn"
 style = "warn"
 suspicious = "warn"
 # pedantic = "warn"  # TODO: enable after fixing existing warnings
+# Enforce module_name.rs convention over mod.rs
+mod_module_files = "warn"
 
 [workspace.dependencies]
 # Async runtime

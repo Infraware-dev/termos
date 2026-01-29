@@ -764,7 +764,7 @@ pub fn create_resume_stream(
 
                 let continuation = format!(
                     "The command `{}` was executed. Output:\n\n{}\n\nPlease continue with your original task based on this information. \
-If you need to run more commands, use execute_shell_command.",
+    If you need to run more commands, use execute_shell_command.",
                     command, output.trim()
                 );
 

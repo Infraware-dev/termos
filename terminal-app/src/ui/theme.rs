@@ -84,3 +84,48 @@ impl Theme {
         ctx.set_style(style);
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_theme_default_is_dark() {
+        let default_theme = Theme::default();
+        let dark_theme = Theme::dark();
+
+        // Both should have same background
+        assert_eq!(default_theme.background, dark_theme.background);
+        assert_eq!(default_theme.text, dark_theme.text);
+    }
+
+    #[test]
+    fn test_theme_dark_colors() {
+        let theme = Theme::dark();
+
+        // Background should be dark
+        assert_eq!(theme.background, Color32::from_rgb(27, 27, 27));
+
+        // Text should be light gray
+        assert_eq!(theme.text, Color32::from_rgb(204, 204, 204));
+
+        // Error should be reddish
+        assert_eq!(theme.error, Color32::from_rgb(224, 108, 117));
+    }
+
+    #[test]
+    fn test_theme_debug() {
+        let theme = Theme::dark();
+        let debug_str = format!("{:?}", theme);
+        assert!(debug_str.contains("Theme"));
+        assert!(debug_str.contains("background"));
+    }
+
+    #[test]
+    fn test_theme_clone() {
+        let theme1 = Theme::dark();
+        let theme2 = theme1.clone();
+        assert_eq!(theme1.background, theme2.background);
+        assert_eq!(theme1.text, theme2.text);
+    }
+}

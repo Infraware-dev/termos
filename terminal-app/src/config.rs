@@ -67,3 +67,74 @@ pub mod pty {
     /// during heavy output (e.g., cat large_file, colorful TUI apps).
     pub const READER_BUFFER_SIZE: usize = 64 * 1024;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_timing_cursor_blink_reasonable() {
+        // Cursor blink should be between 300ms and 1000ms
+        let blink_ms = timing::CURSOR_BLINK_INTERVAL.as_millis();
+        assert!(blink_ms >= 300, "Blink too fast: {}ms", blink_ms);
+        assert!(blink_ms <= 1000, "Blink too slow: {}ms", blink_ms);
+    }
+
+    #[test]
+    fn test_timing_shell_init_delay() {
+        // Shell init delay should be reasonable (100ms to 2s)
+        let delay_ms = timing::SHELL_INIT_DELAY.as_millis();
+        assert!(delay_ms >= 100, "Init delay too short: {}ms", delay_ms);
+        assert!(delay_ms <= 2000, "Init delay too long: {}ms", delay_ms);
+    }
+
+    #[test]
+    fn test_timing_init_commands_delay() {
+        // Init commands delay should be shorter than shell init
+        assert!(timing::INIT_COMMANDS_DELAY < timing::SHELL_INIT_DELAY);
+    }
+
+    #[test]
+    fn test_rendering_bytes_per_frame() {
+        // Active mode should process at least 4KB per frame
+        assert!(rendering::MAX_BYTES_PER_FRAME_ACTIVE >= 4 * 1024);
+
+        // Idle mode should be larger than active mode
+        assert!(rendering::MAX_BYTES_PER_FRAME_IDLE >= rendering::MAX_BYTES_PER_FRAME_ACTIVE);
+    }
+
+    #[test]
+    fn test_rendering_font_metrics() {
+        // Font size should be reasonable (8-24 points)
+        assert!(rendering::FONT_SIZE >= 8.0);
+        assert!(rendering::FONT_SIZE <= 24.0);
+
+        // Character dimensions should be positive
+        assert!(rendering::CHAR_WIDTH > 0.0);
+        assert!(rendering::CHAR_HEIGHT > 0.0);
+
+        // Height should be larger than width for monospace
+        assert!(rendering::CHAR_HEIGHT > rendering::CHAR_WIDTH);
+    }
+
+    #[test]
+    fn test_size_defaults() {
+        // Default terminal size should be reasonable
+        assert!(size::DEFAULT_ROWS >= 10);
+        assert!(size::DEFAULT_ROWS <= 100);
+        assert!(size::DEFAULT_COLS >= 40);
+        assert!(size::DEFAULT_COLS <= 300);
+    }
+
+    #[test]
+    fn test_pty_channel_capacity() {
+        // Channel capacity should be large enough for buffering
+        assert!(pty::CHANNEL_CAPACITY >= 64);
+    }
+
+    #[test]
+    fn test_pty_reader_buffer_size() {
+        // Reader buffer should be at least 1KB
+        assert!(pty::READER_BUFFER_SIZE >= 1024);
+    }
+}

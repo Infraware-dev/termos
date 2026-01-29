@@ -41,7 +41,6 @@ dotenvy = "0.15"
 # Utilities
 image = { version = "0.25", default-features = false, features = ["png"] }
 which = "8.0"
-hostname = "0.4"
 vte = "0.15"
 ctrlc = "3.4"
 regex = "1.12"

@@ -147,9 +147,6 @@ pub trait LLMClientTrait: Send + Sync + std::fmt::Debug {
     /// Returns LLMQueryResult which can be Complete or Interrupted (for HITL).
     async fn query(&self, text: &str) -> Result<LLMQueryResult>;
 
-    /// Resume an interrupted run after user approval (for command approval).
-    async fn resume_run(&self) -> Result<LLMQueryResult>;
-
     /// Resume an interrupted run with a text answer (for questions)
     async fn resume_with_answer(&self, answer: &str) -> Result<LLMQueryResult>;
 
@@ -648,22 +645,22 @@ impl HttpLLMClient {
                 continue;
             }
 
-            if let Some(content) = Self::extract_message_content(msg) {
-                if Self::is_valid_ai_content(&content) {
-                    log::info!(
-                        "Found AI message content ({} chars): {}...",
-                        content.len(),
-                        truncate_utf8(&content, 100)
-                    );
-                    result.clear(); // Replace with latest AI message
-                    result.push_str(&content);
-                    break; // Found a good message, stop searching
-                } else {
-                    log::debug!(
-                        "Skipping invalid AI content: {}...",
-                        truncate_utf8(&content, 50)
-                    );
-                }
+            if let Some(content) = Self::extract_message_content(msg)
+                && Self::is_valid_ai_content(&content)
+            {
+                log::info!(
+                    "Found AI message content ({} chars): {}...",
+                    content.len(),
+                    truncate_utf8(&content, 100)
+                );
+                result.clear(); // Replace with latest AI message
+                result.push_str(&content);
+                break; // Found a good message, stop searching
+            } else if let Some(content) = Self::extract_message_content(msg) {
+                log::debug!(
+                    "Skipping invalid AI content: {}...",
+                    truncate_utf8(&content, 50)
+                );
             } else {
                 log::debug!("No content extracted from AI message");
             }
@@ -730,24 +727,6 @@ impl LLMClientTrait for HttpLLMClient {
 
         let stream_result = self
             .stream_run(&thread_id, Some(text), false, cancel_token)
-            .await?;
-
-        // Convert internal StreamResult to public LLMQueryResult
-        Self::convert_stream_result(stream_result)
-    }
-
-    async fn resume_run(&self) -> Result<LLMQueryResult> {
-        log::debug!("Resuming LLM run after user approval");
-
-        let thread_id = self
-            .thread_id
-            .read()
-            .await
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("No active thread to resume"))?;
-
-        let stream_result = self
-            .stream_run(&thread_id, None, true, CancellationToken::new())
             .await?;
 
         // Convert internal StreamResult to public LLMQueryResult
@@ -998,13 +977,6 @@ impl LLMClientTrait for MockLLMClient {
         Ok(LLMQueryResult::Complete(response))
     }
 
-    async fn resume_run(&self) -> Result<LLMQueryResult> {
-        // Mock always returns complete (no real interrupt handling)
-        Ok(LLMQueryResult::Complete(
-            "Mock resume completed.".to_string(),
-        ))
-    }
-
     async fn resume_with_answer(&self, answer: &str) -> Result<LLMQueryResult> {
         // Mock acknowledges the answer and returns complete
         Ok(LLMQueryResult::Complete(format!(
@@ -1180,16 +1152,6 @@ mod tests {
 
         let response = result.unwrap().unwrap_complete();
         assert!(response.contains("mock LLM"));
-    }
-
-    #[tokio::test]
-    async fn test_mock_client_resume_run() {
-        let client = MockLLMClient::new();
-        let result = client.resume_run().await;
-        assert!(result.is_ok());
-
-        let response = result.unwrap().unwrap_complete();
-        assert!(response.contains("resume"));
     }
 
     #[tokio::test]
