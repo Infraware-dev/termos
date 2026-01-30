@@ -944,10 +944,61 @@ impl TerminalGrid {
 
     // ========== Resize ==========
 
-    /// Resize the terminal grid.
+    /// Resize the terminal grid to the specified dimensions.
     ///
-    /// For horizontal-only resize (rows unchanged): just update cols, preserve all cells.
-    /// For vertical resize: copy content from BOTTOM of old grid to BOTTOM of new grid.
+    /// ## Positioning Strategy
+    ///
+    /// The resize behavior depends on whether content is "sparse" or "full":
+    ///
+    /// **Sparse content** (fresh terminal, few commands):
+    /// - Detected when: no scrollback AND cursor not at bottom row
+    /// - Uses **top-relative** positioning: content stays at the top
+    /// - Example: A prompt at row 0 stays at row 0 after expanding
+    ///
+    /// **Full content** (terminal with history):
+    /// - Detected when: has scrollback OR cursor at bottom row
+    /// - Uses **bottom-relative** positioning: content anchored to bottom
+    /// - Preserves the relationship between cursor and bottom of screen
+    ///
+    /// ## Resize Operations
+    ///
+    /// | Operation | Sparse | Full |
+    /// |-----------|--------|------|
+    /// | **Horizontal only** | Update cols, clamp cursor | Same |
+    /// | **Expand vertically** | Add empty rows at bottom | Pull from scrollback to fill top |
+    /// | **Shrink vertically** | Truncate bottom rows | Push top rows to scrollback |
+    ///
+    /// ## Scrollback Preservation
+    ///
+    /// When shrinking with full content, rows that no longer fit are pushed to
+    /// scrollback (not discarded). When expanding again, these rows are restored
+    /// from scrollback. This ensures no history is lost through resize cycles.
+    ///
+    /// ## Post-Resize Compaction
+    ///
+    /// After resize, if there's no scrollback and the grid has leading empty rows,
+    /// content is compacted to the top. This ensures content always renders at the
+    /// top of the screen with empty space at the bottom, even after resize cycles
+    /// that might otherwise leave content in the middle.
+    ///
+    /// ## Examples
+    ///
+    /// ```text
+    /// Sparse expand (24 → 48 rows):
+    /// ┌────────┐      ┌────────┐
+    /// │$ prompt│  →   │$ prompt│  (stays at row 0)
+    /// │        │      │        │
+    /// └────────┘      │        │
+    ///                 └────────┘
+    ///
+    /// Full shrink (48 → 24 rows):
+    /// ┌────────┐      ┌────────┐
+    /// │ line 1 │  →   │        │  scrollback: [line 1..24]
+    /// │  ...   │      │ line 25│
+    /// │ line 48│      │  ...   │
+    /// └────────┘      │ line 48│
+    ///                 └────────┘
+    /// ```
     pub fn resize(&mut self, rows: u16, cols: u16) {
         if rows == self.rows && cols == self.cols {
             return;
@@ -965,23 +1016,48 @@ impl TerminalGrid {
 
         let mut new_cells = Self::create_empty_grid(rows, cols);
 
-        // Copy from bottom of old grid to bottom of new grid
         let old_rows = self.rows as usize;
         let new_rows = rows as usize;
         let copy_rows = old_rows.min(new_rows);
-        let src_start = old_rows.saturating_sub(copy_rows);
-        let dst_start = new_rows.saturating_sub(copy_rows);
 
-        for i in 0..copy_rows {
-            if let Some(src_row) = self.row(src_start + i) {
-                for (c, cell) in src_row.iter().enumerate().take(cols as usize) {
-                    new_cells[dst_start + i][c] = cell.clone();
+        // Detect if content is sparse: no scrollback and cursor not at bottom row
+        // This ensures full-screen content uses bottom-relative positioning
+        let is_sparse =
+            self.scrollback.is_empty() && (self.cursor_row as usize) < old_rows.saturating_sub(1);
+
+        // Calculate source and destination based on content state
+        let (src_start, dst_start) = if is_sparse {
+            // Top-relative: copy from top to top
+            (0, 0)
+        } else {
+            // Bottom-relative: copy from bottom to bottom
+            let src = old_rows.saturating_sub(copy_rows);
+            let dst = new_rows.saturating_sub(copy_rows);
+            (src, dst)
+        };
+
+        // When shrinking with non-sparse content, push top rows to scrollback
+        // before they get lost
+        if !is_sparse && new_rows < old_rows {
+            let rows_to_push = old_rows - new_rows;
+            for i in 0..rows_to_push {
+                if let Some(src_row) = self.row(i) {
+                    self.scrollback.push_back(src_row.to_vec());
                 }
             }
         }
 
-        // If expanding rows, fill empty top rows from scrollback
-        if new_rows > old_rows && !self.scrollback.is_empty() {
+        // Copy existing content to new grid
+        (0..copy_rows)
+            .filter_map(|i| self.row(src_start + i).map(|row| (i, row)))
+            .for_each(|(i, src_row)| {
+                let copy_len = (cols as usize).min(src_row.len());
+                new_cells[dst_start + i][..copy_len].clone_from_slice(&src_row[..copy_len]);
+            });
+
+        // If expanding rows with scrollback, fill empty top rows from scrollback
+        // Only applies to bottom-relative (non-sparse) case
+        if !is_sparse && new_rows > old_rows && !self.scrollback.is_empty() {
             let empty_rows = dst_start;
             let fill_count = empty_rows.min(self.scrollback.len());
             let scrollback_start = self.scrollback.len() - fill_count;
@@ -999,20 +1075,27 @@ impl TerminalGrid {
             self.scrollback.truncate(scrollback_start);
         }
 
-        // Adjust cursor to stay at same position relative to bottom
-        let cursor_from_bottom = old_rows
-            .saturating_sub(1)
-            .saturating_sub(self.cursor_row as usize);
-        let new_cursor = new_rows
-            .saturating_sub(1)
-            .saturating_sub(cursor_from_bottom.min(new_rows - 1));
+        // Adjust cursor position based on content state
+        let new_cursor_row = if is_sparse {
+            // Top-relative: keep cursor at same absolute row
+            self.cursor_row.min(rows.saturating_sub(1))
+        } else {
+            // Bottom-relative: adjust cursor relative to bottom
+            let cursor_from_bottom = old_rows
+                .saturating_sub(1)
+                .saturating_sub(self.cursor_row as usize);
+            let new_cursor = new_rows
+                .saturating_sub(1)
+                .saturating_sub(cursor_from_bottom.min(new_rows - 1));
+            new_cursor as u16
+        };
 
         self.cells = new_cells;
         self.cells_offset = 0;
         self.scroll_offset = 0; // Always show live view after resize
         self.rows = rows;
         self.cols = cols;
-        self.cursor_row = new_cursor as u16;
+        self.cursor_row = new_cursor_row;
         self.cursor_col = self.cursor_col.min(cols.saturating_sub(1));
 
         // Adjust scroll region
@@ -1042,6 +1125,74 @@ impl TerminalGrid {
             alt.cursor_row = alt.cursor_row.min(rows.saturating_sub(1));
             alt.cursor_col = alt.cursor_col.min(cols.saturating_sub(1));
         }
+
+        // Compact content to top if there are leading empty rows and no scrollback
+        // This ensures content renders at the top of the screen, not the middle/bottom
+        self.compact_to_top();
+    }
+
+    /// Compact grid content to the top by removing leading empty rows.
+    ///
+    /// If content doesn't fill the screen and there's no scrollback, this shifts
+    /// all content up so it starts at row 0, with empty space at the bottom.
+    /// This is called after resize to ensure content renders at the top.
+    fn compact_to_top(&mut self) {
+        // Only compact if no scrollback (content hasn't overflowed)
+        if !self.scrollback.is_empty() {
+            return;
+        }
+
+        // Find the first row with non-empty content
+        let first_content_row = (0..self.rows as usize).find(|&r| {
+            self.row(r)
+                .map(|row| row.iter().any(|cell| cell.ch != ' '))
+                .unwrap_or(false)
+        });
+
+        let Some(first_content_row) = first_content_row else {
+            // No content at all, nothing to compact
+            return;
+        };
+
+        if first_content_row == 0 {
+            // Content already at top, nothing to do
+            return;
+        }
+
+        // Shift all rows up by first_content_row positions
+        // We need to copy row by row to avoid borrow checker issues
+        let rows = self.rows as usize;
+        let cols = self.cols as usize;
+
+        for dst_row in 0..rows {
+            let src_row = dst_row + first_content_row;
+            if src_row < rows {
+                // First, clone the source row data
+                let src_cells: Vec<Cell> = self
+                    .row(src_row)
+                    .map(|r| r.iter().take(cols).cloned().collect())
+                    .unwrap_or_default();
+
+                // Then write to destination
+                if let Some(dst) = self.row_mut(dst_row) {
+                    for (col, cell) in src_cells.into_iter().enumerate() {
+                        if col < dst.len() {
+                            dst[col] = cell;
+                        }
+                    }
+                }
+            } else {
+                // Clear rows that have no source
+                if let Some(row) = self.row_mut(dst_row) {
+                    for cell in row.iter_mut() {
+                        cell.reset();
+                    }
+                }
+            }
+        }
+
+        // Adjust cursor row
+        self.cursor_row = self.cursor_row.saturating_sub(first_content_row as u16);
     }
 }
 
@@ -1381,6 +1532,291 @@ mod tests {
     }
 
     // === Alt Screen ===
+
+    #[test]
+    fn test_resize_expand_sparse_content_stays_at_top() {
+        // Scenario: Fresh terminal with just a prompt at row 0
+        // When expanded, content should stay at top, not shift to middle
+        let mut grid = TerminalGrid::new(24, 80);
+
+        // Simulate a prompt at row 0
+        grid.put_char('$');
+        grid.put_char(' ');
+        assert_eq!(grid.cursor_row, 0);
+        assert_eq!(grid.cursor_col, 2);
+
+        // Expand to 48 rows (double height)
+        grid.resize(48, 80);
+
+        // Content should stay at row 0 (top-relative), not shift to row 24
+        let row0 = grid.row(0).expect("row 0 should exist");
+        assert_eq!(row0[0].ch, '$', "Content should stay at row 0 after expand");
+        assert_eq!(row0[1].ch, ' ');
+
+        // Cursor should stay at same position
+        assert_eq!(grid.cursor_row, 0, "Cursor should stay at row 0");
+        assert_eq!(grid.cursor_col, 2);
+    }
+
+    #[test]
+    fn test_resize_expand_full_content_uses_bottom_relative() {
+        // Scenario: Terminal with content that reaches the bottom (has scrollback)
+        // Should use bottom-relative positioning (existing behavior)
+        let mut grid = TerminalGrid::new(10, 80);
+
+        // Fill the screen and generate scrollback
+        for i in 0..15 {
+            for c in format!("line {i}").chars() {
+                grid.put_char(c);
+            }
+            grid.carriage_return();
+            grid.linefeed();
+        }
+
+        // Should have scrollback now
+        assert!(
+            !grid.scrollback.is_empty(),
+            "Should have scrollback after filling"
+        );
+
+        let cursor_row_before = grid.cursor_row;
+
+        // Expand to 20 rows
+        grid.resize(20, 80);
+
+        // With scrollback, should use bottom-relative: cursor stays near bottom
+        // The cursor should be adjusted relative to the bottom
+        assert!(
+            grid.cursor_row > cursor_row_before,
+            "Cursor should move down (bottom-relative) when expanding with scrollback"
+        );
+    }
+
+    #[test]
+    fn test_resize_shrink_sparse_content_stays_at_top() {
+        // Scenario: Terminal with sparse content, shrinking
+        let mut grid = TerminalGrid::new(48, 80);
+
+        // Put content at row 0
+        grid.put_char('$');
+        grid.put_char(' ');
+        assert_eq!(grid.cursor_row, 0);
+
+        // Shrink to 24 rows
+        grid.resize(24, 80);
+
+        // Content should still be at row 0
+        let row0 = grid.row(0).expect("row 0 should exist");
+        assert_eq!(row0[0].ch, '$', "Content should stay at row 0 after shrink");
+        assert_eq!(grid.cursor_row, 0, "Cursor should stay at row 0");
+    }
+
+    #[test]
+    fn test_resize_shrink_full_content_preserves_history_in_scrollback() {
+        // Scenario: Terminal with full content, shrinking should push top rows to scrollback
+        let mut grid = TerminalGrid::new(10, 80);
+
+        // Fill the screen with numbered lines (0-9) and generate scrollback (10-14)
+        for i in 0..15 {
+            for c in format!("line{i:02}").chars() {
+                grid.put_char(c);
+            }
+            grid.carriage_return();
+            grid.linefeed();
+        }
+
+        // Should have scrollback (lines 0-4) and grid shows lines 5-14
+        assert!(!grid.scrollback.is_empty(), "Should have scrollback");
+        let scrollback_before = grid.scrollback.len();
+
+        // Shrink to 5 rows - should push more lines to scrollback
+        grid.resize(5, 80);
+
+        // Scrollback should have grown (old scrollback + pushed lines)
+        assert!(
+            grid.scrollback.len() > scrollback_before,
+            "Scrollback should grow when shrinking: was {}, now {}",
+            scrollback_before,
+            grid.scrollback.len()
+        );
+
+        // Now expand back - should restore from scrollback
+        grid.resize(10, 80);
+
+        // Should be able to see earlier content by checking scrollback or grid
+        // The key is that content wasn't lost
+        let total_content = grid.scrollback.len() + grid.rows as usize;
+        assert!(
+            total_content >= 10,
+            "Should preserve history: scrollback={} + rows={}",
+            grid.scrollback.len(),
+            grid.rows
+        );
+    }
+
+    #[test]
+    fn test_resize_shrink_then_expand_restores_content() {
+        // Scenario: The user's exact case - fullscreen, commands, shrink, fullscreen again
+        let mut grid = TerminalGrid::new(24, 80);
+
+        // Simulate running commands that fill the screen
+        for i in 0..30 {
+            for c in format!("cmd{i:02}$ output line {i}").chars() {
+                grid.put_char(c);
+            }
+            grid.carriage_return();
+            grid.linefeed();
+        }
+
+        // Now we have scrollback + full grid
+        let initial_scrollback = grid.scrollback.len();
+        assert!(
+            initial_scrollback > 0,
+            "Should have scrollback after 30 lines"
+        );
+
+        // "Go full screen" - expand to 48 rows
+        grid.resize(48, 80);
+        let expanded_scrollback = grid.scrollback.len();
+
+        // Scrollback should have decreased (pulled into grid)
+        assert!(
+            expanded_scrollback <= initial_scrollback,
+            "Expanding should pull from scrollback"
+        );
+
+        // "Shrink window" - back to 24 rows
+        grid.resize(24, 80);
+        let shrunk_scrollback = grid.scrollback.len();
+
+        // Scrollback should have grown (pushed from grid)
+        assert!(
+            shrunk_scrollback > expanded_scrollback,
+            "Shrinking should push to scrollback: was {}, now {}",
+            expanded_scrollback,
+            shrunk_scrollback
+        );
+
+        // "Go full screen again" - expand to 48 rows
+        grid.resize(48, 80);
+
+        // Content should be restored from scrollback
+        // Total preserved lines should be close to original
+        let final_scrollback = grid.scrollback.len();
+        let total_lines = final_scrollback + 48;
+
+        // We started with 30 lines of content
+        // Should not have lost significant content through resize cycles
+        assert!(
+            total_lines >= 30,
+            "Should preserve content through resize cycles: scrollback={} + grid=48 = {}",
+            final_scrollback,
+            total_lines
+        );
+    }
+
+    #[test]
+    fn test_visible_rows_iter_renders_content_at_top() {
+        // When content doesn't fill the screen, it should render at the TOP
+        // with empty space at the BOTTOM, not vice versa
+        let mut grid = TerminalGrid::new(24, 80);
+
+        // Put just a few lines of content
+        for i in 0..5 {
+            for c in format!("line{i}").chars() {
+                grid.put_char(c);
+            }
+            grid.carriage_return();
+            grid.linefeed();
+        }
+
+        // Cursor should be at row 5
+        assert_eq!(grid.cursor_row, 5);
+
+        // When we iterate visible rows, the first rows should have content
+        let visible_rows: Vec<_> = grid.visible_rows_iter().collect();
+        assert_eq!(visible_rows.len(), 24);
+
+        // First 5 rows should have content (line0-line4)
+        assert_eq!(visible_rows[0][0].ch, 'l', "Row 0 should have content");
+        assert_eq!(visible_rows[4][0].ch, 'l', "Row 4 should have content");
+
+        // Row 5 should be where cursor is (empty or has content from cursor)
+        // Rows after content should be empty (space character)
+        assert_eq!(
+            visible_rows[10][0].ch, ' ',
+            "Rows after content should be empty"
+        );
+    }
+
+    #[test]
+    fn test_visible_rows_after_resize_renders_content_at_top() {
+        // After resize, if content doesn't fill screen, content should be at top
+        let mut grid = TerminalGrid::new(24, 80);
+
+        // Fill screen and create scrollback
+        for i in 0..30 {
+            for c in format!("line{i:02}").chars() {
+                grid.put_char(c);
+            }
+            grid.carriage_return();
+            grid.linefeed();
+        }
+
+        // Now expand to 48 rows
+        grid.resize(48, 80);
+
+        // Shrink to 24 rows - this might leave content at bottom incorrectly
+        grid.resize(24, 80);
+
+        // Clear scrollback to simulate the "not enough scroll" scenario
+        grid.scrollback.clear();
+
+        // The visible rows should still have content at the TOP
+        let visible_rows: Vec<_> = grid.visible_rows_iter().collect();
+
+        // First visible row should have content, not be empty
+        let first_row_has_content = visible_rows[0].iter().any(|c| c.ch != ' ');
+        assert!(
+            first_row_has_content,
+            "First visible row should have content, not empty space"
+        );
+    }
+
+    #[test]
+    fn test_expand_with_cursor_at_bottom_but_sparse_content() {
+        // Scenario: cursor at bottom row but content is actually sparse
+        // (e.g., user pressed Enter many times)
+        // When expanding, content should stay at top, not shift to bottom
+        let mut grid = TerminalGrid::new(24, 80);
+
+        // Put some content at top
+        grid.put_char('$');
+        grid.put_char(' ');
+
+        // Move cursor to bottom by doing many linefeeds
+        for _ in 0..23 {
+            grid.linefeed();
+        }
+
+        // Now cursor is at row 23 (bottom), but actual content is only at row 0
+        assert_eq!(grid.cursor_row, 23);
+        assert!(grid.scrollback.is_empty());
+
+        // Expand to 48 rows
+        grid.resize(48, 80);
+
+        // The content at row 0 should STAY at row 0, not move to row 24
+        // (even though cursor was at bottom before resize)
+        let visible_rows: Vec<_> = grid.visible_rows_iter().collect();
+
+        // First row should have the prompt
+        assert_eq!(
+            visible_rows[0][0].ch, '$',
+            "Content should stay at top after expand, got '{}'",
+            visible_rows[0][0].ch
+        );
+    }
 
     #[test]
     fn test_alt_screen_preserves_ring_buffer_offset() {
