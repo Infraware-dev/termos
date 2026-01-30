@@ -1652,7 +1652,9 @@ mod tests {
         let client = HttpLLMClient::new("http://test".into(), "key".into());
         let data = serde_json::json!([{"type": "ai", "content": "test"}]).to_string();
         let mut result = String::new();
-        let interrupt = client.handle_sse_event("messages", &data, &mut result).unwrap();
+        let interrupt = client
+            .handle_sse_event("messages", &data, &mut result)
+            .unwrap();
         assert!(interrupt.is_none());
         assert_eq!(result, "test");
     }
@@ -1665,8 +1667,13 @@ mod tests {
         })
         .to_string();
         let mut result = String::new();
-        let interrupt = client.handle_sse_event("updates", &data, &mut result).unwrap();
-        assert!(matches!(interrupt, Some(InterruptData::CommandApproval { .. })));
+        let interrupt = client
+            .handle_sse_event("updates", &data, &mut result)
+            .unwrap();
+        assert!(matches!(
+            interrupt,
+            Some(InterruptData::CommandApproval { .. })
+        ));
     }
 
     #[test]
