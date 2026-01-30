@@ -1,0 +1,94 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Overview
+
+Infraware Terminal is a monorepo containing two components that work together:
+
+1. **terminal-app/** - Rust TUI terminal that routes user input to shell execution or LLM backend
+2. **backend/** - Python FastAPI server wrapping LangGraph supervisor agent for cloud infrastructure operations
+
+## Quick Reference
+
+| Component | Language | Build | Test | Lint |
+|-----------|----------|-------|------|------|
+| terminal-app | Rust | `cargo build` | `cargo test` | `cargo fmt && cargo clippy` |
+| backend | Python | `pip install -e .` | `pytest` | `ruff check && ruff format` |
+
+## Component Documentation
+
+Each component has its own detailed CLAUDE.md:
+- **terminal-app/CLAUDE.md** - SCAN algorithm, TUI architecture, handlers, testing
+- **backend/CLAUDE.md** - Agent system, FastAPI proxy, MCP tools, authentication
+
+## Architecture
+
+```
+User Input → Terminal App (Rust TUI)
+                  ↓
+            SCAN Algorithm (11-handler chain)
+                  ↓
+        ┌────────┴────────┐
+        ↓                 ↓
+   Shell Command     Natural Language
+        ↓                 ↓
+   Local Exec        HTTP → Backend (FastAPI)
+                              ↓
+                     LangGraph Supervisor
+                              ↓
+                    ┌────┬────┬────┐
+                    ↓    ↓    ↓    ↓
+                   AWS  GCP  Cmd  ...
+                  Agent Agent Exec
+```
+
+## Development Commands
+
+### Terminal App (Rust)
+```bash
+cd terminal-app
+cargo run                    # Run in debug mode
+cargo test                   # Run all tests
+cargo test test_name         # Run single test
+cargo bench scan_            # Run SCAN benchmarks
+cargo fmt && cargo clippy    # Pre-commit checks (CI enforces)
+```
+
+### Backend (Python)
+```bash
+cd backend
+./start-services.sh          # Start both LangGraph + FastAPI servers
+pytest                       # Run tests
+pytest tests/unit/test_x.py  # Run single test file
+ruff check --fix && ruff format  # Lint and format
+```
+
+## Git Commits
+
+Use conventional commits: `<type>: <description>`
+- Types: `feat`, `fix`, `refactor`, `docs`, `test`, `chore`, `perf`, `style`
+- 50 char max subject, imperative mood
+- Run formatters before committing: `cargo fmt` (Rust), `ruff format` (Python)
+- NO emojis or Co-Authored-By lines
+
+## CI Requirements
+
+- **terminal-app**: `cargo fmt --check`, `cargo clippy -- -D warnings`, 75% test coverage
+- **backend**: `ruff check`, `pytest` with coverage
+- Multi-platform: Ubuntu, Windows, macOS
+
+## Key Constraints
+
+### Terminal App
+- Microsoft Pragmatic Rust Guidelines compliant (see `terminal-app/.claude/skills/microsoft-rust-guidelines.md`)
+- All public types implement `Debug`
+- Use `#[expect]` instead of `#[allow]` for lint overrides
+- Safe indexing only (`.first()`, `.get()`) - no `parts[0]` or `.unwrap()` on arrays
+- Precompiled regex in `patterns.rs` - never compile regex in handlers
+
+### Backend
+- Python 3.11+ with modern type syntax (`str | None`)
+- Google docstring convention
+- Supervisor agent must be "invisible" - pass through responses without commentary
+- MCP tools initialized at module import time via `asyncio.run()`

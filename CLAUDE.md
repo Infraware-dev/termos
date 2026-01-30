@@ -4,371 +4,295 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**Infraware Terminal** is a next-generation AI-powered terminal emulator for DevOps engineers. It consists of two major components in a monorepo:
+**Infraware** is a Rust monorepo containing an AI-powered terminal emulator and its backend services. The terminal combines VTE-based terminal emulation with an integrated LLM agent for DevOps assistance.
 
-1. **Terminal Application** (`terminal-app/`): Rust-based egui terminal emulator with VTE parsing and PTY management
-2. **Backend Services** (`backend/`): Python-based LangGraph supervisor agent system with FastAPI proxy
+**Key feature**: Prefix any command with `?` for natural language queries (e.g., `? how do I revert a git commit`)
 
-The terminal application provides native terminal emulation with an integrated LLM agent that assists when commands fail or when users need expert guidance. The backend coordinates specialized agents (AWS, GCP, command execution) through a supervisor architecture.
+**Tech Stack**: Rust 2024 edition, workspace with 5 members, egui/eframe, axum, tokio
 
-## Repository Structure
-
-```
-infraware-terminal/
-├── backend/              # Python LangGraph backend
-│   ├── src/
-│   │   ├── agents/      # Supervisor + AWS/GCP/Command agents
-│   │   ├── api/         # FastAPI proxy and authentication
-│   │   └── shared/      # Shared models and tools
-│   ├── tests/           # Unit and integration tests
-│   ├── pyproject.toml   # Python dependencies (uv)
-│   └── langgraph.json   # LangGraph configuration
-├── terminal-app/        # Rust terminal emulator
-│   ├── src/
-│   │   ├── terminal/    # VTE parser, grid, cell attributes
-│   │   ├── pty/         # PTY session management
-│   │   ├── llm/         # LLM client with SSE streaming
-│   │   ├── orchestrators/ # Natural language + HITL workflows
-│   │   ├── input/       # Keyboard, selection, validation
-│   │   └── ui/          # egui rendering, theme, scrollbar
-│   ├── Cargo.toml       # Rust dependencies
-│   └── deny.toml        # cargo-deny configuration
-├── docs/                # Documentation
-├── examples/            # Example files
-└── install.sh           # Setup script for backend
-
+**Prerequisites** (Linux):
+```bash
+sudo apt install -y pkg-config libssl-dev libxcb-shape0-dev libxcb-xfixes0-dev
 ```
 
-**Important**: Each component has its own detailed CLAUDE.md file:
-- `backend/CLAUDE.md` - Python backend architecture and commands
-- `terminal-app/CLAUDE.md` - Rust terminal application details
-
-## Quick Start Commands
-
-### Initial Setup
+## Commands
 
 ```bash
-# Install backend dependencies
-./install.sh
+# Build & Run
+cargo build --workspace              # Build all crates
+cargo run -p infraware-terminal      # Run terminal app
+cargo run -p infraware-backend       # Run backend server (port 8080)
+LOG_LEVEL=debug cargo run -p infraware-terminal  # With debug logging
 
-# Or manually:
-cd backend
-pip install -e . "langgraph-cli[inmem]"
-cp .env.example .env  # Add ANTHROPIC_API_KEY and LANGSMITH_API_KEY
+# Backend with different engines
+ENGINE_TYPE=mock cargo run -p infraware-backend    # MockEngine (default, for testing)
+ENGINE_TYPE=http LANGGRAPH_URL=http://localhost:2024 cargo run -p infraware-backend  # HttpEngine
+ENGINE_TYPE=process BRIDGE_SCRIPT=bin/engine-bridge/main.py cargo run -p infraware-backend  # ProcessEngine
+ENGINE_TYPE=rig ANTHROPIC_API_KEY=sk-... cargo run -p infraware-backend --features rig  # RigEngine
 
-# Build Rust terminal (Linux prerequisites)
-sudo apt install -y pkg-config libssl-dev
-cd terminal-app
-cargo build --release
+# Testing
+cargo test --workspace               # All tests (~100 tests)
+cargo test -p infraware-terminal -- test_name    # Single test by name
+cargo test -p infraware-engine       # Test engine crate only
+cargo test -- --nocapture            # With output
+
+# Watch mode (auto-rebuild)
+cargo watch -x 'run -p infraware-backend'    # Requires: cargo install cargo-watch
+
+# Linting (CI enforces both)
+cargo fmt --all && cargo clippy --workspace
+cargo clippy --workspace -- -D warnings    # CI-strict mode (warnings = errors)
+
+# Coverage (CI enforces 75% minimum)
+cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info
+cargo llvm-cov --all-features --workspace --summary-only  # Quick summary
+
+# Quick API verification
+curl http://localhost:8080/health
+curl -X POST http://localhost:8080/threads -H "Content-Type: application/json" -d '{}'
 ```
 
-### Running the Application
+## Workspace Structure
 
+```
+├── terminal-app/              # egui terminal client (infraware-terminal)
+├── crates/
+│   ├── shared/                # API contract types (infraware-shared)
+│   ├── backend-api/           # axum REST/SSE server (infraware-backend)
+│   ├── backend-engine/        # AgenticEngine trait + adapters
+│   └── backend-state/         # State persistence (placeholder)
+├── bin/engine-bridge/         # Python bridge for ProcessEngine
+└── backend/                   # Python FastAPI (legacy, being replaced)
+```
+
+## Architecture
+
+```
+┌─────────────────┐     HTTP/SSE      ┌──────────────────────────────────────────┐
+│ infraware-      │◄────────────────► │ infraware-backend (axum)                 │
+│ terminal (egui) │                   │ Port 8080                                │
+└────────┬────────┘                   │                                          │
+         │                            │  ┌──────────────────────────────────────┐│
+    ┌────▼────┐                       │  │ AgenticEngine trait                  ││
+    │   PTY   │                       │  │ ┌────────┐ ┌────────┐ ┌────────┐    ││
+    │ Session │                       │  │ │ Mock   │ │ HTTP   │ │Process │    ││
+    └────┬────┘                       │  │ │ Engine │ │ Engine │ │Engine  │    ││
+         │                            │  │ └────────┘ └────┬───┘ └────┬───┘    ││
+    ┌────▼────┐                       │  │ ┌────────────────────────┐           ││
+    │  VTE    │                       │  │ │ RigEngine (Primary)    │           ││
+    │ Parser  │                       │  │ │ - Anthropic Claude API │           ││
+    └────┬────┘                       │  │ │ - HITL tool execution  │           ││
+         │                            │  │ │ - needs_continuation   │           ││
+    ┌────▼────┐                       │  │ └────┬─────────────┬──────┘           ││
+    │Terminal │                       │  └──────┼─────────────┼──────────────────┘│
+    │  Grid   │                       └─────────┼─────────────┼──────────────────┘
+    └─────────┘                                 │             │
+                                    ┌───────────▼──┐   ┌──────▼──────┐
+                                    │ LangGraph    │   │ Anthropic   │
+                                    │ Server       │   │ API         │
+                                    │ (HttpEngine) │   │ (RigEngine) │
+                                    └──────────────┘   └─────────────┘
+```
+
+## Key Crates
+
+### infraware-shared
+Shared API contract types: `LLMQueryResult` (Complete/CommandApproval/Question), `AgentEvent` (SSE events), `Interrupt` (HITL), `Message`, `ThreadId`, `RunInput`
+
+### infraware-engine
+Engine abstraction with pluggable backends:
+- `AgenticEngine` trait: `create_thread()`, `stream_run()`, `resume_run()`, `health_check()`
+- `RigEngine` - Native Rust agent using rig-rs + Anthropic Claude API (primary engine, HITL via tool execution)
+- `MockEngine` - In-memory pattern matching (testing, no external dependencies)
+- `HttpEngine` - Direct proxy to LangGraph HTTP endpoint (alternative for LangGraph deployments)
+- `ProcessEngine` - Subprocess bridge with JSON-RPC over stdio (alternative for custom bridges)
+
+### infraware-backend
+Axum REST/SSE API:
+- `GET /health` - Health check
+- `GET /metrics` - Prometheus metrics
+- `GET /api-docs/openapi.json` - OpenAPI spec
+- `POST /api/auth` - Authentication validation
+- `POST /threads` - Create new thread
+- `POST /threads/{id}/runs/stream` - Stream run with SSE
+
+### infraware-terminal
+Terminal emulator with LLM integration. Key modules:
+- `terminal/` - VTE parser, grid, cell attributes
+- `pty/` - PTY session, async I/O
+- `llm/` - HTTP/SSE client, markdown→ANSI renderer
+- `orchestrators/` - NaturalLanguage (queries), HITL (command approval)
+- `app.rs` - Main egui application, rendering loop
+- `state.rs` - AppMode state machine (Normal → WaitingLLM → AwaitingApproval → ExecutingCommand → WaitingLLM/Normal)
+
+### State Machine Flow
+```
+Normal
+  │
+  ├──(? query)──► WaitingLLM ──┬──► AwaitingApproval (y/n for commands)
+                                │       │ (approve) ──► ExecutingCommand
+                                │       │                    │
+                                │       │                    ├──► WaitingLLM (needs_continuation=true)
+                                │       │                    │
+                                │       │                    └──► Normal (needs_continuation=false)
+                                │       │
+                                │       └──► Normal (reject)
+                                │
+                                ├──► AwaitingAnswer (free-text for questions)
+                                │       └──► WaitingLLM (resume with answer)
+                                │
+                                └──► Normal (complete, no further action)
+```
+
+**ExecutingCommand State**: When user approves a shell command in RigEngine, the terminal enters ExecutingCommand to capture output. After command execution, the `needs_continuation` flag controls whether the agent continues reasoning with the output or completes the interaction.
+
+## Terminal Quick Reference
+
+| Task | Location |
+|------|----------|
+| Add keyboard shortcut | `terminal-app/src/input/keyboard.rs` |
+| Modify terminal rendering | `terminal-app/src/app.rs` → `render_terminal()` |
+| Add VTE escape handler | `terminal-app/src/terminal/handler.rs` → `csi_dispatch()` |
+| Modify LLM query flow | `terminal-app/src/orchestrators/natural_language.rs` |
+| Handle HITL interrupts | `terminal-app/src/orchestrators/hitl.rs` |
+
+## Configuration
+
+Environment variables (via `.env` or shell):
 ```bash
-# Backend: Start both LangGraph and FastAPI servers
-cd backend
-./start-services.sh                    # Recommended (handles health checks)
-# OR manually:
-langgraph dev                          # LangGraph server (port 2024)
-uv run main.py                         # FastAPI server (port 8000)
+# Terminal client
+INFRAWARE_BACKEND_URL="http://localhost:8080"
+ANTHROPIC_API_KEY="your-api-key"
+LOG_LEVEL="debug"  # debug, info, warn, error
 
-# Terminal: Run the terminal emulator
-cd terminal-app
-cargo run                              # Development build
-cargo run --release                    # Production build
-LOG_LEVEL=debug cargo run              # With debug logging
+# Backend server
+ENGINE_TYPE="mock"              # mock, http, process, rig
+LANGGRAPH_URL="http://localhost:2024"  # for http/process engines
+BRIDGE_SCRIPT="bin/engine-bridge/main.py"  # for process engine
+ANTHROPIC_API_KEY="sk-..."      # for rig engine (native Rust agent)
+PORT="8080"
+API_KEY=""                      # empty = auth disabled
+ALLOWED_ORIGINS="*"             # CORS origins
+RATE_LIMIT_RPM="100"            # requests per minute (0 = disabled)
+RUST_LOG="infraware_backend=debug"  # tracing level
 ```
 
-### Testing
+## Code Style
 
-```bash
-# Backend (Python)
-cd backend
-pytest                                 # All tests
-pytest tests/unit/                     # Unit tests only
-pytest tests/integration/              # Integration tests only
-pytest --cov=src --cov-report=html     # With coverage
+### Rust Guidelines (Microsoft Pragmatic)
+- All public types implement `Debug` (custom impl for sensitive data)
+- Use `#[expect]` instead of `#[allow]` when lint suppression should be revisited
+- Panic for programming errors, `Result` for expected failures
+- Avoid weasel words in names (Service, Manager, Factory)
+- Prefer splitting crates over monoliths
 
-# Terminal (Rust)
-cd terminal-app
-cargo test                             # All tests (36 tests)
-cargo test test_name                   # Single test
-cargo test -- --nocapture              # With output
-cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info  # Coverage
+### Git Commits
+- Format: `<type>: <description>` (max 50 chars, imperative mood)
+- Types: `feat`, `fix`, `refactor`, `docs`, `test`, `chore`, `perf`, `style`
+- **NO** Co-Authored-By, emojis, or AI attribution
+- Run `cargo fmt` before committing
+
+### Error Handling
+- Use `anyhow::Result` for application code
+- Use `thiserror` for library error types
+- Safe indexing: `.first()`, `.get()` instead of `[0]`
+
+## Workspace Dependencies
+
+Shared in root `Cargo.toml` under `[workspace.dependencies]`. Use `{ workspace = true }` to inherit:
+- Async: `tokio`, `async-trait`, `futures`
+- HTTP: `axum`, `tower`, `reqwest`
+- Serde: `serde`, `serde_json`
+- Error: `anyhow`, `thiserror`
+- Logging: `tracing`, `log`
+
+## Adding New Components
+
+### New Engine Adapter
+1. Create `crates/backend-engine/src/adapters/your_engine.rs`
+2. Implement `AgenticEngine` trait:
+   ```rust
+   #[async_trait]
+   pub trait AgenticEngine: Send + Sync + Debug {
+       async fn create_thread(&self) -> Result<ThreadId>;
+       async fn stream_run(&self, thread_id: &ThreadId, input: RunInput) -> Result<EventStream>;
+       async fn resume_run(&self, thread_id: &ThreadId, response: ResumeResponse) -> Result<EventStream>;
+       async fn health_check(&self) -> Result<HealthStatus>;
+   }
+   ```
+3. Export from `adapters/mod.rs`
+4. Add match arm in `backend-api/src/main.rs` for `ENGINE_TYPE`
+
+### New API Types
+1. Add to `crates/shared/src/models.rs` or `events.rs`
+2. Export from `crates/shared/src/lib.rs`
+
+## Skills (`.claude/skills/`)
+
+When writing Rust code, these skills are automatically applied:
+
+| Skill | When to Apply |
+|-------|---------------|
+| `microsoft-rust-guidelines` | All Rust code (safety, naming, panics, Debug impl) |
+| `rig-rs` | Code using rig-rs (agents, tools, embeddings, completions, extractors, vector stores, MCP) |
+
+**rig-rs key patterns:**
+- Always set `max_tokens` for Anthropic
+- Use `schemars::JsonSchema` for tool parameter schemas
+- Use `Option<T>` for extractor fields
+- Wrap vector stores in `Arc<RwLock<>>` for concurrent access
+- Use `multi_turn()` for complex multi-step tool calling
+
+## RigEngine: Native Rust Agent with Function Calling
+
+The RigEngine uses **rig-rs** to build a native Rust agent with Anthropic Claude API and function calling support.
+
+### How It Works
+
+1. **Tool Registration**: ShellCommandTool and AskUserTool are registered with the agent via `.tool()`
+2. **PromptHook Interception**: LLM tool calls are intercepted via `PromptHook::on_tool_call()` for HITL approval
+3. **needs_continuation Flag**: Distinguishes command execution intent:
+   - `false` (default): Command output IS the answer (e.g., `ls` → list files directly)
+   - `true`: Command output is INPUT for agent processing (e.g., `uname -s` → then OS-specific instructions)
+
+### Example: How needs_continuation Works
+
+**Case 1: Direct Answer (needs_continuation=false)**
+```
+User: "List files in current directory"
+        ↓
+Agent: execute_shell_command("ls -la", needs_continuation=false)
+        ↓
+[User approves]
+        ↓
+Terminal executes: ls -la
+        ↓
+Output displayed directly to user (is the complete answer)
 ```
 
-### Code Quality
-
-```bash
-# Backend (Python)
-cd backend
-ruff check                             # Lint (check only)
-ruff check --fix                       # Lint and auto-fix
-ruff format                            # Format code
-mypy src/                              # Type checking
-
-# Terminal (Rust)
-cd terminal-app
-cargo fmt                              # Format code
-cargo clippy                           # Lint (must pass with 0 warnings)
-cargo check                            # Fast type check
+**Case 2: Processing Needed (needs_continuation=true)**
+```
+User: "Help me install Redis"
+        ↓
+Agent: execute_shell_command("uname -s", needs_continuation=true)
+        ↓
+[User approves]
+        ↓
+Terminal executes: uname -s → outputs "Linux"
+        ↓
+Agent receives output and continues:
+"I see you're on Linux. Here's how to install Redis..."
 ```
 
-## Architecture Overview
+### Files Involved
 
-### System Communication Flow
+- `crates/backend-engine/src/adapters/rig/orchestrator.rs` - Handles tool call interception and HITL flow
+- `crates/backend-engine/src/adapters/rig/tools/shell.rs` - ShellCommandTool with needs_continuation parameter
+- `crates/backend-engine/src/adapters/rig/tools/ask_user.rs` - AskUserTool for questions
+- `crates/shared/src/events.rs` - Interrupt enum with needs_continuation field
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                    Terminal Emulator (Rust)                 │
-│  ┌───────────────┐  ┌──────────────┐  ┌─────────────────┐  │
-│  │ Shell Process │  │ LLM Client   │  │ Response        │  │
-│  │ (PTY)         │  │ (HTTP/SSE)   │  │ Renderer        │  │
-│  └───────┬───────┘  └──────┬───────┘  └────────┬────────┘  │
-│          │                  │                    │           │
-│          │                  │                    │           │
-└──────────┼──────────────────┼────────────────────┼───────────┘
-           │                  │                    │
-           │                  ▼                    │
-           │       ┌────────────────────┐         │
-           │       │   FastAPI Server   │         │
-           │       │   (Port 8000)      │         │
-           │       │ • Authentication   │         │
-           │       │ • Request Proxy    │         │
-           │       └─────────┬──────────┘         │
-           │                 │                     │
-           │                 ▼                     │
-           │       ┌────────────────────┐         │
-           │       │  LangGraph Server  │         │
-           │       │  (Port 2024)       │         │
-           │       │ ┌────────────────┐ │         │
-           │       │ │  Supervisor    │ │         │
-           │       │ └───┬────────────┘ │         │
-           │       │     │               │         │
-           │       │ ┌───┴───────────┐  │         │
-           │       │ │ AWS   GCP     │  │         │
-           │       │ │ Agent Agent   │  │         │
-           │       │ │               │  │         │
-           │       │ │ Command Agent │  │         │
-           │       │ └───────────────┘  │         │
-           │       └─────────┬──────────┘         │
-           │                 │                     │
-           └─────────────────┴─────────────────────┘
-                       Execution
-```
+## Known Issues
 
-### Component Interaction
-
-1. **User Input**: User types in Rust terminal (either shell commands or `?` magic input)
-2. **Shell Processing**: Regular commands go to PTY, magic input (`?`) triggers LLM query
-3. **LLM Query**: Terminal sends HTTP/SSE request to FastAPI backend
-4. **Authentication**: FastAPI validates Anthropic API key before proxying
-5. **Agent Orchestration**: LangGraph supervisor delegates to AWS/GCP/Command agents
-6. **Human-in-the-Loop**: Agents request approval for commands or ask questions
-7. **Response Streaming**: SSE streams responses back to terminal
-8. **Rendering**: Terminal converts markdown to ANSI with syntax highlighting
-
-## Key Design Patterns
-
-### Backend (Python)
-
-- **Supervisor Pattern**: LangGraph supervisor orchestrates specialized agents sequentially (never parallel)
-- **MCP Tool Initialization**: AWS agent uses Model Context Protocol tools initialized at module import with `asyncio.run()`
-- **Proxy Architecture**: FastAPI proxies all requests to LangGraph with authentication checks
-- **Interrupt-Based Approval**: Shell commands use LangGraph interrupts for human approval
-
-### Terminal (Rust)
-
-- **State Machine**: `AppMode` enum with validated transitions (Normal → WaitingLLM → AwaitingApproval → Normal)
-- **Dependency Injection**: Traits for PTY and LLM client enable testing with mocks
-- **Single-Pass Rendering**: egui rendering batches backgrounds, text, and decorations in one pass
-- **Orchestrator Pattern**: Separate orchestrators for natural language queries and HITL workflows
-- **SSE Streaming**: Real-time LLM responses via Server-Sent Events
-
-## Development Workflow
-
-### When Working on Backend
-
-1. Navigate to `backend/` directory
-2. Consult `backend/CLAUDE.md` for detailed architecture
-3. Start LangGraph server first (`langgraph dev`), then FastAPI (`uv run main.py`)
-4. Run tests with `pytest` before committing
-5. Use `ruff check --fix` and `ruff format` for code quality
-
-### When Working on Terminal
-
-1. Navigate to `terminal-app/` directory
-2. Consult `terminal-app/CLAUDE.md` for detailed architecture
-3. Run `cargo fmt && cargo clippy` before committing (CI enforces 0 warnings)
-4. Use `cargo test` to verify changes
-5. Follow Microsoft Pragmatic Rust Guidelines (all public types implement `Debug`, use `#[expect]` for lints)
-
-### Cross-Component Changes
-
-When changes span both backend and terminal:
-
-1. **API Contract Changes**: Update both LLM client (`terminal-app/src/llm/client.rs`) and FastAPI routes (`backend/src/api/routes/`)
-2. **Authentication Flow**: Coordinate changes between `terminal-app/src/auth/` and `backend/src/api/auth.py`
-3. **Command Safety**: Ensure validation patterns in `terminal-app/src/input/command_validator.rs` align with backend expectations
-4. **Error Messages**: Keep error messages consistent between Rust and Python components
-
-## Environment Configuration
-
-### Backend (.env in backend/)
-
-```bash
-ANTHROPIC_API_KEY=sk-ant-xxx        # Required for LLM
-LANGSMITH_API_KEY=lsv2_xxx          # Optional for tracing
-```
-
-### Terminal (.env in terminal-app/)
-
-```bash
-INFRAWARE_BACKEND_URL=http://localhost:8000   # FastAPI backend URL
-ANTHROPIC_API_KEY=sk-ant-xxx                  # API key for authentication
-LOG_LEVEL=debug                               # Logging level (debug/info/warn/error)
-```
-
-**Note**: Terminal also supports `.env.secrets` (gitignored) for API keys to avoid accidental commits.
-
-## Git Workflow
-
-### Commit Message Format
-
-Use conventional commit format for both components:
-
-```
-<type>: <description>
-
-Types: feat, fix, refactor, docs, test, chore, perf, style
-```
-
-**Important**:
-- Maximum 50 characters for subject line
-- Use imperative mood ("Add" not "Added")
-- **NO** emojis, Co-Authored-By, or AI attribution in commits
-- Run code quality tools before committing
-
-### Branch Strategy
-
-- `main`: Production-ready code
-- `feat/*`: Feature branches
-- Current branch: `feat/new-terminal`
-
-## Common Tasks
-
-### Add New LLM Agent to Backend
-
-1. Create agent in `backend/src/agents/<agent_name>/`
-2. Implement agent with appropriate framework (deepagents or LangChain)
-3. Add agent to supervisor configuration in `backend/src/agents/supervisor/agent.py`
-4. Write tests in `backend/tests/unit/test_<agent_name>.py`
-
-### Add Keyboard Shortcut to Terminal
-
-1. Edit `terminal-app/src/input/keyboard.rs`
-2. Add to `process_ctrl_keys()` (Ctrl combos) or `process_other_keys()` (special keys)
-3. Return `KeyboardAction::SendBytes(vec![...])` with appropriate bytes
-
-### Modify Terminal Rendering
-
-1. Edit `terminal-app/src/app.rs` → `render_terminal()`
-2. Maintain single-pass rendering (pre-allocate buffers, no nested loops)
-3. Use `column_x_coords` cache for X position lookups
-
-### Add VTE Escape Sequence
-
-1. Edit `terminal-app/src/terminal/handler.rs`
-2. Add match arm in `csi_dispatch()` (CSI sequences) or `esc_dispatch()` (ESC sequences)
-3. Update grid state via `self.grid` methods
-
-## Testing Strategy
-
-### Backend Testing
-
-- **Unit Tests**: Test individual functions and classes in isolation
-- **Integration Tests**: Test agent interactions and API endpoints
-- **Coverage Target**: Maintain >80% coverage
-- Use pytest fixtures for shared test resources
-
-### Terminal Testing
-
-- **Unit Tests**: Test individual modules with mocks via DI traits
-- **Integration Tests**: Test PTY, VTE parsing, LLM client with real backends
-- **Current Status**: 36 tests, focus on critical paths (VTE, PTY, state machine)
-- **Known Gap**: LLM orchestration needs more unit tests
-
-## Security Considerations
-
-### Command Validation
-
-Terminal validates all LLM-suggested commands before execution (`terminal-app/src/input/command_validator.rs`):
-
-- **Blocked**: `rm -rf /`, `mkfs`, `dd if=/dev/zero`, fork bombs, remote code execution, data exfiltration
-- **Warning**: `rm -rf ./...`, system permission changes, shutdown/reboot
-
-### Authentication
-
-- All backend requests require valid Anthropic API key
-- Keys validated against live Anthropic API before storage
-- FastAPI uses `check_auth()` dependency for protected routes
-
-### Best Practices
-
-- Never log API keys or sensitive data
-- Use `.env.secrets` (gitignored) for local secrets
-- Validate all user input before PTY execution
-- Sanitize LLM responses before rendering
-
-## Troubleshooting
-
-### Backend Issues
-
-**LangGraph server fails to start**:
-- Check `ANTHROPIC_API_KEY` in `backend/.env`
-- Verify port 2024 is not in use: `lsof -i :2024`
-- Check logs in `backend/logs/`
-
-**FastAPI authentication errors**:
-- Verify API key with: `curl -X POST http://localhost:8000/api/auth -H "Content-Type: application/json" -d '{"api_key":"your-key"}'`
-- Check `backend/.env` file has correct key
-
-### Terminal Issues
-
-**Terminal won't connect to backend**:
-- Verify `INFRAWARE_BACKEND_URL` in `terminal-app/.env`
-- Check backend is running: `curl http://localhost:8000/health`
-- Terminal falls back to MockLLMClient if backend unavailable
-
-**Rendering issues**:
-- Check terminal size with `LOG_LEVEL=debug cargo run`
-- Verify VTE parsing with debug logs
-- Check `MAX_BYTES_PER_FRAME` if output is truncated
-
-**PTY issues**:
-- Verify shell is in PATH: `which bash`
-- Check PTY permissions (Linux requires proper user permissions)
-- Review backpressure logs if output is delayed
-
-## Performance Optimization
-
-### Backend
-
-- LangGraph server uses async I/O for agent orchestration
-- FastAPI proxies requests with minimal overhead
-- MCP client maintains persistent connections for tools
-
-### Terminal
-
-- Single-pass rendering keeps CPU <5% when idle
-- Reactive repaint only when needed (cursor blink, output received)
-- Backpressure limits PTY output to `MAX_BYTES_PER_FRAME` (4096 bytes) per frame
-- Pre-allocated buffers for rendering (no allocations in hot path)
-
-## Additional Resources
-
-- Backend Details: `backend/CLAUDE.md`
-- Terminal Details: `terminal-app/CLAUDE.md`
-- LangGraph Docs: https://langchain-ai.github.io/langgraph/
-- egui Docs: https://docs.rs/egui/
-- VTE Spec: https://vt100.net/docs/vt100-ug/
+### Command Injection Risk
+Location: `terminal-app/src/app.rs` (`submit_hitl_input`)
+LLM-suggested commands sent to PTY without validation. Mitigation TODO: command blocklist, dangerous command warnings.

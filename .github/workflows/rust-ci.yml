@@ -75,12 +75,18 @@ jobs:
           workspaces: terminal-app -> target
 
       - name: Generate coverage
-        run: cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info
+        run: |
+          # Exclude modules requiring external infrastructure (UI context, PTY, VTE)
+          cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info \
+            --ignore-filename-regex '(main\.rs|app\.rs|app/behavior\.rs|app/terminal_renderer\.rs|app/render\.rs|app/llm_controller\.rs|ui/|pty/manager\.rs|session\.rs|terminal/handler\.rs|input/keyboard\.rs)'
 
       - name: Check coverage threshold
         run: |
           # Extract coverage percentage using awk (more portable than grep -P)
-          coverage=$(cargo llvm-cov --all-features --workspace --summary-only | grep 'TOTAL' | awk '{print $4}' | tr -d '%')
+          # Exclude modules requiring external infrastructure
+          coverage=$(cargo llvm-cov --all-features --workspace --summary-only \
+            --ignore-filename-regex '(main\.rs|app\.rs|app/behavior\.rs|app/terminal_renderer\.rs|app/render\.rs|app/llm_controller\.rs|ui/|pty/manager\.rs|session\.rs|terminal/handler\.rs|input/keyboard\.rs)' \
+            | grep 'TOTAL' | awk '{print $4}' | tr -d '%')
           echo "Coverage: ${coverage}%"
 
           # Check if extraction succeeded

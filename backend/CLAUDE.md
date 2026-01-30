@@ -1,133 +1,89 @@
-# CLAUDE.md
+# CLAUDE.md - Legacy Python Backend
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+**DEPRECATED**: This Python backend is being replaced by the Rust `infraware-backend` crate.
 
-## Overview
+**Status**: Maintenance mode only. For new development, use the Rust backend with RigEngine.
 
-Infraware Terminal is a FastAPI-based web application that wraps a LangGraph supervisor agent system. The supervisor coordinates three specialized agents (AWS, GCP, and command execution) to handle cloud infrastructure tasks and shell commands.
+This file documents the legacy FastAPI application wrapping a LangGraph supervisor agent system (no longer the primary architecture).
 
-## Key Architecture
+## Commands
 
-### Dual-Server Architecture
-
-The application runs two servers that must start in a specific order:
-
-1. **LangGraph Server** (port 2024): Hosts the supervisor agent and sub-agents
-2. **FastAPI Server** (port 8000): Provides authentication and proxies requests to LangGraph
-
-Use `./start-services.sh` to start both servers with proper health checking. The script waits for LangGraph to be ready before starting FastAPI.
-
-### Agent System
-
-The core agent architecture is in `src/agents/`:
-
-- **Supervisor** (`supervisor/agent.py`): Created using `langgraph-supervisor`, orchestrates work between sub-agents. Configured to assign one agent at a time sequentially, never in parallel. Critical: supervisor must be "invisible" - it passes through agent responses without meta-commentary.
-
-- **AWS Agent** (`aws/agent.py`): Uses `deepagents` framework. Accesses AWS via MCP (Model Context Protocol) tools initialized at module import time using `asyncio.run()`. MCP client uses `MultiServerMCPClient` which maintains connection lifecycle internally.
-
-- **GCP Agent** (`gcp/agent.py`): Uses `create_agent` from LangChain. Has custom tools and falls back to shell commands.
-
-- **Command Execution Agent** (`command_execution/agent.py`): Uses `deepagents` framework. Executes shell commands with human approval via `shell_with_approval` tool.
-
-### FastAPI Proxy Layer
-
-Located in `src/api/`:
-
-- `main.py`: FastAPI application entry point
-- `routes/langgraph_routes.py`: Proxies all requests to LangGraph server (localhost:2024) with authentication checks
-- `routes/auth_routes.py`: Handles Anthropic API key authentication
-- `config.py`: Manages `.env` file for API keys
-- `auth.py`: Validates Anthropic API keys against live API
-
-### Shared Resources
-
-`src/shared/`:
-- `models.py`: Centralized model configuration (claude-sonnet-4-20250514, temperature=0)
-- `tools/shell_tool.py`: Shell command execution with LangGraph interrupt-based approval
-
-## Development Commands
-
-### Environment Setup
 ```bash
+# Environment setup
 pip install -e . "langgraph-cli[inmem]"
 cp .env.example .env  # Add ANTHROPIC_API_KEY and LANGSMITH_API_KEY
+
+# Running (start both servers)
+./start-services.sh                    # Recommended: handles health checks
+uv run langgraph dev --no-browser      # LangGraph server (port 2024)
+uv run main.py                         # FastAPI server (port 8000)
+
+# Testing
+pytest                                 # All tests
+pytest tests/unit/                     # Unit tests only
+pytest tests/integration/              # Integration tests only
+pytest tests/unit/test_config.py::test_function  # Single test
+
+# Code quality
+ruff check --fix && ruff format        # Lint and format
+mypy src/                              # Type checking
 ```
 
-### Running the Application
-```bash
-# Start both servers with health check (recommended)
-./start-services.sh
+## Architecture
 
-# Or manually:
-langgraph dev              # Start LangGraph server (port 2024)
-uv run main.py            # Start FastAPI server (port 8000)
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│                     Dual-Server Architecture                         │
+├──────────────────────────────────────────────────────────────────────┤
+│  FastAPI (port 8000)              LangGraph (port 2024)              │
+│  ├── /api/auth (validate keys)    ├── Supervisor Agent              │
+│  ├── /health                      │   ├── AWS Agent (MCP tools)     │
+│  └── /* (proxy to LangGraph)      │   ├── GCP Agent                 │
+│                                   │   └── Command Execution Agent   │
+└──────────────────────────────────────────────────────────────────────┘
 ```
 
-### Testing
-```bash
-# Run all tests
-pytest
+**Startup order matters**: LangGraph must be ready before FastAPI. `start-services.sh` handles this with health checks.
 
-# Run with coverage
-pytest --cov=src --cov-report=html
+### Key Directories
 
-# Run specific test types
-pytest tests/unit/          # Unit tests only
-pytest tests/integration/   # Integration tests only
+| Directory | Purpose |
+|-----------|---------|
+| `src/agents/supervisor/` | LangGraph supervisor using `langgraph-supervisor` |
+| `src/agents/aws/` | AWS agent with MCP tools (`deepagents` framework) |
+| `src/agents/gcp/` | GCP agent (`create_agent` from LangChain) |
+| `src/agents/command_execution/` | Shell command execution with HITL approval |
+| `src/api/` | FastAPI app, routes, auth, config |
+| `src/shared/` | Shared model config, shell tool |
 
-# Run single test file
-pytest tests/unit/test_config.py
+## Critical Patterns
 
-# Run single test
-pytest tests/unit/test_config.py::test_specific_function
-```
+### MCP Tool Initialization (aws/tools.py)
+AWS MCP tools use `asyncio.run()` at module level because:
+- LangGraph imports agents at module level (no control over entry point)
+- MCP requires async init, but `await` is not allowed at module level
+- `MultiServerMCPClient` maintains connections internally after initialization
 
-### Code Quality
-```bash
-# Lint (check only)
-ruff check
-
-# Lint and auto-fix
-ruff check --fix
-
-# Format code
-ruff format
-
-# Type checking
-mypy src/
-```
-
-## Important Patterns
-
-### MCP Tool Initialization
-
-AWS agent tools are initialized at module import time (`aws/tools.py`). This is required because:
-- LangGraph imports agents at module level
-- MCP client needs async initialization but Python doesn't allow `await` at module level
-- Solution: `asyncio.run()` wraps async `client.get_tools()` for synchronous execution
-- `MultiServerMCPClient` manages connection lifecycle internally, keeping tools functional after initialization
-
-### Agent Communication
-
-All agents must:
-- Handle only their domain (AWS/GCP/commands)
-- Return results directly to supervisor without extra text
-- The supervisor is configured to be "invisible" and pass through responses without commentary
+### Supervisor Invisibility
+The supervisor must pass through agent responses without meta-commentary. Never add phrases like "The agent successfully..." - just return the core answer.
 
 ### Authentication Flow
+1. Client POSTs API key to `/api/auth`
+2. Key validated against live Anthropic API
+3. Valid key stored in `.env`
+4. Subsequent requests checked via `check_auth()` before proxying
 
-1. Client calls `/api/auth` with Anthropic API key
-2. FastAPI validates key against Anthropic API
-3. Valid key is stored in `.env` file
-4. All subsequent requests check authentication via `check_auth()` before proxying to LangGraph
+## Configuration
 
-### LangGraph Configuration
+| Variable | Purpose |
+|----------|---------|
+| `ANTHROPIC_API_KEY` | Required for LLM calls |
+| `LANGSMITH_API_KEY` | Optional tracing |
 
-`langgraph.json` defines the graph entry point as `src/agents/supervisor/agent.py:supervisor`. This is what LangGraph CLI loads when running `langgraph dev`.
+Model: `anthropic:claude-sonnet-4-20250514` (temperature=0) defined in `src/shared/models.py`
 
 ## Code Style
 
-- Follow Google docstring convention (enforced by ruff)
-- Imports sorted and formatted (ruff handles this)
-- Type hints required for function signatures
-- Python 3.11+ required (uses modern type syntax like `str | None`)
+- Google docstrings (enforced by ruff D-rules)
+- Python 3.11+ type syntax (`str | None`)
+- Imports sorted by ruff I-rules

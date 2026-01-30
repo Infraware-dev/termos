@@ -20,10 +20,10 @@ pub struct AuthResponse {
 
 /// Response from GET /api/get-auth
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)] // Used by check_status() which is part of the API
 pub struct AuthStatus {
     pub authenticated: bool,
     /// Whether the backend has an API key configured
-    #[cfg_attr(not(test), allow(dead_code))]
     pub has_api_key: bool,
 }
 

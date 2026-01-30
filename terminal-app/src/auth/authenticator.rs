@@ -36,6 +36,7 @@ pub trait Authenticator: Send + Sync + Debug {
     /// * `Ok(true)` if authenticated
     /// * `Ok(false)` if not authenticated
     /// * `Err` on network or server error
+    #[allow(dead_code)]
     async fn check_status(&self) -> Result<bool>;
 }
 
@@ -128,12 +129,11 @@ impl Authenticator for HttpAuthenticator {
 ///
 /// Always succeeds authentication without making network calls.
 #[derive(Debug, Default)]
-#[cfg_attr(not(test), allow(dead_code))]
 pub struct MockAuthenticator;
 
 impl MockAuthenticator {
     /// Create a new mock authenticator
-    #[cfg_attr(not(test), allow(dead_code))]
+    #[allow(dead_code)]
     pub fn new() -> Self {
         Self
     }

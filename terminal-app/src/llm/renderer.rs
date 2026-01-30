@@ -127,19 +127,18 @@ impl ResponseRenderer {
 
         let mut output = Vec::new();
 
-        // Add code block header
-        output.push(format!("\x1b[90m┌─ {lang} ─\x1b[0m"));
+        // Add simple language label if present
+        if !lang.is_empty() {
+            output.push(format!("\x1b[90m[{lang}]\x1b[0m"));
+        }
 
         for line in lines {
             let ranges = highlighter
                 .highlight_line(line, &self.syntax_set)
                 .unwrap_or_default();
             let escaped = as_24_bit_terminal_escaped(&ranges[..], false);
-            output.push(format!("\x1b[90m│\x1b[0m {escaped}"));
+            output.push(format!("  {escaped}"));
         }
-
-        // Add code block footer
-        output.push("\x1b[90m└─\x1b[0m".to_string());
 
         output
     }
@@ -156,27 +155,179 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_renderer_creation() {
+        let renderer = ResponseRenderer::new();
+        let debug_str = format!("{:?}", renderer);
+        assert!(debug_str.contains("ResponseRenderer"));
+    }
+
+    #[test]
+    fn test_renderer_default() {
+        let renderer = ResponseRenderer::default();
+        let debug_str = format!("{:?}", renderer);
+        assert!(debug_str.contains("ResponseRenderer"));
+    }
+
+    #[test]
+    fn test_render_empty_string() {
+        let renderer = ResponseRenderer::new();
+        let lines = renderer.render("");
+        assert!(lines.is_empty());
+    }
+
+    #[test]
     fn test_render_plain_text() {
         let renderer = ResponseRenderer::new();
-        let text = "Hello world\nThis is a test";
-        let result = renderer.render(text);
-        assert_eq!(result.len(), 2);
+        let lines = renderer.render("Hello, world!");
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0], "Hello, world!");
     }
 
     #[test]
-    fn test_render_code_block() {
+    fn test_render_multiline() {
         let renderer = ResponseRenderer::new();
-        let text = "Here is code:\n```rust\nfn main() {\n    println!(\"Hello\");\n}\n```\nDone.";
-        let result = renderer.render(text);
-        assert!(!result.is_empty());
-        // Should have the "Here is code:" line, code lines, and "Done." line
-        assert!(result.len() > 3);
+        let lines = renderer.render("Line 1\nLine 2\nLine 3");
+        assert_eq!(lines.len(), 3);
+        assert_eq!(lines[0], "Line 1");
+        assert_eq!(lines[1], "Line 2");
+        assert_eq!(lines[2], "Line 3");
     }
 
     #[test]
-    fn test_format_inline_code() {
+    fn test_render_bold_text() {
         let renderer = ResponseRenderer::new();
-        let formatted = renderer.format_inline("Use `ls -la` to list files");
-        assert!(formatted.contains("\x1b[36m")); // Should have color code
+        let lines = renderer.render("This is **bold** text");
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("\x1b[1m")); // Bold escape code
+        assert!(lines[0].contains("bold"));
+        assert!(lines[0].contains("\x1b[0m")); // Reset code
+    }
+
+    #[test]
+    fn test_render_multiple_bold() {
+        let renderer = ResponseRenderer::new();
+        let lines = renderer.render("**first** and **second**");
+        assert_eq!(lines.len(), 1);
+        // Count occurrences of bold start
+        let bold_count = lines[0].matches("\x1b[1m").count();
+        assert_eq!(bold_count, 2);
+    }
+
+    #[test]
+    fn test_render_inline_code() {
+        let renderer = ResponseRenderer::new();
+        let lines = renderer.render("Use `ls -la` command");
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("\x1b[36m")); // Cyan escape code
+        assert!(lines[0].contains("ls -la"));
+        assert!(lines[0].contains("\x1b[0m")); // Reset code
+    }
+
+    #[test]
+    fn test_render_multiple_inline_code() {
+        let renderer = ResponseRenderer::new();
+        let lines = renderer.render("Use `ls` or `dir` commands");
+        assert_eq!(lines.len(), 1);
+        // Count occurrences of cyan color
+        let cyan_count = lines[0].matches("\x1b[36m").count();
+        assert_eq!(cyan_count, 2);
+    }
+
+    #[test]
+    fn test_render_code_block_basic() {
+        let renderer = ResponseRenderer::new();
+        let lines = renderer.render("```\ncode here\n```");
+
+        // Should have code line (no header for empty lang, no footer)
+        assert!(!lines.is_empty());
+
+        // Should NOT have box drawing characters
+        let joined = lines.join("");
+        assert!(!joined.contains("┌"));
+        assert!(!joined.contains("│"));
+        assert!(!joined.contains("└"));
+    }
+
+    #[test]
+    fn test_render_code_block_with_language() {
+        let renderer = ResponseRenderer::new();
+        let lines = renderer.render("```rust\nlet x = 5;\n```");
+
+        // First line should contain language label
+        assert!(lines[0].contains("[rust]"));
+    }
+
+    #[test]
+    fn test_render_code_block_multiline() {
+        let renderer = ResponseRenderer::new();
+        let lines = renderer.render("```bash\necho hello\necho world\n```");
+
+        // Should have header + 2 code lines = 3 lines
+        assert!(lines.len() >= 3);
+
+        // Should NOT have box drawing characters
+        let joined = lines.join("");
+        assert!(!joined.contains("│"));
+
+        // Code lines should be indented
+        let indented_lines: Vec<_> = lines.iter().filter(|l| l.starts_with("  ")).collect();
+        assert_eq!(indented_lines.len(), 2);
+    }
+
+    #[test]
+    fn test_render_unclosed_code_block() {
+        let renderer = ResponseRenderer::new();
+        // Unclosed code block should still render
+        let lines = renderer.render("```python\nprint('hello')");
+
+        // Should still produce output
+        assert!(!lines.is_empty());
+        // Should contain the code
+        let joined = lines.join("\n");
+        assert!(joined.contains("print"));
+    }
+
+    #[test]
+    fn test_render_mixed_content() {
+        let renderer = ResponseRenderer::new();
+        let text = "Here is some **bold** text.\n\n```bash\nls -la\n```\n\nAnd `inline` code.";
+        let lines = renderer.render(text);
+
+        // Should have multiple lines
+        assert!(lines.len() > 3);
+
+        // Check for bold
+        assert!(lines[0].contains("\x1b[1m"));
+
+        // Check for inline code in last line
+        let last_line = lines.last().unwrap();
+        assert!(last_line.contains("\x1b[36m"));
+    }
+
+    #[test]
+    fn test_render_no_formatting_passthrough() {
+        let renderer = ResponseRenderer::new();
+        let lines = renderer.render("No special formatting here.");
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0], "No special formatting here.");
+    }
+
+    #[test]
+    fn test_render_unmatched_backticks() {
+        let renderer = ResponseRenderer::new();
+        // Single backtick should be treated as inline code start without end
+        let lines = renderer.render("Single `backtick");
+        assert_eq!(lines.len(), 1);
+        // The behavior with unmatched backtick depends on implementation
+        // but it shouldn't panic
+    }
+
+    #[test]
+    fn test_render_empty_code_block() {
+        let renderer = ResponseRenderer::new();
+        let lines = renderer.render("```\n```");
+
+        // Empty code block with no language should produce empty output
+        assert!(lines.is_empty());
     }
 }

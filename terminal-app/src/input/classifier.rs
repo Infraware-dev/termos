@@ -1,269 +1,288 @@
-/// Input classification: Command vs Natural Language
-///
-/// This module uses the Chain of Responsibility pattern to classify user input
-/// as either commands or natural language queries.
-use anyhow::Result;
+//! Input classification: Command vs Natural Language
+//!
+//! This module provides a simple classifier to determine if user input
+//! should be sent to the shell or to the LLM backend.
+//!
+//! The classification uses several heuristics:
+//! 1. Question marks (?, ¿) indicate natural language
+//! 2. Non-ASCII characters suggest non-English queries
+//! 3. Long phrases without shell operators are likely natural language
+//! 4. Question words (how, what, why, etc.) indicate queries
+//! 5. Shell syntax (pipes, flags, paths) indicates commands
 
-use super::handler::{
-    ApplicationBuiltinHandler, ClassifierChain, ClassifierContext, CommandSyntaxHandler,
-    DefaultHandler, EmptyInputHandler, HandlerPosition, KnownCommandHandler,
-    NaturalLanguageHandler, PathCommandHandler, PathDiscoveryHandler,
-};
-use super::history_expansion::HistoryExpansionHandler;
-use super::shell_builtins::ShellBuiltinHandler;
-use super::typo_detection::TypoDetectionHandler;
-use std::sync::{Arc, RwLock};
+use once_cell::sync::Lazy;
+use regex::RegexSet;
 
 /// Represents the type of user input
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InputType {
-    /// A shell command with its name and arguments
-    ///
-    /// Fields:
-    /// - command: The command name (e.g., "ls")
-    /// - args: Parsed arguments (e.g., ["-la"])
-    /// - original_input: Complete original input for shell operators (pipes, redirects)
-    Command {
-        command: String,
-        args: Vec<String>,
-        original_input: Option<String>,
-    },
-    /// Natural language query or phrase
+    /// A shell command to be executed
+    Command(String),
+    /// Natural language query for the LLM
     NaturalLanguage(String),
     /// Empty input
     Empty,
-    /// Command with typo detected
-    ///
-    /// Contains the original input, suggested correction, and Levenshtein distance.
-    /// This prevents mistyped commands from being sent to LLM as natural language.
-    CommandTypo {
-        input: String,
-        suggestion: String,
-        distance: usize,
-    },
 }
 
-/// Classifier for determining if input is a command or natural language
+/// Precompiled regex patterns for efficient classification
+struct Patterns {
+    /// Patterns indicating natural language
+    natural_language: RegexSet,
+    /// Patterns indicating shell command syntax
+    command_syntax: RegexSet,
+    /// Shell operators
+    shell_operators: RegexSet,
+}
+
+/// Global compiled patterns (initialized once)
+static PATTERNS: Lazy<Patterns> = Lazy::new(|| Patterns {
+    natural_language: RegexSet::new([
+        r"[\?¿]",                                         // Question marks (universal)
+        r"(?i)^(how|what|why|when|where|who|which)\s",    // Question words
+        r"(?i)^(can you|could you|would you|will you)\s", // Request phrases
+        r"(?i)(please|help me|show me|explain)\s",        // Polite phrases
+        r"(?i)\s(a|an|the)\s",                            // Articles (indicate prose)
+    ])
+    .expect("Failed to compile natural_language patterns"),
+
+    command_syntax: RegexSet::new([
+        r"^[a-zA-Z0-9_-]+\s+--?[a-zA-Z]", // Flags: cmd --flag, cmd -f
+        r"^\.{1,2}/",                     // Relative paths: ./, ../
+        r"^/[a-zA-Z]",                    // Absolute paths: /usr/bin
+        r"^\$[A-Z_]",                     // Env var start: $HOME
+        r"^[a-z]+=$",                     // Env assignment: FOO=
+    ])
+    .expect("Failed to compile command_syntax patterns"),
+
+    shell_operators: RegexSet::new([
+        r"\|",      // Pipe
+        r"&&|\|\|", // Logical operators
+        r"[<>]",    // Redirects
+        r";",       // Command separator
+    ])
+    .expect("Failed to compile shell_operators patterns"),
+});
+
+/// Simple input classifier
 ///
-/// Uses Chain of Responsibility pattern with the following chain:
-/// 1. EmptyInputHandler - handles empty/whitespace input
-/// 2. HistoryExpansionHandler - expands history patterns (!!,  !$, !^, !*)
-/// 3. ApplicationBuiltinHandler - app builtins (clear, reload-aliases, reload-commands)
-/// 4. ShellBuiltinHandler - recognizes shell builtins (., :, [, [[, source, export, etc.)
-/// 5. PathCommandHandler - detects executable paths (./script.sh, /usr/bin/cmd)
-/// 6. KnownCommandHandler - checks whitelist + verifies command exists in PATH
-/// 7. PathDiscoveryHandler - auto-discovers commands in PATH (for newly installed commands)
-/// 8. CommandSyntaxHandler - detects command syntax (flags, pipes, redirects)
-/// 9. TypoDetectionHandler - detects command typos via Levenshtein distance
-/// 10. NaturalLanguageHandler - detects natural language patterns (multilingual)
-/// 11. DefaultHandler - fallback to natural language
-pub struct InputClassifier {
-    chain: ClassifierChain,
-    context: ClassifierContext,
-    history: Option<Arc<RwLock<Vec<String>>>>,
-}
-
-impl std::fmt::Debug for InputClassifier {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("InputClassifier")
-            .field("chain", &"<ClassifierChain>")
-            .field("context", &self.context)
-            .finish()
-    }
-}
+/// Uses heuristics to determine if input is a command or natural language.
+/// Natural language queries are sent to the LLM, commands to the shell.
+#[derive(Debug, Default)]
+pub struct InputClassifier;
 
 impl InputClassifier {
-    /// Create a new input classifier with default 11-handler chain
-    ///
-    /// Chain order optimized for performance and accuracy:
-    /// - Fast paths first (empty, history expansion)
-    /// - History expansion (must happen before command parsing)
-    /// - App builtins (clear, reload-aliases, reload-commands)
-    /// - Shell builtins (no PATH verification needed)
-    /// - Executable paths (unambiguous)
-    /// - Existence-verified commands (with caching)
-    /// - PATH discovery (auto-detect newly installed commands)
-    /// - Syntax detection (precompiled regex)
-    /// - Typo detection (prevents false LLM calls)
-    /// - Natural language (precompiled patterns)
-    /// - Fallback (catch-all)
+    /// Create a new classifier
     pub fn new() -> Self {
-        // Create context first to access language patterns
-        let context = ClassifierContext::new();
-
-        let chain = ClassifierChain::new()
-            // 1. Empty input (fastest check)
-            .add_handler(HandlerPosition::Empty, Box::new(EmptyInputHandler::new()))
-            // 2. History expansion (!!,  !$, !^, !* - must happen before command parsing)
-            .add_handler(
-                HandlerPosition::HistoryExpansion,
-                Box::new(HistoryExpansionHandler::new()),
-            )
-            // 3. Application builtins (clear, reload-aliases, reload-commands)
-            .add_handler(
-                HandlerPosition::ApplicationBuiltin,
-                Box::new(ApplicationBuiltinHandler::new()),
-            )
-            // 4. Shell builtins (., :, [, [[, source, export, etc. - no PATH verification)
-            .add_handler(
-                HandlerPosition::ShellBuiltin,
-                Box::new(ShellBuiltinHandler::new()),
-            )
-            // 5. Executable paths (unambiguous: ./script.sh, /usr/bin/cmd)
-            .add_handler(
-                HandlerPosition::PathCommand,
-                Box::new(PathCommandHandler::new()),
-            )
-            // 6. Known commands with PATH existence check (cached)
-            .add_handler(
-                HandlerPosition::KnownCommand,
-                Box::new(KnownCommandHandler::with_defaults()),
-            )
-            // 7. PATH discovery - auto-detect newly installed commands via `which`
-            .add_handler(
-                HandlerPosition::PathDiscovery,
-                Box::new(PathDiscoveryHandler::new()),
-            )
-            // 8. Command syntax detection (flags, pipes, redirects)
-            .add_handler(
-                HandlerPosition::CommandSyntax,
-                Box::new(CommandSyntaxHandler::new()),
-            )
-            // 9. Typo detection (prevents "dokcer ps" → LLM)
-            .add_handler(
-                HandlerPosition::TypoDetection,
-                Box::new(TypoDetectionHandler::from_config(
-                    crate::input::known_commands::default_devops_commands(),
-                    0, // max_distance=0 (disabled by default for M1)
-                    &context.language_patterns,
-                )),
-            )
-            // 10. Natural language patterns (precompiled regex, multilingual)
-            .add_handler(
-                HandlerPosition::NaturalLanguage,
-                Box::new(NaturalLanguageHandler::new()),
-            )
-            // 11. Fallback to natural language
-            .add_handler(HandlerPosition::Default, Box::new(DefaultHandler::new()));
-
-        Self {
-            chain,
-            context,
-            history: None,
-        }
+        Self
     }
 
-    /// Set the command history for history expansion support
-    ///
-    /// This enables the HistoryExpansionHandler to expand patterns like !!,  !$, !^, !*
-    pub fn with_history(mut self, history: Arc<RwLock<Vec<String>>>) -> Self {
-        // Rebuild the chain with history-aware HistoryExpansionHandler
-        self.chain = ClassifierChain::new()
-            .add_handler(HandlerPosition::Empty, Box::new(EmptyInputHandler::new()))
-            .add_handler(
-                HandlerPosition::HistoryExpansion,
-                Box::new(HistoryExpansionHandler::with_history(history.clone())),
-            )
-            .add_handler(
-                HandlerPosition::ApplicationBuiltin,
-                Box::new(ApplicationBuiltinHandler::new()),
-            )
-            .add_handler(
-                HandlerPosition::ShellBuiltin,
-                Box::new(ShellBuiltinHandler::new()),
-            )
-            .add_handler(
-                HandlerPosition::PathCommand,
-                Box::new(PathCommandHandler::new()),
-            )
-            .add_handler(
-                HandlerPosition::KnownCommand,
-                Box::new(KnownCommandHandler::with_defaults()),
-            )
-            .add_handler(
-                HandlerPosition::PathDiscovery,
-                Box::new(PathDiscoveryHandler::new()),
-            )
-            .add_handler(
-                HandlerPosition::CommandSyntax,
-                Box::new(CommandSyntaxHandler::new()),
-            )
-            .add_handler(
-                HandlerPosition::TypoDetection,
-                Box::new(TypoDetectionHandler::from_config(
-                    crate::input::known_commands::default_devops_commands(),
-                    0, // max_distance=0 (disabled by default for M1)
-                    &self.context.language_patterns,
-                )),
-            )
-            .add_handler(
-                HandlerPosition::NaturalLanguage,
-                Box::new(NaturalLanguageHandler::new()),
-            )
-            .add_handler(HandlerPosition::Default, Box::new(DefaultHandler::new()));
-
-        self.history = Some(history);
-        self
-    }
-
-    /// Classify the input as command or natural language
-    ///
-    /// Performs alias expansion before classification:
-    /// 1. Extract first word from input
-    /// 2. Check if it's an alias
-    /// 3. If alias, expand and classify the expanded command
-    /// 4. If not alias, classify original input
-    pub fn classify(&self, input: &str) -> Result<InputType> {
-        use super::discovery::CommandCache;
-
+    /// Classify user input as Command, NaturalLanguage, or Empty
+    pub fn classify(&self, input: &str) -> InputType {
         let trimmed = input.trim();
 
-        // Extract first word to check for alias
-        if let Some(first_word) = trimmed.split_whitespace().next() {
-            // Check if first word is an alias
-            if let Some(expansion) = CommandCache::expand_alias(first_word) {
-                // Get the rest of the arguments (everything after first word)
-                // Use byte offset instead of strip_prefix to avoid fragile invariant
-                let first_word_len = first_word.len();
-                let rest = if first_word_len < trimmed.len() {
-                    trimmed[first_word_len..].trim_start()
-                } else {
-                    ""
-                };
+        // Empty input
+        if trimmed.is_empty() {
+            return InputType::Empty;
+        }
 
-                // Construct expanded input: expansion + rest
-                let expanded_input = if rest.is_empty() {
-                    expansion
-                } else {
-                    format!("{expansion} {rest}")
-                };
-
-                // Classify the expanded input
-                return self.classify_internal(&expanded_input);
+        // Check for explicit '?' prefix (user explicitly wants LLM)
+        if let Some(query) = trimmed.strip_prefix('?') {
+            let query = query.trim();
+            if !query.is_empty() {
+                return InputType::NaturalLanguage(query.to_string());
             }
         }
 
-        // Not an alias, classify as-is
-        self.classify_internal(trimmed)
+        // Check for natural language indicators
+        if self.is_natural_language(trimmed) {
+            return InputType::NaturalLanguage(trimmed.to_string());
+        }
+
+        // Default to command
+        InputType::Command(trimmed.to_string())
     }
 
-    /// Internal classification method (without alias expansion)
-    fn classify_internal(&self, input: &str) -> Result<InputType> {
-        // Process through the chain of handlers
-        match self.chain.process(input, &self.context) {
-            Some(result) => Ok(result),
-            None => {
-                // This should never happen with DefaultHandler at the end,
-                // but we handle it gracefully
-                Ok(InputType::NaturalLanguage(input.trim().to_string()))
+    /// Check if input is likely natural language
+    fn is_natural_language(&self, input: &str) -> bool {
+        // 1. Contains question marks → natural language
+        if PATTERNS.natural_language.is_match(input) {
+            // But not if it also has shell operators (e.g., "grep foo?")
+            if !PATTERNS.shell_operators.is_match(input) {
+                return true;
             }
         }
-    }
-}
 
-impl Default for InputClassifier {
-    fn default() -> Self {
-        Self::new()
+        // 2. Explicit command syntax → not natural language
+        if PATTERNS.command_syntax.is_match(input) {
+            return false;
+        }
+
+        // 3. Contains shell operators → command
+        if PATTERNS.shell_operators.is_match(input) {
+            return false;
+        }
+
+        // 4. Contains non-ASCII characters → likely non-English natural language
+        // (e.g., "chi sono io" in Italian, "什么是" in Chinese)
+        if !input.is_ascii() {
+            return true;
+        }
+
+        // 5. Long phrase without shell operators → likely natural language
+        let words: Vec<&str> = input.split_whitespace().collect();
+        if words.len() > 5 {
+            return true;
+        }
+
+        // 6. Medium phrase (3-5 words) without known command at start
+        if words.len() >= 3
+            && let Some(first_word) = words.first()
+        {
+            // If first word is not a likely command name, treat as NL
+            if !self.looks_like_command(first_word) {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    /// Check if a word looks like a Unix command name
+    fn looks_like_command(&self, word: &str) -> bool {
+        // Commands are typically lowercase alphanumeric with optional hyphens/underscores
+        // Very short words (1-2 chars) are often commands (ls, cd, rm, cp, mv)
+        if word.len() <= 2 && word.chars().all(|c| c.is_ascii_lowercase()) {
+            return true;
+        }
+
+        // Common commands and tools
+        const COMMON_COMMANDS: &[&str] = &[
+            "ls",
+            "cd",
+            "rm",
+            "cp",
+            "mv",
+            "cat",
+            "grep",
+            "find",
+            "echo",
+            "pwd",
+            "mkdir",
+            "touch",
+            "chmod",
+            "chown",
+            "tar",
+            "gzip",
+            "gunzip",
+            "zip",
+            "unzip",
+            "ssh",
+            "scp",
+            "rsync",
+            "git",
+            "docker",
+            "kubectl",
+            "npm",
+            "yarn",
+            "pip",
+            "python",
+            "python3",
+            "node",
+            "cargo",
+            "make",
+            "cmake",
+            "gcc",
+            "clang",
+            "rustc",
+            "go",
+            "java",
+            "javac",
+            "curl",
+            "wget",
+            "ps",
+            "top",
+            "htop",
+            "kill",
+            "killall",
+            "systemctl",
+            "journalctl",
+            "sudo",
+            "su",
+            "apt",
+            "apt-get",
+            "yum",
+            "dnf",
+            "pacman",
+            "brew",
+            "snap",
+            "flatpak",
+            "which",
+            "whereis",
+            "man",
+            "info",
+            "help",
+            "clear",
+            "exit",
+            "history",
+            "alias",
+            "export",
+            "source",
+            "env",
+            "head",
+            "tail",
+            "less",
+            "more",
+            "sort",
+            "uniq",
+            "wc",
+            "cut",
+            "awk",
+            "sed",
+            "xargs",
+            "diff",
+            "patch",
+            "file",
+            "stat",
+            "df",
+            "du",
+            "free",
+            "uname",
+            "hostname",
+            "whoami",
+            "date",
+            "cal",
+            "bc",
+            "expr",
+            "test",
+            "true",
+            "false",
+            "yes",
+            "no",
+            "sleep",
+            "watch",
+            "screen",
+            "tmux",
+            "vim",
+            "vi",
+            "nano",
+            "emacs",
+            "code",
+            "subl",
+            "bat",
+            "exa",
+            "fd",
+            "rg",
+            "fzf",
+            "jq",
+            "yq",
+            "htpasswd",
+            "openssl",
+            "base64",
+            "md5sum",
+            "sha256sum",
+        ];
+
+        COMMON_COMMANDS.contains(&word.to_lowercase().as_str())
     }
 }
 
@@ -272,131 +291,142 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_known_commands() {
+    fn test_empty_input() {
         let classifier = InputClassifier::new();
-
-        // Test with ls (should exist on all Unix systems)
-        let result = classifier.classify("ls -la").unwrap();
-        // ls should be either Command (if installed) or pass through to CommandSyntaxHandler
-        assert!(matches!(result, InputType::Command { .. }));
-
-        // Commands that may not be installed should still be classified via syntax
-        // (they have flags, so CommandSyntaxHandler will catch them)
-        assert!(matches!(
-            classifier.classify("unknown-cmd --flag").unwrap(),
-            InputType::Command { .. }
-        ));
+        assert_eq!(classifier.classify(""), InputType::Empty);
+        assert_eq!(classifier.classify("   "), InputType::Empty);
     }
 
     #[test]
-    #[cfg_attr(target_os = "macos", ignore)] // Flaky on macOS due to PATH/command differences
-    fn test_natural_language() {
+    fn test_explicit_query_prefix() {
         let classifier = InputClassifier::new();
-
-        // Questions with question marks - should match regex patterns
-        assert!(matches!(
-            classifier.classify("how do I list files?").unwrap(),
-            InputType::NaturalLanguage(_)
-        ));
-
-        // "show me the logs" - has article "the", should match
-        let result = classifier.classify("show me the logs").unwrap();
-        assert!(
-            matches!(result, InputType::NaturalLanguage(_)),
-            "Expected NaturalLanguage, got: {result:?}"
+        assert_eq!(
+            classifier.classify("? how do I list files"),
+            InputType::NaturalLanguage("how do I list files".to_string())
         );
-
-        // Question with "what" and question mark - uses common words only
-        // Note: Avoid nouns that might be commands on some systems
-        assert!(matches!(
-            classifier.classify("what does this do?").unwrap(),
-            InputType::NaturalLanguage(_)
-        ));
-    }
-
-    #[test]
-    fn test_command_syntax() {
-        let classifier = InputClassifier::new();
-
-        // Flags
-        assert!(matches!(
-            classifier.classify("unknown-cmd --flag").unwrap(),
-            InputType::Command { .. }
-        ));
-
-        // Pipes
-        assert!(matches!(
-            classifier.classify("cat file.txt | grep pattern").unwrap(),
-            InputType::Command { .. }
-        ));
-    }
-
-    #[test]
-    fn test_universal_patterns() {
-        let classifier = InputClassifier::new();
-
-        // Question marks (any language)
-        assert!(matches!(
-            classifier.classify("¿Qué es esto?").unwrap(),
-            InputType::NaturalLanguage(_)
-        ));
-        assert!(matches!(
-            classifier.classify("Was ist das?").unwrap(),
-            InputType::NaturalLanguage(_)
-        ));
-
-        // Long phrases without command syntax
-        assert!(matches!(
-            classifier
-                .classify("I really need to understand how this works")
-                .unwrap(),
-            InputType::NaturalLanguage(_)
-        ));
-        assert!(matches!(
-            classifier
-                .classify("voglio capire come funziona questo sistema complesso")
-                .unwrap(),
-            InputType::NaturalLanguage(_)
-        ));
-
-        // Commands with paths should still be commands
-        assert!(matches!(
-            classifier.classify("./deploy.sh --production").unwrap(),
-            InputType::Command { .. }
-        ));
-    }
-
-    #[test]
-    fn test_edge_cases() {
-        let classifier = InputClassifier::new();
-
-        // Single word - if command exists in whitelist + PATH, it's Command
-        // Otherwise might be typo or natural language
-        // Test with "ls" which should exist everywhere
-        let result = classifier.classify("ls").unwrap();
-        assert!(
-            matches!(result, InputType::Command { .. }),
-            "ls should be classified as Command"
+        assert_eq!(
+            classifier.classify("?chi sono io"),
+            InputType::NaturalLanguage("chi sono io".to_string())
         );
+    }
 
-        // Articles indicate natural language
+    #[test]
+    fn test_question_marks() {
+        let classifier = InputClassifier::new();
         assert!(matches!(
-            classifier.classify("run the docker container").unwrap(),
+            classifier.classify("how do I list files?"),
             InputType::NaturalLanguage(_)
         ));
         assert!(matches!(
-            classifier.classify("avvia il container docker").unwrap(),
+            classifier.classify("what is docker?"),
             InputType::NaturalLanguage(_)
         ));
+    }
 
-        // Polite expressions with clear natural language markers
+    #[test]
+    fn test_non_ascii() {
+        let classifier = InputClassifier::new();
+        // Italian
         assert!(matches!(
-            classifier.classify("can you help me please?").unwrap(),
+            classifier.classify("chi sono io"),
             InputType::NaturalLanguage(_)
         ));
-
+        // Spanish
         assert!(matches!(
-            classifier.classify("grazie per l'aiuto!").unwrap(),
+            classifier.classify("cómo listar archivos"),
+            InputType::NaturalLanguage(_)
+        ));
+    }
+
+    #[test]
+    fn test_commands() {
+        let classifier = InputClassifier::new();
+        assert!(matches!(
+            classifier.classify("ls -la"),
+            InputType::Command(_)
+        ));
+        assert!(matches!(
+            classifier.classify("docker ps"),
+            InputType::Command(_)
+        ));
+        assert!(matches!(
+            classifier.classify("git status"),
+            InputType::Command(_)
+        ));
+        assert!(matches!(
+            classifier.classify("cat /etc/passwd"),
+            InputType::Command(_)
+        ));
+    }
+
+    #[test]
+    fn test_shell_operators() {
+        let classifier = InputClassifier::new();
+        assert!(matches!(
+            classifier.classify("ls | grep foo"),
+            InputType::Command(_)
+        ));
+        assert!(matches!(
+            classifier.classify("cat file > output"),
+            InputType::Command(_)
+        ));
+        assert!(matches!(
+            classifier.classify("cmd1 && cmd2"),
+            InputType::Command(_)
+        ));
+    }
+
+    #[test]
+    fn test_long_phrases() {
+        let classifier = InputClassifier::new();
+        assert!(matches!(
+            classifier.classify("show me all the docker containers running"),
+            InputType::NaturalLanguage(_)
+        ));
+    }
+
+    #[test]
+    fn test_question_words() {
+        let classifier = InputClassifier::new();
+        assert!(matches!(
+            classifier.classify("how to list files"),
+            InputType::NaturalLanguage(_)
+        ));
+        assert!(matches!(
+            classifier.classify("what is kubernetes"),
+            InputType::NaturalLanguage(_)
+        ));
+        assert!(matches!(
+            classifier.classify("why is my container failing"),
+            InputType::NaturalLanguage(_)
+        ));
+    }
+
+    #[test]
+    fn test_polite_phrases() {
+        let classifier = InputClassifier::new();
+        assert!(matches!(
+            classifier.classify("please help me"),
+            InputType::NaturalLanguage(_)
+        ));
+        assert!(matches!(
+            classifier.classify("can you explain docker"),
+            InputType::NaturalLanguage(_)
+        ));
+    }
+
+    #[test]
+    fn test_whoami_classification() {
+        let classifier = InputClassifier::new();
+        // "whoami" is a known command
+        assert!(matches!(
+            classifier.classify("whoami"),
+            InputType::Command(_)
+        ));
+        // "chi sono io" is Italian (non-ASCII 'ì' not present, but space pattern)
+        // Actually "chi sono io" is all ASCII, but it's 3 words and "chi" is not a command
+        assert!(matches!(
+            classifier.classify("chi sono io"),
             InputType::NaturalLanguage(_)
         ));
     }
