@@ -1223,4 +1223,539 @@ mod tests {
         // API key should NOT be in debug output (security)
         assert!(!debug_str.contains("test-api-key"));
     }
+
+    // === truncate_utf8 ===
+
+    #[test]
+    fn test_truncate_utf8_within_limit() {
+        assert_eq!(truncate_utf8("hello", 10), "hello");
+    }
+
+    #[test]
+    fn test_truncate_utf8_exact_limit() {
+        assert_eq!(truncate_utf8("hello", 5), "hello");
+    }
+
+    #[test]
+    fn test_truncate_utf8_cuts_ascii() {
+        assert_eq!(truncate_utf8("hello world", 5), "hello");
+    }
+
+    #[test]
+    fn test_truncate_utf8_respects_char_boundary() {
+        // '€' is 3 bytes; truncating at byte 2 must back up to 0
+        assert_eq!(truncate_utf8("€abc", 2), "");
+        // truncating at byte 3 keeps the full '€'
+        assert_eq!(truncate_utf8("€abc", 3), "€");
+    }
+
+    #[test]
+    fn test_truncate_utf8_empty() {
+        assert_eq!(truncate_utf8("", 10), "");
+        assert_eq!(truncate_utf8("", 0), "");
+    }
+
+    // === is_ai_message ===
+
+    #[test]
+    fn test_is_ai_message_by_type() {
+        let msg = serde_json::json!({"type": "ai", "content": "hi"});
+        assert!(HttpLLMClient::is_ai_message(&msg));
+    }
+
+    #[test]
+    fn test_is_ai_message_by_role() {
+        let msg = serde_json::json!({"role": "assistant", "content": "hi"});
+        assert!(HttpLLMClient::is_ai_message(&msg));
+    }
+
+    #[test]
+    fn test_is_ai_message_user() {
+        let msg = serde_json::json!({"type": "human", "role": "user"});
+        assert!(!HttpLLMClient::is_ai_message(&msg));
+    }
+
+    #[test]
+    fn test_is_ai_message_empty() {
+        let msg = serde_json::json!({});
+        assert!(!HttpLLMClient::is_ai_message(&msg));
+    }
+
+    // === extract_message_content ===
+
+    #[test]
+    fn test_extract_content_string() {
+        let msg = serde_json::json!({"content": "hello world"});
+        assert_eq!(
+            HttpLLMClient::extract_message_content(&msg),
+            Some("hello world".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_content_empty_string() {
+        let msg = serde_json::json!({"content": ""});
+        assert_eq!(HttpLLMClient::extract_message_content(&msg), None);
+    }
+
+    #[test]
+    fn test_extract_content_array_text_blocks() {
+        let msg = serde_json::json!({
+            "content": [
+                {"type": "text", "text": "part1"},
+                {"type": "text", "text": "part2"}
+            ]
+        });
+        assert_eq!(
+            HttpLLMClient::extract_message_content(&msg),
+            Some("part1\npart2".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_content_array_skips_non_text() {
+        let msg = serde_json::json!({
+            "content": [
+                {"type": "tool_use", "id": "123"},
+                {"type": "text", "text": "only this"}
+            ]
+        });
+        assert_eq!(
+            HttpLLMClient::extract_message_content(&msg),
+            Some("only this".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_content_empty_array() {
+        let msg = serde_json::json!({"content": []});
+        assert_eq!(HttpLLMClient::extract_message_content(&msg), None);
+    }
+
+    #[test]
+    fn test_extract_content_no_content_field() {
+        let msg = serde_json::json!({"role": "assistant"});
+        assert_eq!(HttpLLMClient::extract_message_content(&msg), None);
+    }
+
+    // === is_valid_ai_content ===
+
+    #[test]
+    fn test_valid_ai_content() {
+        assert!(HttpLLMClient::is_valid_ai_content("Here is the answer"));
+    }
+
+    #[test]
+    fn test_invalid_ai_content_empty() {
+        assert!(!HttpLLMClient::is_valid_ai_content(""));
+    }
+
+    #[test]
+    fn test_invalid_ai_content_transferring() {
+        assert!(!HttpLLMClient::is_valid_ai_content("Transferring to agent"));
+        assert!(!HttpLLMClient::is_valid_ai_content(
+            "Successfully transferred control"
+        ));
+    }
+
+    // === parse_interrupt_value ===
+
+    #[test]
+    fn test_parse_interrupt_command_approval() {
+        let value = serde_json::json!({
+            "command": "ls -la",
+            "message": "List directory contents"
+        });
+        let result = HttpLLMClient::parse_interrupt_value(&value);
+        match result {
+            InterruptData::CommandApproval { command, message } => {
+                assert_eq!(command, "ls -la");
+                assert_eq!(message, "List directory contents");
+            }
+            _ => panic!("Expected CommandApproval"),
+        }
+    }
+
+    #[test]
+    fn test_parse_interrupt_command_defaults() {
+        let value = serde_json::json!({"command": null});
+        let result = HttpLLMClient::parse_interrupt_value(&value);
+        match result {
+            InterruptData::CommandApproval { command, message } => {
+                assert_eq!(command, "unknown");
+                assert_eq!(message, "Command requires approval");
+            }
+            _ => panic!("Expected CommandApproval"),
+        }
+    }
+
+    #[test]
+    fn test_parse_interrupt_question() {
+        let value = serde_json::json!({
+            "question": "Which environment?",
+            "options": ["dev", "staging", "prod"]
+        });
+        let result = HttpLLMClient::parse_interrupt_value(&value);
+        match result {
+            InterruptData::Question { question, options } => {
+                assert_eq!(question, "Which environment?");
+                assert_eq!(
+                    options,
+                    Some(vec![
+                        "dev".to_string(),
+                        "staging".to_string(),
+                        "prod".to_string()
+                    ])
+                );
+            }
+            _ => panic!("Expected Question"),
+        }
+    }
+
+    #[test]
+    fn test_parse_interrupt_question_no_options() {
+        let value = serde_json::json!({"question": "What name?"});
+        let result = HttpLLMClient::parse_interrupt_value(&value);
+        match result {
+            InterruptData::Question { question, options } => {
+                assert_eq!(question, "What name?");
+                assert!(options.is_none());
+            }
+            _ => panic!("Expected Question"),
+        }
+    }
+
+    #[test]
+    fn test_parse_interrupt_fallback_message_as_question() {
+        // No "command" and no "question" field, falls back to "message"
+        let value = serde_json::json!({"message": "Please provide input"});
+        let result = HttpLLMClient::parse_interrupt_value(&value);
+        match result {
+            InterruptData::Question { question, .. } => {
+                assert_eq!(question, "Please provide input");
+            }
+            _ => panic!("Expected Question"),
+        }
+    }
+
+    #[test]
+    fn test_parse_interrupt_empty_object() {
+        let value = serde_json::json!({});
+        let result = HttpLLMClient::parse_interrupt_value(&value);
+        match result {
+            InterruptData::Question { question, options } => {
+                assert_eq!(question, "Agent is asking for input");
+                assert!(options.is_none());
+            }
+            _ => panic!("Expected Question"),
+        }
+    }
+
+    // === handle_messages_event ===
+
+    #[test]
+    fn test_handle_messages_event_ai_messages() {
+        let data = serde_json::json!([
+            {"type": "ai", "content": "Hello"},
+            {"type": "human", "content": "ignored"},
+            {"type": "ai", "content": "World"}
+        ])
+        .to_string();
+        let mut result = String::new();
+        HttpLLMClient::handle_messages_event(&data, &mut result);
+        assert_eq!(result, "Hello\nWorld");
+    }
+
+    #[test]
+    fn test_handle_messages_event_no_ai() {
+        let data = serde_json::json!([
+            {"type": "human", "content": "user msg"}
+        ])
+        .to_string();
+        let mut result = String::new();
+        HttpLLMClient::handle_messages_event(&data, &mut result);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_handle_messages_event_invalid_json() {
+        let mut result = String::new();
+        HttpLLMClient::handle_messages_event("not json", &mut result);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_handle_messages_event_not_array() {
+        let mut result = String::new();
+        HttpLLMClient::handle_messages_event("{\"key\": \"value\"}", &mut result);
+        assert!(result.is_empty());
+    }
+
+    // === handle_updates_event ===
+
+    #[test]
+    fn test_handle_updates_event_command_interrupt() {
+        let data = serde_json::json!({
+            "__interrupt__": [{
+                "value": {
+                    "command": "rm -rf /tmp/test",
+                    "message": "Delete temp files"
+                }
+            }]
+        })
+        .to_string();
+        let result = HttpLLMClient::handle_updates_event(&data).unwrap();
+        match result {
+            Some(InterruptData::CommandApproval { command, message }) => {
+                assert_eq!(command, "rm -rf /tmp/test");
+                assert_eq!(message, "Delete temp files");
+            }
+            _ => panic!("Expected CommandApproval interrupt"),
+        }
+    }
+
+    #[test]
+    fn test_handle_updates_event_question_interrupt() {
+        let data = serde_json::json!({
+            "__interrupt__": [{
+                "value": {
+                    "question": "Which DB?",
+                    "options": ["postgres", "mysql"]
+                }
+            }]
+        })
+        .to_string();
+        let result = HttpLLMClient::handle_updates_event(&data).unwrap();
+        assert!(matches!(result, Some(InterruptData::Question { .. })));
+    }
+
+    #[test]
+    fn test_handle_updates_event_no_interrupt() {
+        let data = serde_json::json!({"some_key": "some_value"}).to_string();
+        let result = HttpLLMClient::handle_updates_event(&data).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_handle_updates_event_invalid_json() {
+        let result = HttpLLMClient::handle_updates_event("bad json").unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_handle_updates_event_interrupt_no_value() {
+        let data = serde_json::json!({
+            "__interrupt__": [{"no_value_field": true}]
+        })
+        .to_string();
+        let result = HttpLLMClient::handle_updates_event(&data).unwrap();
+        assert!(result.is_none());
+    }
+
+    // === handle_values_event ===
+
+    #[test]
+    fn test_handle_values_event_extracts_last_ai() {
+        let data = serde_json::json!({
+            "messages": [
+                {"type": "human", "content": "hello"},
+                {"type": "ai", "content": "first answer"},
+                {"type": "ai", "content": "latest answer"}
+            ]
+        })
+        .to_string();
+        let mut result = String::new();
+        HttpLLMClient::handle_values_event(&data, &mut result);
+        assert_eq!(result, "latest answer");
+    }
+
+    #[test]
+    fn test_handle_values_event_skips_handoff() {
+        let data = serde_json::json!({
+            "messages": [
+                {"type": "ai", "content": "real answer"},
+                {"type": "ai", "content": "Transferring to X", "response_metadata": {"__is_handoff_back": true}}
+            ]
+        })
+        .to_string();
+        let mut result = String::new();
+        HttpLLMClient::handle_values_event(&data, &mut result);
+        assert_eq!(result, "real answer");
+    }
+
+    #[test]
+    fn test_handle_values_event_skips_transfer_content() {
+        let data = serde_json::json!({
+            "messages": [
+                {"type": "ai", "content": "good content"},
+                {"type": "ai", "content": "Transferring control to agent"}
+            ]
+        })
+        .to_string();
+        let mut result = String::new();
+        HttpLLMClient::handle_values_event(&data, &mut result);
+        assert_eq!(result, "good content");
+    }
+
+    #[test]
+    fn test_handle_values_event_no_messages() {
+        let data = serde_json::json!({"other": "data"}).to_string();
+        let mut result = String::new();
+        HttpLLMClient::handle_values_event(&data, &mut result);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_handle_values_event_replaces_previous_result() {
+        let data = serde_json::json!({
+            "messages": [{"type": "ai", "content": "new content"}]
+        })
+        .to_string();
+        let mut result = "old content".to_string();
+        HttpLLMClient::handle_values_event(&data, &mut result);
+        assert_eq!(result, "new content");
+    }
+
+    #[test]
+    fn test_handle_values_event_invalid_json() {
+        let mut result = "unchanged".to_string();
+        HttpLLMClient::handle_values_event("not json", &mut result);
+        assert_eq!(result, "unchanged");
+    }
+
+    // === handle_error_event ===
+
+    #[test]
+    fn test_handle_error_event_with_message() {
+        let data = serde_json::json!({"message": "rate limit exceeded"}).to_string();
+        let err = HttpLLMClient::handle_error_event(&data).unwrap_err();
+        assert!(err.to_string().contains("rate limit exceeded"));
+    }
+
+    #[test]
+    fn test_handle_error_event_no_message() {
+        let data = serde_json::json!({}).to_string();
+        let err = HttpLLMClient::handle_error_event(&data).unwrap_err();
+        assert!(err.to_string().contains("Unknown error"));
+    }
+
+    #[test]
+    fn test_handle_error_event_invalid_json() {
+        let result = HttpLLMClient::handle_error_event("not json").unwrap();
+        assert!(result.is_none());
+    }
+
+    // === handle_sse_event (dispatcher) ===
+
+    #[test]
+    fn test_handle_sse_event_messages() {
+        let client = HttpLLMClient::new("http://test".into(), "key".into());
+        let data = serde_json::json!([{"type": "ai", "content": "test"}]).to_string();
+        let mut result = String::new();
+        let interrupt = client.handle_sse_event("messages", &data, &mut result).unwrap();
+        assert!(interrupt.is_none());
+        assert_eq!(result, "test");
+    }
+
+    #[test]
+    fn test_handle_sse_event_updates_with_interrupt() {
+        let client = HttpLLMClient::new("http://test".into(), "key".into());
+        let data = serde_json::json!({
+            "__interrupt__": [{"value": {"command": "ls", "message": "list"}}]
+        })
+        .to_string();
+        let mut result = String::new();
+        let interrupt = client.handle_sse_event("updates", &data, &mut result).unwrap();
+        assert!(matches!(interrupt, Some(InterruptData::CommandApproval { .. })));
+    }
+
+    #[test]
+    fn test_handle_sse_event_error() {
+        let client = HttpLLMClient::new("http://test".into(), "key".into());
+        let data = serde_json::json!({"message": "boom"}).to_string();
+        let mut result = String::new();
+        let err = client.handle_sse_event("error", &data, &mut result);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn test_handle_sse_event_end() {
+        let client = HttpLLMClient::new("http://test".into(), "key".into());
+        let mut result = String::new();
+        let interrupt = client.handle_sse_event("end", "", &mut result).unwrap();
+        assert!(interrupt.is_none());
+    }
+
+    #[test]
+    fn test_handle_sse_event_unknown() {
+        let client = HttpLLMClient::new("http://test".into(), "key".into());
+        let mut result = String::new();
+        let interrupt = client
+            .handle_sse_event("custom_event", "data", &mut result)
+            .unwrap();
+        assert!(interrupt.is_none());
+    }
+
+    // === convert_stream_result ===
+
+    #[test]
+    fn test_convert_stream_result_complete() {
+        let result =
+            HttpLLMClient::convert_stream_result(StreamResult::Complete("done".into())).unwrap();
+        assert_eq!(result.as_complete(), Some("done"));
+    }
+
+    #[test]
+    fn test_convert_stream_result_command_approval() {
+        let result = HttpLLMClient::convert_stream_result(StreamResult::CommandApproval {
+            command: "ls".into(),
+            message: "list".into(),
+        })
+        .unwrap();
+        match result {
+            LLMQueryResult::CommandApproval { command, message } => {
+                assert_eq!(command, "ls");
+                assert_eq!(message, "list");
+            }
+            _ => panic!("Expected CommandApproval"),
+        }
+    }
+
+    #[test]
+    fn test_convert_stream_result_question() {
+        let result = HttpLLMClient::convert_stream_result(StreamResult::Question {
+            question: "which?".into(),
+            options: Some(vec!["a".into(), "b".into()]),
+        })
+        .unwrap();
+        match result {
+            LLMQueryResult::Question { question, options } => {
+                assert_eq!(question, "which?");
+                assert_eq!(options.unwrap().len(), 2);
+            }
+            _ => panic!("Expected Question"),
+        }
+    }
+
+    // === MockLLMClient resume_with_command_output / resume_rejected ===
+
+    #[tokio::test]
+    async fn test_mock_client_resume_with_command_output() {
+        let client = MockLLMClient::new();
+        let result = client
+            .resume_with_command_output("uname -s", "Linux")
+            .await
+            .unwrap();
+        let text = result.unwrap_complete();
+        assert!(text.contains("uname -s"));
+        assert!(text.contains("Linux"));
+    }
+
+    #[tokio::test]
+    async fn test_mock_client_resume_rejected() {
+        let client = MockLLMClient::new();
+        let result = client.resume_rejected().await.unwrap();
+        let text = result.unwrap_complete();
+        assert!(text.contains("rejected"));
+    }
 }

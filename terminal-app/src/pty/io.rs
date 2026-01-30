@@ -34,7 +34,7 @@ impl Drop for PtyReader {
     }
 }
 
-#[expect(dead_code, reason = "Public API - reader methods used by PtyManager")]
+#[allow(dead_code)]
 impl PtyReader {
     /// Create a new PTY reader that sends data to the provided channel.
     ///
@@ -111,7 +111,7 @@ impl fmt::Debug for PtyWriter {
     }
 }
 
-#[expect(dead_code, reason = "Public API - writer methods used by InfrawareApp")]
+#[allow(dead_code)]
 impl PtyWriter {
     /// Create a new PTY writer.
     pub fn new(writer: Box<dyn Write + Send>) -> Self {
@@ -227,5 +227,101 @@ mod tests {
         let result = trait_obj.write_bytes(b"hello");
         assert!(result.is_ok());
         assert_eq!(result.unwrap(), 5);
+    }
+
+    #[test]
+    fn test_pty_reader_is_alive() {
+        let (tx, _rx) = mpsc::sync_channel(4);
+        // Use a reader that blocks indefinitely (pipe-like)
+        let (read_end, _write_end) = std::os::unix::net::UnixStream::pair().unwrap();
+        let reader = PtyReader::new(Box::new(read_end), tx);
+        assert!(reader.is_alive());
+    }
+
+    #[test]
+    fn test_pty_reader_drop_stops() {
+        let (tx, _rx) = mpsc::sync_channel(4);
+        let (read_end, _write_end) = std::os::unix::net::UnixStream::pair().unwrap();
+        let reader = PtyReader::new(Box::new(read_end), tx);
+        let stop_flag = reader.stop_flag.clone();
+
+        assert!(!stop_flag.load(std::sync::atomic::Ordering::Acquire));
+        drop(reader);
+        assert!(stop_flag.load(std::sync::atomic::Ordering::Acquire));
+    }
+
+    #[test]
+    fn test_pty_reader_debug() {
+        let (tx, _rx) = mpsc::sync_channel(4);
+        let cursor = Cursor::new(Vec::new());
+        let reader = PtyReader::new(Box::new(cursor), tx);
+        let debug = format!("{:?}", reader);
+        assert!(debug.contains("PtyReader"));
+    }
+
+    #[test]
+    fn test_pty_writer_debug() {
+        let cursor = Cursor::new(Vec::new());
+        let writer = PtyWriter::new(Box::new(cursor));
+        let debug = format!("{:?}", writer);
+        assert!(debug.contains("PtyWriter"));
+    }
+
+    #[test]
+    fn test_pty_writer_write_sync() {
+        let cursor = Cursor::new(Vec::new());
+        let writer = PtyWriter::new(Box::new(cursor));
+        let n = writer.write_sync(b"sync write").unwrap();
+        assert_eq!(n, 10);
+    }
+
+    #[tokio::test]
+    async fn test_pty_writer_send_byte() {
+        let cursor = Cursor::new(Vec::new());
+        let writer = PtyWriter::new(Box::new(cursor));
+        writer.send_byte(0x03).await.unwrap(); // Ctrl+C
+    }
+
+    #[tokio::test]
+    async fn test_pty_writer_send_interrupt() {
+        let cursor = Cursor::new(Vec::new());
+        let writer = PtyWriter::new(Box::new(cursor));
+        writer.send_interrupt().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_pty_writer_send_eof() {
+        let cursor = Cursor::new(Vec::new());
+        let writer = PtyWriter::new(Box::new(cursor));
+        writer.send_eof().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_pty_writer_send_suspend() {
+        let cursor = Cursor::new(Vec::new());
+        let writer = PtyWriter::new(Box::new(cursor));
+        writer.send_suspend().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_pty_writer_write_str() {
+        let cursor = Cursor::new(Vec::new());
+        let writer = PtyWriter::new(Box::new(cursor));
+        let n = writer.write_str("hello pty").await.unwrap();
+        assert_eq!(n, 9);
+    }
+
+    #[test]
+    fn test_pty_reader_receives_multiple_chunks() {
+        // Reader should handle EOF after reading data
+        let data = vec![0u8; 1024];
+        let cursor = Cursor::new(data.clone());
+        let (tx, rx) = mpsc::sync_channel(16);
+        let _reader = PtyReader::new(Box::new(cursor), tx);
+
+        std::thread::sleep(std::time::Duration::from_millis(50));
+
+        let received = rx.try_recv().unwrap();
+        assert_eq!(received.len(), 1024);
     }
 }

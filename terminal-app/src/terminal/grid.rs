@@ -1488,7 +1488,7 @@ mod tests {
         for _ in 0..5 {
             grid.scroll_up(1);
         }
-        assert!(grid.scrollback().len() > 0);
+        assert!(!grid.scrollback().is_empty());
         assert_eq!(grid.visible_row_count(), 5);
 
         // Scroll up into scrollback
