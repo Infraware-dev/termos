@@ -674,6 +674,8 @@ impl InfrawareApp {
     }
 
     /// Resizes a session's PTY to match pane size.
+    ///
+    /// Returns `true` if the pane was resized.
     pub fn resize_session_pty(&mut self, session_id: SessionId, cols: u16, rows: u16) -> bool {
         if let Some(session) = self.state.sessions.get_mut(&session_id) {
             session.resize_pty(cols, rows, self.runtime.handle())

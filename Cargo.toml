@@ -6,6 +6,7 @@ members = [
   "crates/backend-engine",
   "terminal-app",
 ]
+default-members = ["terminal-app"]
 
 [workspace.package]
 version = "0.2.0"
