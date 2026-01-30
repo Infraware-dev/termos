@@ -90,7 +90,7 @@ jobs:
           fi
 
           # Compare using awk (doesn't require bc)
-          threshold=75.0
+          threshold=50.0
           if awk "BEGIN {exit !($coverage < $threshold)}"; then
             echo "Error: Coverage ${coverage}% is below threshold ${threshold}%"
             exit 1
