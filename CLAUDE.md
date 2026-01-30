@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 **Key feature**: Prefix any command with `?` for natural language queries (e.g., `? how do I revert a git commit`)
 
-**Tech Stack**: Rust 2024 edition, workspace with 5 members, egui/eframe, axum, tokio
+**Tech Stack**: Rust 2024 edition, workspace with 4 members, egui/eframe, axum, tokio
 
 **Prerequisites** (Linux):
 ```bash
@@ -31,7 +31,7 @@ ENGINE_TYPE=process BRIDGE_SCRIPT=bin/engine-bridge/main.py cargo run -p infrawa
 ENGINE_TYPE=rig ANTHROPIC_API_KEY=sk-... cargo run -p infraware-backend --features rig  # RigEngine
 
 # Testing
-cargo test --workspace               # All tests (~100 tests)
+cargo test --workspace               # All tests
 cargo test -p infraware-terminal -- test_name    # Single test by name
 cargo test -p infraware-engine       # Test engine crate only
 cargo test -- --nocapture            # With output
@@ -43,7 +43,7 @@ cargo watch -x 'run -p infraware-backend'    # Requires: cargo install cargo-wat
 cargo fmt --all && cargo clippy --workspace
 cargo clippy --workspace -- -D warnings    # CI-strict mode (warnings = errors)
 
-# Coverage (CI enforces 75% minimum)
+# Coverage (CI enforces 60% minimum, excluding UI/PTY/VTE modules)
 cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info
 cargo llvm-cov --all-features --workspace --summary-only  # Quick summary
 
@@ -59,10 +59,10 @@ curl -X POST http://localhost:8080/threads -H "Content-Type: application/json" -
 ├── crates/
 │   ├── shared/                # API contract types (infraware-shared)
 │   ├── backend-api/           # axum REST/SSE server (infraware-backend)
-│   ├── backend-engine/        # AgenticEngine trait + adapters
-│   └── backend-state/         # State persistence (placeholder)
+│   └── backend-engine/        # AgenticEngine trait + adapters
 ├── bin/engine-bridge/         # Python bridge for ProcessEngine
-└── backend/                   # Python FastAPI (legacy, being replaced)
+├── backend/                   # Python FastAPI (legacy, being replaced)
+└── docs/plans/                # Design documents and technical debt analysis
 ```
 
 ## Architecture
@@ -117,13 +117,37 @@ Axum REST/SSE API:
 - `POST /threads/{id}/runs/stream` - Stream run with SSE
 
 ### infraware-terminal
-Terminal emulator with LLM integration. Key modules:
-- `terminal/` - VTE parser, grid, cell attributes
-- `pty/` - PTY session, async I/O
-- `llm/` - HTTP/SSE client, markdown→ANSI renderer
-- `orchestrators/` - NaturalLanguage (queries), HITL (command approval)
-- `app.rs` - Main egui application, rendering loop
-- `state.rs` - AppMode state machine (Normal → WaitingLLM → AwaitingApproval → ExecutingCommand → WaitingLLM/Normal)
+Terminal emulator with LLM integration. The main `app.rs` has been decomposed into focused submodules following a handler pattern:
+
+**Core modules:**
+- `app.rs` - Main `InfrawareApp` struct, eframe::App implementation, top-level update loop
+- `app/state.rs` - Core application state struct (sessions map, buffers, flags)
+- `state.rs` - `AppMode` state machine and `AgentState` (per-session mode tracking)
+- `session.rs` - `TerminalSession` struct (each tab/pane has independent PTY, VTE parser, state)
+
+**Handler modules (in `app/`):**
+- `input_handler.rs` - Keyboard input processing and command classification
+- `hitl_handler.rs` - Human-in-the-loop interaction handling (approval/answer flows)
+- `llm_controller.rs` - LLM query management and background event dispatch
+- `llm_event_handler.rs` - LLM event processing (SSE stream handling)
+- `session_manager.rs` - Session lifecycle (create, close, initialize)
+- `tiles_manager.rs` - Split view and tab management via egui_tiles
+- `clipboard.rs` - Copy/paste operations
+- `render.rs` - Terminal rendering state and helpers
+- `terminal_renderer.rs` - Pure rendering logic (cell painting, cursor, decorations)
+- `behavior.rs` - egui_tiles `Behavior` trait implementation
+
+**Other directories:**
+- `terminal/` - VTE parser (`handler.rs`), grid (`grid.rs`), cell attributes (`cell.rs`)
+- `pty/` - PTY session, async I/O, DI traits
+- `llm/` - HTTP/SSE client, markdown→ANSI renderer (syntect highlighting)
+- `input/` - Keyboard mapping, text selection, command classification, prompt detection
+- `orchestrators/` - Only `hitl.rs` utility function (`parse_approval()`)
+- `auth/` - Authentication (trait + HTTP/Mock implementations)
+- `ui/` - egui helpers, theme, scrollbar
+- `config.rs` - Constants (timing, rendering, sizes)
+
+**Tab/Split View Architecture**: Uses `egui_tiles` for window management. Each `TerminalSession` represents an independent terminal pane with its own PTY process, VTE parser, and app mode state. Tabs are created at root level; splits can nest within tabs.
 
 ### State Machine Flow
 ```
@@ -151,10 +175,34 @@ Normal
 | Task | Location |
 |------|----------|
 | Add keyboard shortcut | `terminal-app/src/input/keyboard.rs` |
-| Modify terminal rendering | `terminal-app/src/app.rs` → `render_terminal()` |
+| Modify terminal rendering | `terminal-app/src/app/terminal_renderer.rs` and `app/render.rs` |
 | Add VTE escape handler | `terminal-app/src/terminal/handler.rs` → `csi_dispatch()` |
-| Modify LLM query flow | `terminal-app/src/orchestrators/natural_language.rs` |
-| Handle HITL interrupts | `terminal-app/src/orchestrators/hitl.rs` |
+| Modify LLM query flow | `terminal-app/src/app/llm_controller.rs` and `app/llm_event_handler.rs` |
+| Handle HITL interrupts | `terminal-app/src/app/hitl_handler.rs` |
+| Add tab/split behavior | `terminal-app/src/app/tiles_manager.rs` |
+| Modify session lifecycle | `terminal-app/src/app/session_manager.rs` |
+| Modify application state | `terminal-app/src/app/state.rs` (AppState) or `state.rs` (AppMode) |
+| Handle keyboard input | `terminal-app/src/app/input_handler.rs` |
+| Modify clipboard behavior | `terminal-app/src/app/clipboard.rs` |
+| Change theme colors | `terminal-app/src/ui/theme.rs` |
+| Change config constants | `terminal-app/src/config.rs` |
+
+## Keyboard Shortcuts
+
+| Shortcut | Action | Platform |
+|----------|--------|----------|
+| `Cmd+T` / `Ctrl+Shift+T` | New tab | macOS / Linux |
+| `Cmd+W` / `Ctrl+Shift+W` | Close tab | macOS / Linux |
+| `Ctrl+Tab` | Next tab | All |
+| `Ctrl+Shift+Tab` | Previous tab | All |
+| `Cmd+Shift+H` / `Ctrl+Shift+H` | Split horizontal | macOS / Linux |
+| `Cmd+Shift+J` / `Ctrl+Shift+J` | Split vertical | macOS / Linux |
+| `Cmd+C` / `Ctrl+Shift+C` | Copy | macOS / Linux |
+| `Cmd+V` / `Ctrl+Shift+V` | Paste | macOS / Linux |
+| `Ctrl+C` | SIGINT (interrupt) | All |
+| `Ctrl+D` | EOF | All |
+| `Ctrl+L` | Clear screen | All |
+| `Ctrl+Shift+/` | Enter LLM mode | All |
 
 ## Configuration
 
@@ -255,41 +303,20 @@ The RigEngine uses **rig-rs** to build a native Rust agent with Anthropic Claude
    - `false` (default): Command output IS the answer (e.g., `ls` → list files directly)
    - `true`: Command output is INPUT for agent processing (e.g., `uname -s` → then OS-specific instructions)
 
-### Example: How needs_continuation Works
-
-**Case 1: Direct Answer (needs_continuation=false)**
-```
-User: "List files in current directory"
-        ↓
-Agent: execute_shell_command("ls -la", needs_continuation=false)
-        ↓
-[User approves]
-        ↓
-Terminal executes: ls -la
-        ↓
-Output displayed directly to user (is the complete answer)
-```
-
-**Case 2: Processing Needed (needs_continuation=true)**
-```
-User: "Help me install Redis"
-        ↓
-Agent: execute_shell_command("uname -s", needs_continuation=true)
-        ↓
-[User approves]
-        ↓
-Terminal executes: uname -s → outputs "Linux"
-        ↓
-Agent receives output and continues:
-"I see you're on Linux. Here's how to install Redis..."
-```
-
 ### Files Involved
 
 - `crates/backend-engine/src/adapters/rig/orchestrator.rs` - Handles tool call interception and HITL flow
 - `crates/backend-engine/src/adapters/rig/tools/shell.rs` - ShellCommandTool with needs_continuation parameter
 - `crates/backend-engine/src/adapters/rig/tools/ask_user.rs` - AskUserTool for questions
 - `crates/shared/src/events.rs` - Interrupt enum with needs_continuation field
+
+## CI Pipeline
+
+CI runs on PRs to `main` and pushes to `main` (only when `terminal-app/**` changes):
+1. **Format Check**: `cargo fmt --all --check`
+2. **Clippy**: `cargo clippy --all-targets --all-features -- -D warnings`
+3. **Test Coverage**: 75% minimum threshold (excludes `main.rs`, `app/behavior.rs`, `app/terminal_renderer.rs`, `app/render.rs`, `ui/`)
+4. **Build**: Cross-platform (ubuntu-latest, macos-latest)
 
 ## Known Issues
 
