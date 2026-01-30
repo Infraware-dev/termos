@@ -1,0 +1,98 @@
+[workspace]
+resolver = "2"
+members = [
+  "crates/shared",
+  "crates/backend-api",
+  "crates/backend-engine",
+  "terminal-app",
+]
+
+[workspace.package]
+version = "0.2.0"
+edition = "2024"
+license = "MIT"
+
+[workspace.lints.rust]
+ambiguous_negative_literals = "warn"
+missing_debug_implementations = "warn"
+redundant_imports = "warn"
+redundant_lifetimes = "warn"
+trivial_numeric_casts = "warn"
+unsafe_op_in_unsafe_fn = "forbid"
+unused_lifetimes = "warn"
+
+[workspace.lints.clippy]
+all = "warn"
+complexity = "warn"
+correctness = "warn"
+perf = "warn"
+style = "warn"
+suspicious = "warn"
+# pedantic = "warn"  # TODO: enable after fixing existing warnings
+# Enforce module_name.rs convention over mod.rs
+mod_module_files = "warn"
+
+[workspace.dependencies]
+# Async runtime
+tokio = { version = "1.49.0", features = ["rt-multi-thread", "sync", "time", "macros", "io-util", "process", "signal"] }
+tokio-util = { version = "0.7.18", features = ["codec"] }
+
+# HTTP
+reqwest = { version = "0.12.12", features = ["json", "stream"] }
+axum = { version = "0.8.1", features = ["macros"] }
+tower = { version = "0.5.2", features = ["limit"] }
+tower-http = { version = "0.6.2", features = ["cors", "trace", "request-id", "propagate-header"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Utilities
+async-trait = "0.1.86"
+async-stream = "0.3.6"
+futures = "0.3.31"
+bytes = "1.10"
+anyhow = "1.0"
+thiserror = "1.0"
+uuid = { version = "1.12", features = ["v4", "serde"] }
+regex = "1.11"
+dotenvy = "0.15.7"
+schemars = "0.8"
+
+# AI / LLM
+rig-core = "0.28"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
+log = "0.4"
+env_logger = "0.11.6"
+
+# OpenAPI / Documentation
+utoipa = { version = "5.3", features = ["axum_extras"] }
+utoipa-swagger-ui = { version = "8.1", features = ["axum"] }
+
+# Metrics
+metrics = "0.24"
+metrics-exporter-prometheus = "0.16"
+
+# Internal crates
+infraware-shared = { path = "crates/shared" }
+infraware-engine = { path = "crates/backend-engine" }
+
+# Optimize dev builds for acceptable frame rates in GUI applications.
+# opt-level 1 enables basic optimizations (inlining, dead code elimination)
+# while keeping debug info and reasonable compile times.
+# Without this, debug builds run at ~10 FPS due to unoptimized VTE parsing
+# and cell iteration loops (16K+ function calls per frame at opt-level 0).
+[profile.dev]
+opt-level = 1
+
+# Dependencies get full optimization - we don't debug into egui/vte internals.
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.release]
+strip = true
+lto = true
+codegen-units = 1

@@ -1,73 +1,62 @@
 [package]
 name = "infraware-terminal"
-version = "0.1.0"
-edition = "2021"
-license = "MIT"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
 
-[lints.rust]
-missing_debug_implementations = "warn"
-redundant_imports = "warn"
-redundant_lifetimes = "warn"
-trivial_numeric_casts = "allow"  # Animation math requires casts
-unsafe_op_in_unsafe_fn = "forbid"
-unused_lifetimes = "warn"
-
-[lints.clippy]
-all = "warn"
-pedantic = "allow"  # Too strict for M1 scope
+[lints]
+workspace = true
 
 [dependencies]
-# TUI
-ratatui = "0.29"
-crossterm = "0.29.0"
-throbber-widgets-tui = "0.8"  # Animated throbber for loading states
+# Internal crates
+infraware-shared = { workspace = true }
+
+# GUI3
+egui = "0.33.3"
+eframe = { version = "0.33.3", default-features = false, features = ["default_fonts", "glow", "x11"] }
+egui_tiles = "0.14.1"
+
+# PTY
+portable-pty = "0.9.0"
+uuid = { workspace = true }
 
 # Async runtime
-tokio = { version = "1.40", features = ["full"] }
-async-trait = "0.1"
-
-# Command execution
-which = "8.0.0"
-shell-words = "1.1"
+tokio = { workspace = true }
 
 # LLM client
-reqwest = { version = "0.12", features = ["json", "stream"] }
-serde = { version = "1.0", features = ["derive"] }
-serde_json = "1.0"
-futures = "0.3"  # StreamExt for SSE parsing
-
-# Syntax highlighting
-syntect = "5.2"
-ansi-to-tui = "7.0"
+reqwest = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 
 # Error handling
-anyhow = "1.0"
-
-# Utilities
-regex = "1.10"
-dirs = "6.0.0"  # For home directory, config paths
-strsim = "0.11"  # Levenshtein distance for typo detection
-toml = "0.8"  # TOML configuration parsing
-hostname = "0.4"  # System hostname for prompt display
-unicode-width = "0.1"  # Unicode-aware string width for cursor positioning
+anyhow = { workspace = true }
 
 # Logging
-log = "0.4"  # Logging facade
-log4rs = { version = "1.3", features = ["gzip"] }  # Size-based log rotation with gzip compression
-dotenvy = "0.15"  # .env file loading
-tokio-util = "0.7.17"
-libc = "0.2.178"
+log = { workspace = true }
+env_logger = { workspace = true }
+
+# Environment
+dotenvy = "0.15"
+
+# Utilities
+image = { version = "0.25", default-features = false, features = ["png"] }
+which = "8.0"
+vte = "0.15"
+ctrlc = "3.4"
+regex = "1.12"
+once_cell = "1.20"
+smallvec = "1.13"
+bitflags = "2.9"
+
+# Clipboard (direct OS access, bypasses egui's delayed sync)
+arboard = "3.4"
+async-trait = { workspace = true }
+futures = { workspace = true }
+tokio-util = "0.7.18"
+syntect = { version = "5.3.0", features = ["default-fancy"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+nix = { version = "0.29", features = ["signal", "process"] }
 
 [dev-dependencies]
-tokio-test = "0.4"
-criterion = "0.7.0"  # Performance benchmarking
-serial_test = "3.0"  # Fix flaky tests with shared global state
-
-[[bench]]
-name = "scan_benchmark"
-harness = false
-
-[profile.release]
-strip = true          # Strip symbols from binary
-lto = true            # Link-time optimization
-codegen-units = 1     # Better optimization (slower compile)

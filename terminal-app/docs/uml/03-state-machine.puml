@@ -1,0 +1,152 @@
+@startuml "Application State Machine - Diagram"
+
+!theme plain
+skinparam backgroundColor #ffffff
+skinparam defaultFontName monospace
+skinparam defaultFontSize 11
+skinparam stateBorderColor #333333
+skinparam stateBackgroundColor #fff4e6
+skinparam arrowColor #333333
+
+title "Application State Machine (AppMode) with RigEngine"
+
+state "Normal" as Normal {
+    Idle state
+    Ready for user input
+    Terminal display live
+}
+
+state "WaitingLLM" as WaitingLLM {
+    Querying LLM backend
+    Terminal frozen
+    Animated throbber
+}
+
+state "AwaitingApproval" as AwaitingApproval {
+    LLM provided command
+    Waiting for y/n response
+    Command displayed
+}
+
+state "ExecutingCommand" as ExecutingCommand {
+    Command approved by user
+    Executing in PTY
+    Capturing output
+}
+
+state "AwaitingAnswer" as AwaitingAnswer {
+    LLM asked question
+    Waiting for text input
+    Question displayed
+}
+
+' From Normal
+Normal --> WaitingLLM : QueryLLM\n(user typed ? query)
+
+' From WaitingLLM
+WaitingLLM --> Normal : LLMCompleted\n(no further action)
+
+WaitingLLM --> AwaitingApproval : LLMRequestsApproval\n{ command, message }\n(RigEngine tool call)
+
+WaitingLLM --> AwaitingAnswer : LLMAsksQuestion\n{ question, options }\n(RigEngine asks for input)
+
+' From AwaitingApproval
+AwaitingApproval --> ExecutingCommand : UserApprovedCommand\n(user pressed y)
+
+AwaitingApproval --> Normal : Cancel\n(user pressed n or Ctrl+C)
+
+' From ExecutingCommand (new in RigEngine)
+ExecutingCommand --> WaitingLLM : CommandExecuted\n(needs_continuation=true)\nOutput sent to agent
+ExecutingCommand --> Normal : CommandExecuted\n(needs_continuation=false)\nOutput is final answer
+
+' From AwaitingAnswer
+AwaitingAnswer --> WaitingLLM : UserAnswered\n(user typed answer + Enter)
+
+AwaitingAnswer --> Normal : Cancel\n(Ctrl+C - abort question)
+
+' From WaitingLLM (cancel)
+WaitingLLM --> Normal : Cancel\n(Ctrl+C - abort LLM query)
+
+' Idempotent transition
+Normal --> Normal : Cancel\n(idempotent)
+
+note right of Normal
+    **Default state:**
+    - User can type commands
+    - PTY output displayed
+    - Cursor visible
+    - All input modes available
+end note
+
+note right of WaitingLLM
+    **LLM Query in Progress:**
+    - Terminal output frozen
+    - Animated throbber shows wait state
+    - User can press Ctrl+C to cancel
+    - Streaming response display
+end note
+
+note right of AwaitingApproval
+    **Command Approval Needed (HITL):**
+    - LLM command shown
+    - Explanation displayed
+    - Waiting for y/n/Ctrl+C
+    - RigEngine: triggered by execute_shell_command tool call
+end note
+
+note right of ExecutingCommand
+    **Command Executing (NEW):**
+    - User approved execution
+    - Command runs in PTY
+    - Output captured
+    - Agent decides next step via needs_continuation
+    - If true: agent continues with output
+    - If false: output is final answer
+end note
+
+note right of AwaitingAnswer
+    **LLM Question Needs Answer:**
+    - Question displayed
+    - Free-text or multiple choice
+    - Waiting for user input + Enter
+    - RigEngine: triggered by ask_user tool call
+end note
+
+note bottom
+    **State Machine Properties:**
+
+    1. **Valid Transitions Only:**
+       - can_transition_to(target) checks validity
+       - Invalid transitions return error
+       - Prevents corrupted state
+
+    2. **Atomic Transitions:**
+       - transition(event) consumes self + event
+       - Returns new state or error
+       - No intermediate states
+
+    3. **RigEngine HITL Flow:**
+       - Tools intercept before execution
+       - AwaitingApproval → ExecutingCommand (new)
+       - needs_continuation flag controls next state
+       - ExecutingCommand → WaitingLLM or Normal
+
+    4. **Cancel from Most States:**
+       - Cancel always → Normal (except Normal itself)
+       - Ctrl+C provides user escape hatch
+
+    **Implementation:**
+    pub enum AppMode {
+        Normal,
+        WaitingLLM,
+        AwaitingApproval { command, message },
+        AwaitingAnswer { question, options },
+        ExecutingCommand { command },
+    }
+
+    **RigEngine Specific:**
+    ExecutingCommand state NEW with RigEngine
+    Captures command output for needs_continuation decision
+end note
+
+@enduml

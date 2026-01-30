@@ -1,7 +1,20 @@
 {
   "permissions": {
     "allow": [
-      "Bash(python -m ruff check:*)"
+      "Bash(python -m ruff check:*)",
+      "Bash(git checkout:*)",
+      "Bash(git ls-tree:*)",
+      "Bash(cargo build:*)",
+      "Bash(cargo test:*)",
+      "Bash(cargo clippy:*)",
+      "Bash(cargo fmt:*)",
+      "Bash(grep:*)",
+      "Bash(cargo clean:*)",
+      "Bash(git add:*)",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\nfeat: add needs_continuation flag for intelligent command workflow\n\nImplement smart command handling that distinguishes between commands whose\noutput IS the answer \\(e.g., ''lista i file'' → ls output\\) and commands whose\noutput needs further processing by the agent \\(e.g., ''come installo redis'' → \ndetect OS → then give instructions\\).\n\nChanges:\n- Add needs_continuation field to Interrupt::CommandApproval in infraware-shared\n- Extend ShellCommandArgs and ShellCommandResult in native tools/shell.rs\n- Update ResumeContext and PendingInterrupt in state.rs\n- Modify orchestrator.rs CommandOutput handler to skip agent call when flag is false\n- Update http.rs, process.rs, and threads.rs to propagate the new field\n- Add ask_user and shell native tools with proper HITL integration\n- Add status.rs for structured command execution results\n- Update all tests and documentation examples\n\nThis fixes the workflow where direct command output can be used without\nredundant LLM reprocessing, improving performance and user experience.\nEOF\n\\)\")",
+      "Bash(git commit:*)",
+      "Bash(ENGINE_TYPE=rig cargo run:*)",
+      "Bash(ENGINE_TYPE=rig cargo build:*)"
     ],
     "deny": [],
     "ask": []

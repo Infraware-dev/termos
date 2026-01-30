@@ -6,20 +6,18 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use tokio_util::sync::CancellationToken;
 
-/// Request to the LLM backend (legacy - kept for backward compatibility)
-#[derive(Debug, Serialize)]
-pub struct LLMRequest {
-    pub query: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub context: Option<String>,
-}
-
-/// Response from the LLM backend
-#[derive(Debug, Deserialize)]
-pub struct LLMResponse {
-    pub text: String,
-    #[serde(default)]
-    pub metadata: Option<serde_json::Value>,
+/// Safely truncate a UTF-8 string to at most `max_bytes` bytes,
+/// ensuring the result ends at a valid char boundary.
+fn truncate_utf8(s: &str, max_bytes: usize) -> &str {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    // Find the last valid char boundary at or before max_bytes
+    let mut end = max_bytes;
+    while end > 0 && !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
 }
 
 /// Request to create a new LLM thread
@@ -145,40 +143,23 @@ enum InterruptData {
 /// to be used interchangeably via dependency injection
 #[async_trait]
 pub trait LLMClientTrait: Send + Sync + std::fmt::Debug {
-    /// Query the LLM with natural language input
-    /// Returns LLMQueryResult which can be Complete or Interrupted (for HITL)
+    /// Query the LLM with natural language input.
+    /// Returns LLMQueryResult which can be Complete or Interrupted (for HITL).
     async fn query(&self, text: &str) -> Result<LLMQueryResult>;
-
-    /// Query with additional context
-    async fn query_with_context(
-        &self,
-        text: &str,
-        _context: Option<String>,
-    ) -> Result<LLMQueryResult> {
-        // Default implementation ignores context
-        self.query(text).await
-    }
-
-    /// Resume an interrupted run after user approval (for command approval)
-    async fn resume_run(&self) -> Result<LLMQueryResult>;
 
     /// Resume an interrupted run with a text answer (for questions)
     async fn resume_with_answer(&self, answer: &str) -> Result<LLMQueryResult>;
 
-    /// Query with command history context (M2/M3)
-    async fn query_with_history(
+    /// Resume with command output after PTY execution.
+    /// Called when a command was executed in the terminal and output was captured.
+    async fn resume_with_command_output(
         &self,
-        text: &str,
-        command_history: &[String],
-    ) -> Result<LLMQueryResult> {
-        let context = if command_history.is_empty() {
-            None
-        } else {
-            Some(format!("Recent commands:\n{}", command_history.join("\n")))
-        };
+        command: &str,
+        output: &str,
+    ) -> Result<LLMQueryResult>;
 
-        self.query_with_context(text, context).await
-    }
+    /// Resume an interrupted run with rejection (user rejected the command)
+    async fn resume_rejected(&self) -> Result<LLMQueryResult>;
 
     /// Query with cancellation support (default: no cancellation)
     async fn query_cancellable(
@@ -188,23 +169,6 @@ pub trait LLMClientTrait: Send + Sync + std::fmt::Debug {
     ) -> Result<LLMQueryResult> {
         // Default: ignore cancellation token
         self.query(text).await
-    }
-
-    /// Resume with cancellation support
-    async fn resume_run_cancellable(
-        &self,
-        _cancel_token: CancellationToken,
-    ) -> Result<LLMQueryResult> {
-        self.resume_run().await
-    }
-
-    /// Resume with answer and cancellation support
-    async fn resume_with_answer_cancellable(
-        &self,
-        answer: &str,
-        _cancel_token: CancellationToken,
-    ) -> Result<LLMQueryResult> {
-        self.resume_with_answer(answer).await
     }
 }
 
@@ -244,18 +208,6 @@ impl HttpLLMClient {
             api_key,
             thread_id: RwLock::new(None),
         }
-    }
-
-    /// Create a new HTTP LLM client with custom timeout
-    pub fn with_timeout(base_url: String, api_key: String, timeout_secs: u64) -> Result<Self> {
-        Ok(Self {
-            base_url,
-            client: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(timeout_secs))
-                .build()?,
-            api_key,
-            thread_id: RwLock::new(None),
-        })
     }
 
     /// Create a new LLM thread via POST /threads
@@ -440,19 +392,19 @@ impl HttpLLMClient {
                         // Parse SSE line
                         if let Some(event_type) = line.strip_prefix("event: ") {
                             current_event = Some(event_type.trim().to_string());
-                            log::trace!("SSE event type: {}", event_type);
-                        } else if let Some(data) = line.strip_prefix("data: ") {
-                            if let Some(ref event) = current_event {
-                                match self.handle_sse_event(event, data, &mut result) {
-                                    Ok(Some(interrupt)) => {
-                                        interrupt_data = Some(interrupt);
-                                        // Don't break - continue processing to get any remaining messages
-                                    }
-                                    Ok(None) => {}
-                                    Err(e) => {
-                                        log::error!("Error handling SSE event '{}': {}", event, e);
-                                        return Err(e);
-                                    }
+                            log::debug!("SSE event type: {}", event_type);
+                        } else if let Some(data) = line.strip_prefix("data: ")
+                            && let Some(ref event) = current_event
+                        {
+                            match self.handle_sse_event(event, data, &mut result) {
+                                Ok(Some(interrupt)) => {
+                                    interrupt_data = Some(interrupt);
+                                    // Don't break - continue processing to get any remaining messages
+                                }
+                                Ok(None) => {}
+                                Err(e) => {
+                                    log::error!("Error handling SSE event '{}': {}", event, e);
+                                    return Err(e);
                                 }
                             }
                         }
@@ -476,21 +428,25 @@ impl HttpLLMClient {
             if line.is_empty() {
                 continue;
             }
-            if let Some(data) = line.strip_prefix("data: ") {
-                if let Some(ref event) = current_event {
-                    if let Some(interrupt) = self.handle_sse_event(event, data, &mut result)? {
-                        interrupt_data = Some(interrupt);
-                    }
-                }
+            if let Some(data) = line.strip_prefix("data: ")
+                && let Some(ref event) = current_event
+                && let Some(interrupt) = self.handle_sse_event(event, data, &mut result)?
+            {
+                interrupt_data = Some(interrupt);
             }
         }
 
-        log::debug!(
-            "SSE stream completed: {} chunks, {} chars, {}ms elapsed",
+        log::info!(
+            "SSE stream completed: {} chunks, {} result chars, {}ms elapsed",
             chunk_count,
             result.len(),
             stream_start.elapsed().as_millis()
         );
+        if result.is_empty() {
+            log::warn!("SSE stream returned EMPTY result - no AI content extracted");
+        } else {
+            log::debug!("Final result preview: {}...", truncate_utf8(&result, 200));
+        }
 
         // Return interrupt if detected, otherwise complete
         match interrupt_data {
@@ -595,30 +551,33 @@ impl HttpLLMClient {
 
     /// Handle "metadata" SSE event - log run_id for debugging
     fn handle_metadata_event(data: &str) {
-        if let Ok(meta) = serde_json::from_str::<serde_json::Value>(data) {
-            if let Some(run_id) = meta.get("run_id").and_then(|v| v.as_str()) {
-                log::info!("Run started: {}", run_id);
-            }
+        if let Ok(meta) = serde_json::from_str::<serde_json::Value>(data)
+            && let Some(run_id) = meta.get("run_id").and_then(|v| v.as_str())
+        {
+            log::info!("Run started: {}", run_id);
         }
     }
 
     /// Handle "messages" SSE event - extract and accumulate AI message content
     fn handle_messages_event(data: &str, result: &mut String) {
         let Ok(messages) = serde_json::from_str::<serde_json::Value>(data) else {
+            log::warn!("Failed to parse 'messages' event JSON");
             return;
         };
         let Some(msgs) = messages.as_array() else {
+            log::debug!("'messages' event is not an array");
             return;
         };
+        log::debug!("Processing {} items in 'messages' event", msgs.len());
 
         for msg in msgs {
-            if Self::is_ai_message(msg) {
-                if let Some(content) = msg.get("content").and_then(|v| v.as_str()) {
-                    if !result.is_empty() {
-                        result.push('\n');
-                    }
-                    result.push_str(content);
+            if Self::is_ai_message(msg)
+                && let Some(content) = msg.get("content").and_then(|v| v.as_str())
+            {
+                if !result.is_empty() {
+                    result.push('\n');
                 }
+                result.push_str(content);
             }
         }
     }
@@ -655,11 +614,20 @@ impl HttpLLMClient {
     /// Handle "values" SSE event - extract latest AI message from state update
     fn handle_values_event(data: &str, result: &mut String) {
         let Ok(values) = serde_json::from_str::<serde_json::Value>(data) else {
+            log::warn!(
+                "Failed to parse 'values' event JSON: {}",
+                truncate_utf8(data, 200)
+            );
             return;
         };
         let Some(msgs) = values.get("messages").and_then(|v| v.as_array()) else {
+            log::debug!(
+                "No 'messages' array in values event, keys: {:?}",
+                values.as_object().map(|o| o.keys().collect::<Vec<_>>())
+            );
             return;
         };
+        log::debug!("Processing {} messages from 'values' event", msgs.len());
 
         // Get the last AI message with actual content from the values
         // Skip messages with empty content or just handoff messages
@@ -677,12 +645,24 @@ impl HttpLLMClient {
                 continue;
             }
 
-            if let Some(content) = Self::extract_message_content(msg) {
-                if Self::is_valid_ai_content(&content) {
-                    result.clear(); // Replace with latest AI message
-                    result.push_str(&content);
-                    break; // Found a good message, stop searching
-                }
+            if let Some(content) = Self::extract_message_content(msg)
+                && Self::is_valid_ai_content(&content)
+            {
+                log::info!(
+                    "Found AI message content ({} chars): {}...",
+                    content.len(),
+                    truncate_utf8(&content, 100)
+                );
+                result.clear(); // Replace with latest AI message
+                result.push_str(&content);
+                break; // Found a good message, stop searching
+            } else if let Some(content) = Self::extract_message_content(msg) {
+                log::debug!(
+                    "Skipping invalid AI content: {}...",
+                    truncate_utf8(&content, 50)
+                );
+            } else {
+                log::debug!("No content extracted from AI message");
             }
         }
     }
@@ -726,36 +706,12 @@ impl HttpLLMClient {
 #[async_trait]
 impl LLMClientTrait for HttpLLMClient {
     async fn query(&self, text: &str) -> Result<LLMQueryResult> {
-        self.query_with_context(text, None).await
-    }
+        log::info!("LLM query: {}", text);
 
-    async fn query_with_context(
-        &self,
-        text: &str,
-        context: Option<String>,
-    ) -> Result<LLMQueryResult> {
-        log::info!("LLM query: {} (context: {:?})", text, context.is_some());
-
-        // Use streaming endpoint via threads
         let thread_id = self.ensure_thread().await?;
-
-        // Combine context with text if provided
-        let full_query = match context {
-            Some(ctx) => format!("{}\n\nContext:\n{}", text, ctx),
-            None => text.to_string(),
-        };
-
-        // Create a default non-cancelled token for non-cancellable query
         let stream_result = self
-            .stream_run(
-                &thread_id,
-                Some(&full_query),
-                false,
-                CancellationToken::new(),
-            )
+            .stream_run(&thread_id, Some(text), false, CancellationToken::new())
             .await?;
-
-        // Convert internal StreamResult to public LLMQueryResult
         Self::convert_stream_result(stream_result)
     }
 
@@ -771,24 +727,6 @@ impl LLMClientTrait for HttpLLMClient {
 
         let stream_result = self
             .stream_run(&thread_id, Some(text), false, cancel_token)
-            .await?;
-
-        // Convert internal StreamResult to public LLMQueryResult
-        Self::convert_stream_result(stream_result)
-    }
-
-    async fn resume_run(&self) -> Result<LLMQueryResult> {
-        log::debug!("Resuming LLM run after user approval");
-
-        let thread_id = self
-            .thread_id
-            .read()
-            .await
-            .clone()
-            .ok_or_else(|| anyhow::anyhow!("No active thread to resume"))?;
-
-        let stream_result = self
-            .stream_run(&thread_id, None, true, CancellationToken::new())
             .await?;
 
         // Convert internal StreamResult to public LLMQueryResult
@@ -849,6 +787,133 @@ impl LLMClientTrait for HttpLLMClient {
             .await?;
         Self::convert_stream_result(stream_result)
     }
+
+    async fn resume_with_command_output(
+        &self,
+        command: &str,
+        output: &str,
+    ) -> Result<LLMQueryResult> {
+        let thread_id = self
+            .thread_id
+            .read()
+            .await
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("No active thread to resume"))?;
+
+        let url = format!("{}/threads/{}/runs/stream", self.base_url, thread_id);
+        log::info!(
+            "[HTTP-OUT] POST {} | command_output | cmd_len={} | output_len={}",
+            url,
+            command.len(),
+            output.len()
+        );
+
+        // Send command and output as two messages with resume type "command_output"
+        let request = StreamRunRequest {
+            assistant_id: "supervisor".to_string(),
+            stream_mode: vec!["values".into(), "updates".into(), "messages".into()],
+            input: Some(StreamInput {
+                messages: vec![
+                    ChatMessage {
+                        role: "user".into(),
+                        content: command.into(),
+                    },
+                    ChatMessage {
+                        role: "user".into(),
+                        content: output.into(),
+                    },
+                ],
+            }),
+            command: Some(StreamCommand {
+                resume: "command_output".into(),
+            }),
+        };
+
+        let request_start = std::time::Instant::now();
+        let response = self
+            .client
+            .post(&url)
+            .header("X-Api-Key", &self.api_key)
+            .json(&request)
+            .send()
+            .await?;
+
+        let elapsed = request_start.elapsed();
+        log::info!(
+            "[HTTP-IN] POST /runs/stream (command_output) | status={} | elapsed={}ms",
+            response.status(),
+            elapsed.as_millis()
+        );
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_text = response.text().await.unwrap_or_default();
+            log::error!(
+                "Resume with command output failed ({}): {}",
+                status,
+                error_text
+            );
+            anyhow::bail!(
+                "Resume with command output failed ({}): {}",
+                status,
+                error_text
+            );
+        }
+
+        let stream_result = self
+            .parse_sse_stream(response, CancellationToken::new())
+            .await?;
+        Self::convert_stream_result(stream_result)
+    }
+
+    async fn resume_rejected(&self) -> Result<LLMQueryResult> {
+        let thread_id = self
+            .thread_id
+            .read()
+            .await
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("No active thread to resume"))?;
+
+        let url = format!("{}/threads/{}/runs/stream", self.base_url, thread_id);
+        log::info!("[HTTP-OUT] POST {} | rejected", url);
+
+        let request = StreamRunRequest {
+            assistant_id: "supervisor".to_string(),
+            stream_mode: vec!["values".into(), "updates".into(), "messages".into()],
+            input: None,
+            command: Some(StreamCommand {
+                resume: "rejected".into(),
+            }),
+        };
+
+        let request_start = std::time::Instant::now();
+        let response = self
+            .client
+            .post(&url)
+            .header("X-Api-Key", &self.api_key)
+            .json(&request)
+            .send()
+            .await?;
+
+        let elapsed = request_start.elapsed();
+        log::info!(
+            "[HTTP-IN] POST /runs/stream (rejected) | status={} | elapsed={}ms",
+            response.status(),
+            elapsed.as_millis()
+        );
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_text = response.text().await.unwrap_or_default();
+            log::error!("Resume rejected failed ({}): {}", status, error_text);
+            anyhow::bail!("Resume rejected failed ({}): {}", status, error_text);
+        }
+
+        let stream_result = self
+            .parse_sse_stream(response, CancellationToken::new())
+            .await?;
+        Self::convert_stream_result(stream_result)
+    }
 }
 
 impl HttpLLMClient {
@@ -882,41 +947,34 @@ impl LLMClientTrait for MockLLMClient {
         // Simple mock responses for testing
         let response = match text.to_lowercase().as_str() {
             s if s.contains("list files") => {
-                "To list files, you can use the `ls` command. Some common options:\n\n\
-                 - `ls -l` - Long format with details\n\
-                 - `ls -a` - Show hidden files\n\
-                 - `ls -lh` - Human-readable file sizes"
+                "To list files, you can use the `ls` command. Some common options:\n\n".to_string()
+                    + "- `ls -l` - Long format with details\n"
+                    + "- `ls -a` - Show hidden files\n"
+                    + "- `ls -lh` - Human-readable file sizes"
             }
             s if s.contains("docker") => {
-                "Docker is a containerization platform. Some common commands:\n\n\
-                 ```bash\n\
-                 docker ps          # List running containers\n\
-                 docker images      # List images\n\
-                 docker run <image> # Run a container\n\
-                 ```"
+                "Docker is a containerization platform. Some common commands:\n\n".to_string()
+                    + "```bash\n"
+                    + "docker ps          # List running containers\n"
+                    + "docker images      # List images\n"
+                    + "docker run <image> # Run a container\n"
+                    + "```"
             }
             s if s.contains("kubernetes") || s.contains("k8s") => {
-                "Kubernetes is a container orchestration platform. Common commands:\n\n\
-                 ```bash\n\
-                 kubectl get pods              # List pods\n\
-                 kubectl get services          # List services\n\
-                 kubectl describe pod <name>   # Get pod details\n\
-                 ```"
+                "Kubernetes is a container orchestration platform. Common commands:\n\n".to_string()
+                    + "```bash\n"
+                    + "kubectl get pods              # List pods\n"
+                    + "kubectl get services          # List services\n"
+                    + "kubectl describe pod <name>   # Get pod details\n"
+                    + "```"
             }
             _ => {
-                "I'm a mock LLM. In production, I would provide detailed answers \
-                 about DevOps, cloud platforms, and terminal commands."
+                "I'm a mock LLM. In production, I would provide detailed answers ".to_string()
+                    + "about DevOps, cloud platforms, and terminal commands."
             }
         };
 
-        Ok(LLMQueryResult::Complete(response.to_string()))
-    }
-
-    async fn resume_run(&self) -> Result<LLMQueryResult> {
-        // Mock always returns complete (no real interrupt handling)
-        Ok(LLMQueryResult::Complete(
-            "Mock resume completed.".to_string(),
-        ))
+        Ok(LLMQueryResult::Complete(response))
     }
 
     async fn resume_with_answer(&self, answer: &str) -> Result<LLMQueryResult> {
@@ -925,6 +983,27 @@ impl LLMClientTrait for MockLLMClient {
             "Mock received answer: '{}' - Processing complete.",
             answer
         )))
+    }
+
+    async fn resume_with_command_output(
+        &self,
+        command: &str,
+        output: &str,
+    ) -> Result<LLMQueryResult> {
+        // Mock acknowledges the command output and returns complete
+        Ok(LLMQueryResult::Complete(format!(
+            "Mock received command output.\nCommand: {}\nOutput ({} chars): {}...",
+            command,
+            output.len(),
+            truncate_utf8(output, 100)
+        )))
+    }
+
+    async fn resume_rejected(&self) -> Result<LLMQueryResult> {
+        // Mock acknowledges the rejection and returns complete
+        Ok(LLMQueryResult::Complete(
+            "Mock: Command was rejected by user. Task cancelled.".to_string(),
+        ))
     }
 
     async fn query_cancellable(
@@ -958,645 +1037,732 @@ impl LLMClientTrait for MockLLMClient {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_llm_client_new() {
-        let client =
-            HttpLLMClient::new("http://localhost:8080".to_string(), "test-key".to_string());
-        assert_eq!(client.base_url, "http://localhost:8080");
-        assert_eq!(client.api_key, "test-key");
-    }
-
-    #[test]
-    fn test_llm_client_with_timeout() {
-        let client = HttpLLMClient::with_timeout(
-            "http://localhost:8080".to_string(),
-            "test-key".to_string(),
-            30,
-        );
-        assert!(client.is_ok());
-        let client = client.unwrap();
-        assert_eq!(client.base_url, "http://localhost:8080");
-        assert_eq!(client.api_key, "test-key");
-    }
-
-    #[test]
-    fn test_llm_request_serialization() {
-        let request = LLMRequest {
-            query: "test query".to_string(),
-            context: Some("test context".to_string()),
-        };
-        let json = serde_json::to_string(&request).unwrap();
-        assert!(json.contains("test query"));
-        assert!(json.contains("test context"));
-    }
-
-    #[test]
-    fn test_llm_request_serialization_no_context() {
-        let request = LLMRequest {
-            query: "test query".to_string(),
-            context: None,
-        };
-        let json = serde_json::to_string(&request).unwrap();
-        assert!(json.contains("test query"));
-        // Context should be skipped when None
-        assert!(!json.contains("context"));
-    }
-
-    #[test]
-    fn test_llm_response_deserialization() {
-        let json = r#"{"text":"response text","metadata":{"key":"value"}}"#;
-        let response: LLMResponse = serde_json::from_str(json).unwrap();
-        assert_eq!(response.text, "response text");
-        assert!(response.metadata.is_some());
-    }
-
-    #[test]
-    fn test_llm_response_deserialization_no_metadata() {
-        let json = r#"{"text":"response text"}"#;
-        let response: LLMResponse = serde_json::from_str(json).unwrap();
-        assert_eq!(response.text, "response text");
-        assert!(response.metadata.is_none());
-    }
-
-    #[tokio::test]
-    async fn test_mock_llm() {
-        let mock = MockLLMClient;
-        let response = mock
-            .query("how to list files")
-            .await
-            .unwrap()
-            .unwrap_complete();
-        assert!(response.contains("ls"));
-    }
-
-    #[tokio::test]
-    async fn test_mock_llm_docker() {
-        let mock = MockLLMClient;
-        let response = mock
-            .query("what is docker")
-            .await
-            .unwrap()
-            .unwrap_complete();
-        assert!(response.contains("Docker"));
-    }
-
-    #[tokio::test]
-    async fn test_mock_llm_kubernetes() {
-        let mock = MockLLMClient;
-        let response = mock
-            .query("what is kubernetes")
-            .await
-            .unwrap()
-            .unwrap_complete();
-        assert!(response.contains("Kubernetes"));
-        assert!(response.contains("kubectl"));
-    }
-
-    #[tokio::test]
-    async fn test_mock_llm_k8s() {
-        let mock = MockLLMClient;
-        let response = mock.query("help with k8s").await.unwrap().unwrap_complete();
-        assert!(response.contains("Kubernetes"));
-    }
-
-    #[tokio::test]
-    async fn test_mock_llm_fallback() {
-        let mock = MockLLMClient;
-        let response = mock
-            .query("something random")
-            .await
-            .unwrap()
-            .unwrap_complete();
-        assert!(response.contains("mock LLM"));
-    }
-
-    #[tokio::test]
-    async fn test_mock_llm_case_insensitive() {
-        let mock = MockLLMClient;
-        let response = mock
-            .query("DOCKER containers")
-            .await
-            .unwrap()
-            .unwrap_complete();
-        assert!(response.contains("Docker"));
-    }
-
-    #[test]
-    fn test_stream_command_serialization() {
-        let cmd = StreamCommand {
-            resume: "approved".to_string(),
-        };
-        let json = serde_json::to_string(&cmd).unwrap();
-        assert!(json.contains("approved"));
-    }
-
-    #[test]
-    fn test_stream_run_request_serialization() {
-        let request = StreamRunRequest {
-            assistant_id: "supervisor".to_string(),
-            stream_mode: vec!["values".to_string()],
-            input: Some(StreamInput {
-                messages: vec![ChatMessage {
-                    role: "user".to_string(),
-                    content: "Hello".to_string(),
-                }],
-            }),
-            command: None,
-        };
-        let json = serde_json::to_string(&request).unwrap();
-        assert!(json.contains("supervisor"));
-        assert!(json.contains("values"));
-        assert!(json.contains("Hello"));
-        assert!(!json.contains("command")); // command is None, should be skipped
-    }
-
-    #[test]
-    fn test_stream_run_request_with_command() {
-        let request = StreamRunRequest {
-            assistant_id: "supervisor".to_string(),
-            stream_mode: vec!["values".to_string()],
-            input: None,
-            command: Some(StreamCommand {
-                resume: "approved".to_string(),
-            }),
-        };
-        let json = serde_json::to_string(&request).unwrap();
-        assert!(json.contains("approved"));
-        assert!(!json.contains("input")); // input is None, should be skipped
-    }
-
-    #[test]
-    fn test_create_thread_request_serialization() {
-        let request = CreateThreadRequest {
-            metadata: serde_json::json!({"key": "value"}),
-        };
-        let json = serde_json::to_string(&request).unwrap();
-        assert!(json.contains("metadata"));
-        assert!(json.contains("key"));
-    }
-
-    #[test]
-    fn test_create_thread_response_deserialization() {
-        let json = r#"{"thread_id":"abc-123"}"#;
-        let response: CreateThreadResponse = serde_json::from_str(json).unwrap();
-        assert_eq!(response.thread_id, "abc-123");
-    }
-
-    #[test]
-    fn test_http_client_debug_redacts_api_key() {
-        let client = HttpLLMClient::new(
-            "http://localhost:8080".to_string(),
-            "secret-key".to_string(),
-        );
-        let debug_str = format!("{:?}", client);
-        assert!(debug_str.contains("<redacted>"));
-        assert!(!debug_str.contains("secret-key"));
-    }
-
-    #[tokio::test]
-    async fn test_query_with_history_empty() {
-        let mock = MockLLMClient;
-        let response = mock
-            .query_with_history("list files", &[])
-            .await
-            .unwrap()
-            .unwrap_complete();
-        assert!(response.contains("ls"));
-    }
-
-    #[tokio::test]
-    async fn test_query_with_history_has_commands() {
-        let mock = MockLLMClient;
-        let history = vec!["cd /home".to_string(), "ls -la".to_string()];
-        let response = mock
-            .query_with_history("list files", &history)
-            .await
-            .unwrap()
-            .unwrap_complete();
-        assert!(response.contains("ls"));
-    }
-
-    #[tokio::test]
-    async fn test_mock_llm_cancellation_immediate() {
-        let client = MockLLMClient;
-        let token = CancellationToken::new();
-        token.cancel(); // Cancel immediately before query
-
-        let result = client.query_cancellable("test query", token).await;
-        assert!(result.is_err());
-        let err_msg = result.unwrap_err().to_string();
-        assert!(
-            err_msg.contains("cancelled"),
-            "Expected 'cancelled' in error: {err_msg}"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_mock_llm_query_success_no_cancellation() {
-        let client = MockLLMClient;
-        let token = CancellationToken::new();
-        // Don't cancel - query should complete (but takes ~1s due to mock delay)
-        // Use timeout to avoid hanging tests
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            client.query_cancellable("how to list files", token),
-        )
-        .await;
-
-        assert!(result.is_ok(), "Query timed out");
-        let query_result = result.unwrap();
-        assert!(
-            query_result.is_ok(),
-            "Query failed: {:?}",
-            query_result.err()
-        );
-    }
-
-    #[tokio::test]
-    async fn test_mock_llm_cancellation_during_delay() {
-        let client = MockLLMClient;
-        let token = CancellationToken::new();
-        let token_clone = token.clone();
-
-        // Spawn the query in background
-        let handle =
-            tokio::spawn(async move { client.query_cancellable("test query", token_clone).await });
-
-        // Cancel after 150ms (between first and second 100ms chunks)
-        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-        token.cancel();
-
-        let result = handle.await.unwrap();
-        assert!(result.is_err());
-        let err_msg = result.unwrap_err().to_string();
-        assert!(
-            err_msg.contains("cancelled"),
-            "Expected 'cancelled' in error: {err_msg}"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_http_client_debug_no_secrets() {
-        // Verify HttpLLMClient doesn't leak secrets in debug output
-        let client = HttpLLMClient::new(
-            "http://localhost:8080".to_string(),
-            "sk-secret-key-12345".to_string(),
-        );
-        let debug_output = format!("{:?}", client);
-
-        // Should contain type name
-        assert!(debug_output.contains("HttpLLMClient"));
-        // Should NOT contain the actual API key
-        assert!(
-            !debug_output.contains("sk-secret-key-12345"),
-            "Debug output should not contain API key"
-        );
-        // Should show redacted
-        assert!(debug_output.contains("<redacted>"));
-    }
-
-    #[tokio::test]
-    async fn test_cancellation_token_cloning() {
-        // Test that cancellation tokens work correctly when cloned
-        let token = CancellationToken::new();
-        let clone1 = token.clone();
-        let clone2 = token.clone();
-
-        assert!(!token.is_cancelled());
-        assert!(!clone1.is_cancelled());
-        assert!(!clone2.is_cancelled());
-
-        token.cancel();
-
-        // All clones should see the cancellation
-        assert!(token.is_cancelled());
-        assert!(clone1.is_cancelled());
-        assert!(clone2.is_cancelled());
-    }
-
-    // =========================================================================
-    // Tests for handle_sse_event (SSE event dispatcher)
-    // =========================================================================
-
-    #[test]
-    fn test_handle_sse_event_metadata() {
-        let client =
-            HttpLLMClient::new("http://localhost:8080".to_string(), "test-key".to_string());
-        let mut result = String::new();
-        let data = r#"{"run_id":"run-12345","attempt":1}"#;
-
-        let outcome = client.handle_sse_event("metadata", data, &mut result);
-        assert!(outcome.is_ok());
-        assert!(outcome.unwrap().is_none()); // No interrupt
-        assert!(result.is_empty());
-    }
-
-    #[test]
-    fn test_handle_sse_event_messages_ai() {
-        let client =
-            HttpLLMClient::new("http://localhost:8080".to_string(), "test-key".to_string());
-        let mut result = String::new();
-        let data = r#"[{"type":"ai","content":"Hello from AI"}]"#;
-
-        let outcome = client.handle_sse_event("messages", data, &mut result);
-        assert!(outcome.is_ok());
-        assert!(outcome.unwrap().is_none());
-        assert_eq!(result, "Hello from AI");
-    }
-
-    #[test]
-    fn test_handle_sse_event_messages_assistant_role() {
-        let client =
-            HttpLLMClient::new("http://localhost:8080".to_string(), "test-key".to_string());
-        let mut result = String::new();
-        let data = r#"[{"role":"assistant","content":"Response"}]"#;
-
-        let outcome = client.handle_sse_event("messages", data, &mut result);
-        assert!(outcome.is_ok());
-        assert_eq!(result, "Response");
-    }
-
-    #[test]
-    fn test_handle_sse_event_command_approval() {
-        let client =
-            HttpLLMClient::new("http://localhost:8080".to_string(), "test-key".to_string());
-        let mut result = String::new();
-        let data = r#"{"__interrupt__":[{"value":{"type":"command_approval","command":"rm -rf /tmp/test","message":"Delete test files?"}}]}"#;
-
-        let outcome = client.handle_sse_event("updates", data, &mut result);
-        assert!(outcome.is_ok());
-        let interrupt = outcome.unwrap();
-        assert!(interrupt.is_some());
-
-        match interrupt.unwrap() {
-            InterruptData::CommandApproval { command, message } => {
-                assert_eq!(command, "rm -rf /tmp/test");
-                assert_eq!(message, "Delete test files?");
-            }
-            _ => panic!("Expected CommandApproval interrupt"),
-        }
-    }
-
-    #[test]
-    fn test_handle_sse_event_question_interrupt() {
-        let client =
-            HttpLLMClient::new("http://localhost:8080".to_string(), "test-key".to_string());
-        let mut result = String::new();
-        let data = r#"{"__interrupt__":[{"value":{"type":"question","question":"What database?","options":["PostgreSQL","MySQL"]}}]}"#;
-
-        let outcome = client.handle_sse_event("updates", data, &mut result);
-        assert!(outcome.is_ok());
-        let interrupt = outcome.unwrap();
-        assert!(interrupt.is_some());
-
-        match interrupt.unwrap() {
-            InterruptData::Question { question, options } => {
-                assert_eq!(question, "What database?");
-                assert!(options.is_some());
-                let opts = options.unwrap();
-                assert_eq!(opts.len(), 2);
-                assert!(opts.contains(&"PostgreSQL".to_string()));
-            }
-            _ => panic!("Expected Question interrupt"),
-        }
-    }
-
-    #[test]
-    fn test_handle_sse_event_question_without_options() {
-        let client =
-            HttpLLMClient::new("http://localhost:8080".to_string(), "test-key".to_string());
-        let mut result = String::new();
-        let data =
-            r#"{"__interrupt__":[{"value":{"type":"question","message":"What is your name?"}}]}"#;
-
-        let outcome = client.handle_sse_event("updates", data, &mut result);
-        assert!(outcome.is_ok());
-        let interrupt = outcome.unwrap();
-        assert!(interrupt.is_some());
-
-        match interrupt.unwrap() {
-            InterruptData::Question { question, options } => {
-                assert_eq!(question, "What is your name?");
-                assert!(options.is_none());
-            }
-            _ => panic!("Expected Question interrupt"),
-        }
-    }
-
-    #[test]
-    fn test_handle_sse_event_values_simple_content() {
-        let client =
-            HttpLLMClient::new("http://localhost:8080".to_string(), "test-key".to_string());
-        let mut result = String::new();
-        let data = r#"{"messages":[{"type":"ai","content":"Simple response"}]}"#;
-
-        let outcome = client.handle_sse_event("values", data, &mut result);
-        assert!(outcome.is_ok());
-        assert_eq!(result, "Simple response");
-    }
-
-    #[test]
-    fn test_handle_sse_event_values_array_content() {
-        let client =
-            HttpLLMClient::new("http://localhost:8080".to_string(), "test-key".to_string());
-        let mut result = String::new();
-        let data = r#"{"messages":[{"type":"ai","content":[{"type":"text","text":"Part 1"},{"type":"text","text":"Part 2"}]}]}"#;
-
-        let outcome = client.handle_sse_event("values", data, &mut result);
-        assert!(outcome.is_ok());
-        assert!(result.contains("Part 1"));
-        assert!(result.contains("Part 2"));
-    }
-
-    #[test]
-    fn test_handle_sse_event_error() {
-        let client =
-            HttpLLMClient::new("http://localhost:8080".to_string(), "test-key".to_string());
-        let mut result = String::new();
-        let data = r#"{"message":"API error occurred"}"#;
-
-        let outcome = client.handle_sse_event("error", data, &mut result);
-        assert!(outcome.is_err());
-        assert!(outcome.unwrap_err().to_string().contains("API error"));
-    }
-
-    #[test]
-    fn test_handle_sse_event_end() {
-        let client =
-            HttpLLMClient::new("http://localhost:8080".to_string(), "test-key".to_string());
-        let mut result = String::new();
-
-        let outcome = client.handle_sse_event("end", "", &mut result);
-        assert!(outcome.is_ok());
-        assert!(outcome.unwrap().is_none());
-    }
-
-    #[test]
-    fn test_handle_sse_event_unknown_event() {
-        let client =
-            HttpLLMClient::new("http://localhost:8080".to_string(), "test-key".to_string());
-        let mut result = String::new();
-
-        let outcome = client.handle_sse_event("unknown_event_type", "{}", &mut result);
-        assert!(outcome.is_ok());
-        assert!(outcome.unwrap().is_none());
-    }
-
-    // =========================================================================
-    // Tests for LLMQueryResult
-    // =========================================================================
+    // === LLMQueryResult Tests ===
 
     #[test]
     fn test_llm_query_result_complete() {
-        let result = LLMQueryResult::Complete("Test response".to_string());
-        assert_eq!(result.unwrap_complete(), "Test response");
+        let result = LLMQueryResult::Complete("test response".to_string());
+        assert_eq!(result.as_complete(), Some("test response"));
     }
 
     #[test]
-    fn test_llm_query_result_command_approval() {
+    fn test_llm_query_result_unwrap_complete() {
+        let result = LLMQueryResult::Complete("test response".to_string());
+        assert_eq!(result.unwrap_complete(), "test response");
+    }
+
+    #[test]
+    fn test_llm_query_result_command_approval_as_complete_none() {
         let result = LLMQueryResult::CommandApproval {
-            command: "ls -la".to_string(),
-            message: "List files".to_string(),
+            command: "ls".to_string(),
+            message: "List files?".to_string(),
         };
-
-        match result {
-            LLMQueryResult::CommandApproval { command, message } => {
-                assert_eq!(command, "ls -la");
-                assert_eq!(message, "List files");
-            }
-            _ => panic!("Expected CommandApproval"),
-        }
+        assert_eq!(result.as_complete(), None);
     }
 
     #[test]
-    fn test_llm_query_result_question() {
+    fn test_llm_query_result_question_as_complete_none() {
         let result = LLMQueryResult::Question {
-            question: "Choose option".to_string(),
+            question: "Which option?".to_string(),
             options: Some(vec!["A".to_string(), "B".to_string()]),
         };
-
-        match result {
-            LLMQueryResult::Question { question, options } => {
-                assert_eq!(question, "Choose option");
-                assert!(options.is_some());
-                assert_eq!(options.unwrap().len(), 2);
-            }
-            _ => panic!("Expected Question"),
-        }
-    }
-
-    // =========================================================================
-    // Tests for InterruptData
-    // =========================================================================
-
-    #[test]
-    fn test_interrupt_data_command_approval() {
-        let data = InterruptData::CommandApproval {
-            command: "docker ps".to_string(),
-            message: "Check containers".to_string(),
-        };
-
-        match data {
-            InterruptData::CommandApproval { command, message } => {
-                assert_eq!(command, "docker ps");
-                assert_eq!(message, "Check containers");
-            }
-            _ => panic!("Expected CommandApproval"),
-        }
-    }
-
-    #[test]
-    fn test_interrupt_data_question_with_options() {
-        let data = InterruptData::Question {
-            question: "Select environment".to_string(),
-            options: Some(vec!["dev".to_string(), "prod".to_string()]),
-        };
-
-        match data {
-            InterruptData::Question { question, options } => {
-                assert_eq!(question, "Select environment");
-                let opts = options.unwrap();
-                assert!(opts.contains(&"dev".to_string()));
-                assert!(opts.contains(&"prod".to_string()));
-            }
-            _ => panic!("Expected Question"),
-        }
-    }
-
-    #[test]
-    fn test_interrupt_data_question_without_options() {
-        let data = InterruptData::Question {
-            question: "Enter project name".to_string(),
-            options: None,
-        };
-
-        match data {
-            InterruptData::Question { question, options } => {
-                assert_eq!(question, "Enter project name");
-                assert!(options.is_none());
-            }
-            _ => panic!("Expected Question"),
-        }
-    }
-
-    // =========================================================================
-    // Additional coverage tests for LLMQueryResult
-    // =========================================================================
-
-    #[test]
-    fn test_llm_query_result_as_complete() {
-        // Test Complete variant returns Some
-        let complete = LLMQueryResult::Complete("test response".to_string());
-        assert_eq!(complete.as_complete(), Some("test response"));
-
-        // Test CommandApproval returns None
-        let approval = LLMQueryResult::CommandApproval {
-            command: "ls".to_string(),
-            message: "list".to_string(),
-        };
-        assert_eq!(approval.as_complete(), None);
-
-        // Test Question returns None
-        let question = LLMQueryResult::Question {
-            question: "which?".to_string(),
-            options: None,
-        };
-        assert_eq!(question.as_complete(), None);
+        assert_eq!(result.as_complete(), None);
     }
 
     #[test]
     #[should_panic(expected = "Expected Complete, got CommandApproval")]
     fn test_llm_query_result_unwrap_complete_panics_on_approval() {
         let result = LLMQueryResult::CommandApproval {
-            command: "test".to_string(),
-            message: "msg".to_string(),
+            command: "rm -rf".to_string(),
+            message: "Delete?".to_string(),
         };
-        result.unwrap_complete();
+        let _ = result.unwrap_complete();
     }
 
     #[test]
     #[should_panic(expected = "Expected Complete, got Question")]
     fn test_llm_query_result_unwrap_complete_panics_on_question() {
         let result = LLMQueryResult::Question {
-            question: "test?".to_string(),
+            question: "What?".to_string(),
             options: None,
         };
-        result.unwrap_complete();
+        let _ = result.unwrap_complete();
     }
 
     #[test]
-    fn test_is_valid_ai_content() {
-        // Valid content
-        assert!(HttpLLMClient::is_valid_ai_content("Hello, how can I help?"));
-        assert!(HttpLLMClient::is_valid_ai_content("The command is: ls -la"));
+    fn test_llm_query_result_debug() {
+        let result = LLMQueryResult::Complete("test".to_string());
+        let debug_str = format!("{:?}", result);
+        assert!(debug_str.contains("Complete"));
+    }
 
-        // Invalid content (empty or handoff messages)
+    // === MockLLMClient Tests ===
+
+    #[test]
+    fn test_mock_client_creation() {
+        let client = MockLLMClient::new();
+        let debug_str = format!("{:?}", client);
+        assert!(debug_str.contains("MockLLMClient"));
+    }
+
+    #[test]
+    fn test_mock_client_default() {
+        let client = MockLLMClient;
+        let debug_str = format!("{:?}", client);
+        assert!(debug_str.contains("MockLLMClient"));
+    }
+
+    #[tokio::test]
+    async fn test_mock_client_query_list_files() {
+        let client = MockLLMClient::new();
+        let result = client.query("how do I list files").await;
+        assert!(result.is_ok());
+
+        let response = result.unwrap().unwrap_complete();
+        assert!(response.contains("ls"));
+        assert!(response.contains("-l"));
+    }
+
+    #[tokio::test]
+    async fn test_mock_client_query_docker() {
+        let client = MockLLMClient::new();
+        let result = client.query("tell me about docker").await;
+        assert!(result.is_ok());
+
+        let response = result.unwrap().unwrap_complete();
+        assert!(response.contains("docker"));
+        assert!(response.contains("container"));
+    }
+
+    #[tokio::test]
+    async fn test_mock_client_query_kubernetes() {
+        let client = MockLLMClient::new();
+        let result = client.query("how to use k8s").await;
+        assert!(result.is_ok());
+
+        let response = result.unwrap().unwrap_complete();
+        assert!(response.contains("kubectl"));
+    }
+
+    #[tokio::test]
+    async fn test_mock_client_query_unknown() {
+        let client = MockLLMClient::new();
+        let result = client.query("random gibberish xyz123").await;
+        assert!(result.is_ok());
+
+        let response = result.unwrap().unwrap_complete();
+        assert!(response.contains("mock LLM"));
+    }
+
+    #[tokio::test]
+    async fn test_mock_client_resume_with_answer() {
+        let client = MockLLMClient::new();
+        let result = client.resume_with_answer("my answer").await;
+        assert!(result.is_ok());
+
+        let response = result.unwrap().unwrap_complete();
+        assert!(response.contains("my answer"));
+    }
+
+    #[tokio::test]
+    async fn test_mock_client_query_cancellable_completes() {
+        let client = MockLLMClient::new();
+        let cancel_token = CancellationToken::new();
+
+        // Should complete without cancellation
+        let result = client.query_cancellable("list files", cancel_token).await;
+        assert!(result.is_ok());
+
+        let response = result.unwrap().unwrap_complete();
+        assert!(response.contains("ls"));
+    }
+
+    #[tokio::test]
+    async fn test_mock_client_query_cancellable_cancelled() {
+        let client = MockLLMClient::new();
+        let cancel_token = CancellationToken::new();
+
+        // Cancel immediately
+        cancel_token.cancel();
+
+        let result = client.query_cancellable("list files", cancel_token).await;
+        assert!(result.is_err());
+
+        let err = result.unwrap_err();
+        assert!(err.to_string().contains("cancelled"));
+    }
+
+    #[tokio::test]
+    async fn test_mock_client_case_insensitive() {
+        let client = MockLLMClient::new();
+
+        // Test uppercase
+        let result = client.query("LIST FILES").await;
+        assert!(result.is_ok());
+        let response = result.unwrap().unwrap_complete();
+        assert!(response.contains("ls"));
+
+        // Test mixed case
+        let result = client.query("Docker Commands").await;
+        assert!(result.is_ok());
+        let response = result.unwrap().unwrap_complete();
+        assert!(response.contains("docker"));
+    }
+
+    // === HttpLLMClient Tests (basic, no network) ===
+
+    #[test]
+    fn test_http_client_debug() {
+        let client = HttpLLMClient::new(
+            "http://localhost:8000".to_string(),
+            "test-api-key".to_string(),
+        );
+        let debug_str = format!("{:?}", client);
+        assert!(debug_str.contains("HttpLLMClient"));
+        assert!(debug_str.contains("localhost:8000"));
+        // API key should NOT be in debug output (security)
+        assert!(!debug_str.contains("test-api-key"));
+    }
+
+    // === truncate_utf8 ===
+
+    #[test]
+    fn test_truncate_utf8_within_limit() {
+        assert_eq!(truncate_utf8("hello", 10), "hello");
+    }
+
+    #[test]
+    fn test_truncate_utf8_exact_limit() {
+        assert_eq!(truncate_utf8("hello", 5), "hello");
+    }
+
+    #[test]
+    fn test_truncate_utf8_cuts_ascii() {
+        assert_eq!(truncate_utf8("hello world", 5), "hello");
+    }
+
+    #[test]
+    fn test_truncate_utf8_respects_char_boundary() {
+        // '€' is 3 bytes; truncating at byte 2 must back up to 0
+        assert_eq!(truncate_utf8("€abc", 2), "");
+        // truncating at byte 3 keeps the full '€'
+        assert_eq!(truncate_utf8("€abc", 3), "€");
+    }
+
+    #[test]
+    fn test_truncate_utf8_empty() {
+        assert_eq!(truncate_utf8("", 10), "");
+        assert_eq!(truncate_utf8("", 0), "");
+    }
+
+    // === is_ai_message ===
+
+    #[test]
+    fn test_is_ai_message_by_type() {
+        let msg = serde_json::json!({"type": "ai", "content": "hi"});
+        assert!(HttpLLMClient::is_ai_message(&msg));
+    }
+
+    #[test]
+    fn test_is_ai_message_by_role() {
+        let msg = serde_json::json!({"role": "assistant", "content": "hi"});
+        assert!(HttpLLMClient::is_ai_message(&msg));
+    }
+
+    #[test]
+    fn test_is_ai_message_user() {
+        let msg = serde_json::json!({"type": "human", "role": "user"});
+        assert!(!HttpLLMClient::is_ai_message(&msg));
+    }
+
+    #[test]
+    fn test_is_ai_message_empty() {
+        let msg = serde_json::json!({});
+        assert!(!HttpLLMClient::is_ai_message(&msg));
+    }
+
+    // === extract_message_content ===
+
+    #[test]
+    fn test_extract_content_string() {
+        let msg = serde_json::json!({"content": "hello world"});
+        assert_eq!(
+            HttpLLMClient::extract_message_content(&msg),
+            Some("hello world".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_content_empty_string() {
+        let msg = serde_json::json!({"content": ""});
+        assert_eq!(HttpLLMClient::extract_message_content(&msg), None);
+    }
+
+    #[test]
+    fn test_extract_content_array_text_blocks() {
+        let msg = serde_json::json!({
+            "content": [
+                {"type": "text", "text": "part1"},
+                {"type": "text", "text": "part2"}
+            ]
+        });
+        assert_eq!(
+            HttpLLMClient::extract_message_content(&msg),
+            Some("part1\npart2".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_content_array_skips_non_text() {
+        let msg = serde_json::json!({
+            "content": [
+                {"type": "tool_use", "id": "123"},
+                {"type": "text", "text": "only this"}
+            ]
+        });
+        assert_eq!(
+            HttpLLMClient::extract_message_content(&msg),
+            Some("only this".to_string())
+        );
+    }
+
+    #[test]
+    fn test_extract_content_empty_array() {
+        let msg = serde_json::json!({"content": []});
+        assert_eq!(HttpLLMClient::extract_message_content(&msg), None);
+    }
+
+    #[test]
+    fn test_extract_content_no_content_field() {
+        let msg = serde_json::json!({"role": "assistant"});
+        assert_eq!(HttpLLMClient::extract_message_content(&msg), None);
+    }
+
+    // === is_valid_ai_content ===
+
+    #[test]
+    fn test_valid_ai_content() {
+        assert!(HttpLLMClient::is_valid_ai_content("Here is the answer"));
+    }
+
+    #[test]
+    fn test_invalid_ai_content_empty() {
         assert!(!HttpLLMClient::is_valid_ai_content(""));
-        assert!(!HttpLLMClient::is_valid_ai_content(
-            "Transferring to agent..."
-        ));
+    }
+
+    #[test]
+    fn test_invalid_ai_content_transferring() {
+        assert!(!HttpLLMClient::is_valid_ai_content("Transferring to agent"));
         assert!(!HttpLLMClient::is_valid_ai_content(
             "Successfully transferred control"
         ));
+    }
+
+    // === parse_interrupt_value ===
+
+    #[test]
+    fn test_parse_interrupt_command_approval() {
+        let value = serde_json::json!({
+            "command": "ls -la",
+            "message": "List directory contents"
+        });
+        let result = HttpLLMClient::parse_interrupt_value(&value);
+        match result {
+            InterruptData::CommandApproval { command, message } => {
+                assert_eq!(command, "ls -la");
+                assert_eq!(message, "List directory contents");
+            }
+            _ => panic!("Expected CommandApproval"),
+        }
+    }
+
+    #[test]
+    fn test_parse_interrupt_command_defaults() {
+        let value = serde_json::json!({"command": null});
+        let result = HttpLLMClient::parse_interrupt_value(&value);
+        match result {
+            InterruptData::CommandApproval { command, message } => {
+                assert_eq!(command, "unknown");
+                assert_eq!(message, "Command requires approval");
+            }
+            _ => panic!("Expected CommandApproval"),
+        }
+    }
+
+    #[test]
+    fn test_parse_interrupt_question() {
+        let value = serde_json::json!({
+            "question": "Which environment?",
+            "options": ["dev", "staging", "prod"]
+        });
+        let result = HttpLLMClient::parse_interrupt_value(&value);
+        match result {
+            InterruptData::Question { question, options } => {
+                assert_eq!(question, "Which environment?");
+                assert_eq!(
+                    options,
+                    Some(vec![
+                        "dev".to_string(),
+                        "staging".to_string(),
+                        "prod".to_string()
+                    ])
+                );
+            }
+            _ => panic!("Expected Question"),
+        }
+    }
+
+    #[test]
+    fn test_parse_interrupt_question_no_options() {
+        let value = serde_json::json!({"question": "What name?"});
+        let result = HttpLLMClient::parse_interrupt_value(&value);
+        match result {
+            InterruptData::Question { question, options } => {
+                assert_eq!(question, "What name?");
+                assert!(options.is_none());
+            }
+            _ => panic!("Expected Question"),
+        }
+    }
+
+    #[test]
+    fn test_parse_interrupt_fallback_message_as_question() {
+        // No "command" and no "question" field, falls back to "message"
+        let value = serde_json::json!({"message": "Please provide input"});
+        let result = HttpLLMClient::parse_interrupt_value(&value);
+        match result {
+            InterruptData::Question { question, .. } => {
+                assert_eq!(question, "Please provide input");
+            }
+            _ => panic!("Expected Question"),
+        }
+    }
+
+    #[test]
+    fn test_parse_interrupt_empty_object() {
+        let value = serde_json::json!({});
+        let result = HttpLLMClient::parse_interrupt_value(&value);
+        match result {
+            InterruptData::Question { question, options } => {
+                assert_eq!(question, "Agent is asking for input");
+                assert!(options.is_none());
+            }
+            _ => panic!("Expected Question"),
+        }
+    }
+
+    // === handle_messages_event ===
+
+    #[test]
+    fn test_handle_messages_event_ai_messages() {
+        let data = serde_json::json!([
+            {"type": "ai", "content": "Hello"},
+            {"type": "human", "content": "ignored"},
+            {"type": "ai", "content": "World"}
+        ])
+        .to_string();
+        let mut result = String::new();
+        HttpLLMClient::handle_messages_event(&data, &mut result);
+        assert_eq!(result, "Hello\nWorld");
+    }
+
+    #[test]
+    fn test_handle_messages_event_no_ai() {
+        let data = serde_json::json!([
+            {"type": "human", "content": "user msg"}
+        ])
+        .to_string();
+        let mut result = String::new();
+        HttpLLMClient::handle_messages_event(&data, &mut result);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_handle_messages_event_invalid_json() {
+        let mut result = String::new();
+        HttpLLMClient::handle_messages_event("not json", &mut result);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_handle_messages_event_not_array() {
+        let mut result = String::new();
+        HttpLLMClient::handle_messages_event("{\"key\": \"value\"}", &mut result);
+        assert!(result.is_empty());
+    }
+
+    // === handle_updates_event ===
+
+    #[test]
+    fn test_handle_updates_event_command_interrupt() {
+        let data = serde_json::json!({
+            "__interrupt__": [{
+                "value": {
+                    "command": "rm -rf /tmp/test",
+                    "message": "Delete temp files"
+                }
+            }]
+        })
+        .to_string();
+        let result = HttpLLMClient::handle_updates_event(&data).unwrap();
+        match result {
+            Some(InterruptData::CommandApproval { command, message }) => {
+                assert_eq!(command, "rm -rf /tmp/test");
+                assert_eq!(message, "Delete temp files");
+            }
+            _ => panic!("Expected CommandApproval interrupt"),
+        }
+    }
+
+    #[test]
+    fn test_handle_updates_event_question_interrupt() {
+        let data = serde_json::json!({
+            "__interrupt__": [{
+                "value": {
+                    "question": "Which DB?",
+                    "options": ["postgres", "mysql"]
+                }
+            }]
+        })
+        .to_string();
+        let result = HttpLLMClient::handle_updates_event(&data).unwrap();
+        assert!(matches!(result, Some(InterruptData::Question { .. })));
+    }
+
+    #[test]
+    fn test_handle_updates_event_no_interrupt() {
+        let data = serde_json::json!({"some_key": "some_value"}).to_string();
+        let result = HttpLLMClient::handle_updates_event(&data).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_handle_updates_event_invalid_json() {
+        let result = HttpLLMClient::handle_updates_event("bad json").unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn test_handle_updates_event_interrupt_no_value() {
+        let data = serde_json::json!({
+            "__interrupt__": [{"no_value_field": true}]
+        })
+        .to_string();
+        let result = HttpLLMClient::handle_updates_event(&data).unwrap();
+        assert!(result.is_none());
+    }
+
+    // === handle_values_event ===
+
+    #[test]
+    fn test_handle_values_event_extracts_last_ai() {
+        let data = serde_json::json!({
+            "messages": [
+                {"type": "human", "content": "hello"},
+                {"type": "ai", "content": "first answer"},
+                {"type": "ai", "content": "latest answer"}
+            ]
+        })
+        .to_string();
+        let mut result = String::new();
+        HttpLLMClient::handle_values_event(&data, &mut result);
+        assert_eq!(result, "latest answer");
+    }
+
+    #[test]
+    fn test_handle_values_event_skips_handoff() {
+        let data = serde_json::json!({
+            "messages": [
+                {"type": "ai", "content": "real answer"},
+                {"type": "ai", "content": "Transferring to X", "response_metadata": {"__is_handoff_back": true}}
+            ]
+        })
+        .to_string();
+        let mut result = String::new();
+        HttpLLMClient::handle_values_event(&data, &mut result);
+        assert_eq!(result, "real answer");
+    }
+
+    #[test]
+    fn test_handle_values_event_skips_transfer_content() {
+        let data = serde_json::json!({
+            "messages": [
+                {"type": "ai", "content": "good content"},
+                {"type": "ai", "content": "Transferring control to agent"}
+            ]
+        })
+        .to_string();
+        let mut result = String::new();
+        HttpLLMClient::handle_values_event(&data, &mut result);
+        assert_eq!(result, "good content");
+    }
+
+    #[test]
+    fn test_handle_values_event_no_messages() {
+        let data = serde_json::json!({"other": "data"}).to_string();
+        let mut result = String::new();
+        HttpLLMClient::handle_values_event(&data, &mut result);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_handle_values_event_replaces_previous_result() {
+        let data = serde_json::json!({
+            "messages": [{"type": "ai", "content": "new content"}]
+        })
+        .to_string();
+        let mut result = "old content".to_string();
+        HttpLLMClient::handle_values_event(&data, &mut result);
+        assert_eq!(result, "new content");
+    }
+
+    #[test]
+    fn test_handle_values_event_invalid_json() {
+        let mut result = "unchanged".to_string();
+        HttpLLMClient::handle_values_event("not json", &mut result);
+        assert_eq!(result, "unchanged");
+    }
+
+    // === handle_error_event ===
+
+    #[test]
+    fn test_handle_error_event_with_message() {
+        let data = serde_json::json!({"message": "rate limit exceeded"}).to_string();
+        let err = HttpLLMClient::handle_error_event(&data).unwrap_err();
+        assert!(err.to_string().contains("rate limit exceeded"));
+    }
+
+    #[test]
+    fn test_handle_error_event_no_message() {
+        let data = serde_json::json!({}).to_string();
+        let err = HttpLLMClient::handle_error_event(&data).unwrap_err();
+        assert!(err.to_string().contains("Unknown error"));
+    }
+
+    #[test]
+    fn test_handle_error_event_invalid_json() {
+        let result = HttpLLMClient::handle_error_event("not json").unwrap();
+        assert!(result.is_none());
+    }
+
+    // === handle_sse_event (dispatcher) ===
+
+    #[test]
+    fn test_handle_sse_event_messages() {
+        let client = HttpLLMClient::new("http://test".into(), "key".into());
+        let data = serde_json::json!([{"type": "ai", "content": "test"}]).to_string();
+        let mut result = String::new();
+        let interrupt = client
+            .handle_sse_event("messages", &data, &mut result)
+            .unwrap();
+        assert!(interrupt.is_none());
+        assert_eq!(result, "test");
+    }
+
+    #[test]
+    fn test_handle_sse_event_updates_with_interrupt() {
+        let client = HttpLLMClient::new("http://test".into(), "key".into());
+        let data = serde_json::json!({
+            "__interrupt__": [{"value": {"command": "ls", "message": "list"}}]
+        })
+        .to_string();
+        let mut result = String::new();
+        let interrupt = client
+            .handle_sse_event("updates", &data, &mut result)
+            .unwrap();
+        assert!(matches!(
+            interrupt,
+            Some(InterruptData::CommandApproval { .. })
+        ));
+    }
+
+    #[test]
+    fn test_handle_sse_event_error() {
+        let client = HttpLLMClient::new("http://test".into(), "key".into());
+        let data = serde_json::json!({"message": "boom"}).to_string();
+        let mut result = String::new();
+        let err = client.handle_sse_event("error", &data, &mut result);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn test_handle_sse_event_end() {
+        let client = HttpLLMClient::new("http://test".into(), "key".into());
+        let mut result = String::new();
+        let interrupt = client.handle_sse_event("end", "", &mut result).unwrap();
+        assert!(interrupt.is_none());
+    }
+
+    #[test]
+    fn test_handle_sse_event_unknown() {
+        let client = HttpLLMClient::new("http://test".into(), "key".into());
+        let mut result = String::new();
+        let interrupt = client
+            .handle_sse_event("custom_event", "data", &mut result)
+            .unwrap();
+        assert!(interrupt.is_none());
+    }
+
+    // === convert_stream_result ===
+
+    #[test]
+    fn test_convert_stream_result_complete() {
+        let result =
+            HttpLLMClient::convert_stream_result(StreamResult::Complete("done".into())).unwrap();
+        assert_eq!(result.as_complete(), Some("done"));
+    }
+
+    #[test]
+    fn test_convert_stream_result_command_approval() {
+        let result = HttpLLMClient::convert_stream_result(StreamResult::CommandApproval {
+            command: "ls".into(),
+            message: "list".into(),
+        })
+        .unwrap();
+        match result {
+            LLMQueryResult::CommandApproval { command, message } => {
+                assert_eq!(command, "ls");
+                assert_eq!(message, "list");
+            }
+            _ => panic!("Expected CommandApproval"),
+        }
+    }
+
+    #[test]
+    fn test_convert_stream_result_question() {
+        let result = HttpLLMClient::convert_stream_result(StreamResult::Question {
+            question: "which?".into(),
+            options: Some(vec!["a".into(), "b".into()]),
+        })
+        .unwrap();
+        match result {
+            LLMQueryResult::Question { question, options } => {
+                assert_eq!(question, "which?");
+                assert_eq!(options.unwrap().len(), 2);
+            }
+            _ => panic!("Expected Question"),
+        }
+    }
+
+    // === MockLLMClient resume_with_command_output / resume_rejected ===
+
+    #[tokio::test]
+    async fn test_mock_client_resume_with_command_output() {
+        let client = MockLLMClient::new();
+        let result = client
+            .resume_with_command_output("uname -s", "Linux")
+            .await
+            .unwrap();
+        let text = result.unwrap_complete();
+        assert!(text.contains("uname -s"));
+        assert!(text.contains("Linux"));
+    }
+
+    #[tokio::test]
+    async fn test_mock_client_resume_rejected() {
+        let client = MockLLMClient::new();
+        let result = client.resume_rejected().await.unwrap();
+        let text = result.unwrap_complete();
+        assert!(text.contains("rejected"));
     }
 }

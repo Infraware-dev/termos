@@ -31,6 +31,7 @@ impl AuthConfig {
     }
 
     /// Check if only backend URL is configured (missing API key)
+    #[allow(dead_code)]
     pub fn has_backend_only(&self) -> bool {
         self.backend_url.is_some() && self.api_key.is_none()
     }

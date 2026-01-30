@@ -1,0 +1,345 @@
+@startuml "Infraware Terminal - Architecture Overview"
+
+!theme plain
+skinparam backgroundColor #ffffff
+skinparam defaultFontName monospace
+skinparam defaultFontSize 11
+skinparam classBorderColor #333333
+skinparam classBackgroundColor #f5f5f5
+skinparam arrowColor #333333
+
+title "Infraware Terminal - Architecture Overview"
+
+package "egui / eframe Application" {
+    class InfrawareApp {
+        - mode: AppMode
+        - theme: Theme
+        - vte_parser: vte::Parser
+        - terminal_handler: TerminalHandler
+        - pty_writer: Option<Arc<PtyWriter>>
+        - pty_output_rx: Option<mpsc::Receiver>
+        - pty_manager: Option<Arc<TokioMutex<PtyManager>>>
+        - keyboard_handler: KeyboardHandler
+        - runtime: Runtime
+        --
+        + new() -> Self
+        + poll_pty_output() -> bool
+        + send_to_pty(data: &[u8])
+        + send_sigint()
+        + resize_pty(cols: u16, rows: u16)
+        + handle_keyboard(ctx: &egui::Context)
+        + render_terminal(ui: &mut egui::Ui)
+        + update(ctx: &egui::Context, frame: &mut eframe::Frame)
+    }
+    note right of InfrawareApp
+        Main eframe::App implementation
+        Manages VTE parser, terminal state,
+        PTY I/O, and egui rendering loop
+        Single-pass rendering for performance
+    end note
+}
+
+package "Application State" {
+    enum AppMode {
+        Normal
+        WaitingLLM
+        AwaitingApproval { command, message }
+        ExecutingCommand { command }
+        AwaitingAnswer { question, options }
+    }
+
+    enum AppModeEvent {
+        QueryLLM
+        LLMRequestsApproval { command, message }
+        LLMAsksQuestion { question, options }
+        LLMCompleted
+        UserResponded
+        UserAnswered
+        Cancel
+    }
+
+    note bottom of AppMode
+        Type-safe state machine
+        with validated transitions
+    end note
+}
+
+package "PTY Subsystem" {
+    class PtyManager {
+        - session: PtySession
+        - current_size: PtySize
+        - shell: String
+        --
+        + new() -> Result<Self>
+        + with_size(size: PtySize) -> Result<Self>
+        + take_reader() -> Result<PtyReader>
+        + take_writer() -> Result<Arc<PtyWriter>>
+        + resize(rows: u16, cols: u16) -> Result<()>
+        + send_sigint() -> Result<()>
+        + is_running() -> bool
+    }
+
+    class PtySession {
+        - master: Arc<Mutex<MasterPty>>
+        - child: Arc<Mutex<Child>>
+        - reader: Option<PtyReader>
+        - writer: Option<PtyWriter>
+        --
+        + new(pair: PtyPair, child: Child) -> Self
+        + reader() -> Result<PtyReader>
+        + writer() -> Result<PtyWriter>
+        + resize(rows: u16, cols: u16) -> Result<()>
+        + send_sigint() -> Result<()>
+        + is_running() -> bool
+        + wait() -> Result<ExitStatus>
+    }
+
+    class PtyReader {
+        - receiver: Receiver<Vec<u8>>
+        - stop_flag: Arc<AtomicBool>
+        --
+        + new(reader: Box<Read>) -> Self
+        + read_available() -> Result<Vec<u8>>
+        + read_with_timeout(timeout) -> Result<Vec<u8>>
+        + read() -> Result<Vec<u8>>
+        + is_alive() -> bool
+    }
+
+    class PtyWriter {
+        - inner: Arc<Mutex<Box<Write>>>
+        --
+        + new(writer: Box<Write>) -> Self
+        + write(data: &[u8]) -> Result<usize>
+        + write_sync(data: &[u8]) -> Result<usize>
+        + write_str(s: &str) -> Result<usize>
+        + send_byte(byte: u8) -> Result<()>
+    }
+
+    class Pty {
+        - system: Box<PtySystem>
+        --
+        + new() -> Self
+        + spawn(cmd: &str, args, size) -> Result<PtySession>
+    }
+
+    interface PtyWrite {
+        + write_bytes(data: &[u8]) -> Result<usize>
+    }
+
+    interface PtyControl {
+        + resize(rows: u16, cols: u16) -> Result<()>
+        + send_sigint() -> Result<()>
+    }
+
+    PtyWriter ..|> PtyWrite : implements
+    PtySession ..|> PtyControl : implements
+
+    Pty --> PtySession : creates
+    PtyManager --> PtySession : owns
+    PtyManager --> PtyReader : manages
+    PtyManager --> PtyWriter : manages
+    PtySession --> PtyReader : provides
+    PtySession --> PtyWriter : provides
+
+    note right of PtyManager
+        High-level PTY management
+        Spawns shell (zsh/bash)
+        Manages reader/writer I/O
+    end note
+}
+
+package "VTE Parser Pipeline" {
+    class "vte::Parser" {
+        + advance(performer, bytes)
+    }
+
+    class TerminalHandler {
+        - grid: TerminalGrid
+        - window_title: String
+        --
+        + new(rows: u16, cols: u16) -> Self
+        + grid() -> &TerminalGrid
+        + grid_mut() -> &mut TerminalGrid
+        + resize(rows: u16, cols: u16)
+        - process_sgr(params)
+    }
+
+    note bottom of TerminalHandler
+        Implements vte::Perform trait
+        Processes escape sequences
+        Maintains terminal grid state
+    end note
+}
+
+package "Terminal State" {
+    class TerminalGrid {
+        - cells: Vec<Vec<Cell>>
+        - scrollback: Vec<Vec<Cell>>
+        - scroll_offset: usize
+        - cursor_row: u16
+        - cursor_col: u16
+        - cursor_visible: bool
+        - scroll_top/bottom: u16
+        - current_attrs: CellAttrs
+        - current_fg/bg: Color
+        - alt_screen: Option<AltScreenState>
+        --
+        + new(rows: u16, cols: u16) -> Self
+        + resize(rows: u16, cols: u16)
+        + put_char(ch: char)
+        + scroll_to_bottom()
+        + scroll_view_up/down(lines: usize)
+        + visible_rows() -> Vec<Vec<Cell>>
+        + cursor_position() -> (u16, u16)
+    }
+
+    class Cell {
+        + ch: char
+        + fg: Color
+        + bg: Color
+        + attrs: CellAttrs
+    }
+
+    enum Color {
+        Named(NamedColor)
+        Indexed(u8)
+        Rgb(u8, u8, u8)
+    }
+
+    enum NamedColor {
+        Black, Red, Green, Yellow
+        Blue, Magenta, Cyan, White
+        BrightBlack, BrightRed, BrightGreen
+        BrightYellow, BrightBlue, BrightMagenta
+        BrightCyan, BrightWhite
+        Foreground, Background
+    }
+
+    struct CellAttrs {
+        bold: bool
+        italic: bool
+        underline: bool
+        strikethrough: bool
+        dim: bool
+        reverse: bool
+        hidden: bool
+        blink: bool
+    }
+
+    TerminalGrid --> Cell : contains
+    Cell --> Color : uses
+    Color --> NamedColor : variants
+    Cell --> CellAttrs : uses
+
+    note bottom of TerminalGrid
+        Main terminal state
+        Stores visible grid + scrollback
+        Manages cursor position
+        Handles scroll region
+    end note
+}
+
+package "egui Rendering" {
+    class Theme {
+        - foreground: Color32
+        - background: Color32
+        - cursor: Color32
+        --
+        + dark() -> Self
+        + apply(ctx: &Context)
+    }
+
+    class "render_backgrounds()" as RenderBg {
+        Batch background rectangles
+        Renders at row level
+    }
+
+    class "render_text_runs()" as RenderText {
+        Batch text rendering
+        Reduces draw calls
+    }
+
+    class "render_cursor()" as RenderCursor {
+        Draw blinking cursor
+        Conditional on focus
+    }
+
+    class "render_scrollbar()" as RenderScrollbar {
+        Draw scrollbar thumb
+        Indicates scroll position
+    }
+
+    note bottom of RenderBg
+        Single-pass rendering
+        Iterates each row once
+        Collects background, text, decorations
+        Renders in z-order: backgrounds → text → decorations
+    end note
+}
+
+package "Input Handling" {
+    class KeyboardHandler {
+        - actions: Vec<KeyboardAction>
+        --
+        + new() -> Self
+        + process(ctx: &Context) -> Vec<KeyboardAction>
+        - process_ctrl_keys(ctx) -> Option<KeyboardAction>
+        - process_other_keys(ctx)
+        - process_text_input(ctx)
+    }
+
+    enum KeyboardAction {
+        SendBytes(Vec<u8>)
+        SendSigInt
+    }
+
+    note right of KeyboardHandler
+        Extracts keyboard events from egui
+        Maps keys to terminal actions
+        Handles Ctrl+C specially
+        Supports text input
+    end note
+}
+
+' Main data flows
+InfrawareApp --> TerminalHandler : owns
+InfrawareApp --> PtyManager : manages
+InfrawareApp --> "vte::Parser" : owns
+InfrawareApp --> AppMode : state
+InfrawareApp --> KeyboardHandler : owns
+InfrawareApp --> Theme : owns
+
+InfrawareApp --> RenderBg : uses
+InfrawareApp --> RenderText : uses
+InfrawareApp --> RenderCursor : uses
+InfrawareApp --> RenderScrollbar : uses
+
+TerminalHandler --> TerminalGrid : owns
+KeyboardHandler --> KeyboardAction : produces
+
+' Data flow arrow descriptions
+InfrawareApp -[#blue]-> PtyManager : "input via\nPtyWriter"
+PtyManager -[#green]-> InfrawareApp : "output via\nmpsc channel"
+
+InfrawareApp -[#red]-> "vte::Parser" : "feed bytes\nfrom PTY"
+
+"vte::Parser" -[#purple]-> TerminalHandler : "calls Perform\ntrait methods"
+
+TerminalHandler -[#orange]-> TerminalGrid : "updates\ncells"
+
+TerminalGrid -[#brown]-> InfrawareApp : "read for\nrendering"
+
+note bottom
+    **Data Flow Summary:**
+    1. Keyboard input → InfrawareApp → PtyWriter → PTY → Shell
+    2. PTY output → mpsc channel → InfrawareApp
+    3. PTY bytes → vte::Parser → TerminalHandler → TerminalGrid
+    4. TerminalGrid → egui rendering → display
+
+    **Thread Model:**
+    - Main thread: eframe event loop + egui rendering
+    - PTY reader thread: dedicated async task for reading
+    - Tokio runtime: async operations (resize, signal handling)
+end note
+
+@enduml
