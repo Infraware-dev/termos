@@ -2,7 +2,7 @@
 
 mod mock;
 
-pub use mock::MockEngine;
+pub use mock::{MockEngine, Workflow};
 
 #[cfg(feature = "http")]
 mod http;

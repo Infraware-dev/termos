@@ -12,6 +12,7 @@ workspace = true
 infraware-shared = { workspace = true }
 tokio = { workspace = true }
 async-trait = { workspace = true }
+async-stream = { workspace = true }
 futures = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
@@ -22,7 +23,6 @@ uuid = { workspace = true }
 
 # For HTTP adapter (optional feature)
 reqwest = { workspace = true, optional = true }
-async-stream = { workspace = true, optional = true }
 bytes = { workspace = true, optional = true }
 
 # For Rig adapter (optional feature)
@@ -32,6 +32,6 @@ schemars = { workspace = true, optional = true }
 
 [features]
 default = []
-http = ["reqwest", "async-stream", "bytes"]
-process = ["async-stream"]
-rig = ["rig-core", "async-stream", "regex", "schemars"]
+http = ["reqwest", "bytes"]
+process = []
+rig = ["rig-core", "regex", "schemars"]

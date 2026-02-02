@@ -1,6 +1,7 @@
 # Infraware Terminal
 
-Terminal emulator con assistente AI integrato per DevOps. Prefissa qualsiasi comando con `?` per query in linguaggio naturale.
+Terminal emulator con assistente AI integrato per DevOps. Prefissa qualsiasi comando con `?` per query in linguaggio
+naturale.
 
 ## Requisiti
 
@@ -51,12 +52,12 @@ Nel terminale, prefissa con `?` per query in linguaggio naturale:
 
 ## Configurazione Engine
 
-| Engine | Uso | Comando |
-|--------|-----|---------|
-| **MockEngine** | Testing/sviluppo (default) | `cargo run -p infraware-backend` |
-| **HttpEngine** | Produzione con LangGraph | `ENGINE_TYPE=http LANGGRAPH_URL=http://localhost:2024 cargo run -p infraware-backend` |
-| **ProcessEngine** | Bridge Python | `ENGINE_TYPE=process BRIDGE_SCRIPT=bin/engine-bridge/main.py cargo run -p infraware-backend` |
-| **RigEngine** | Agente Rust nativo con rig-rs | `ENGINE_TYPE=rig ANTHROPIC_API_KEY=sk-... cargo run -p infraware-backend --features rig` |
+| Engine            | Uso                           | Comando                                                                                      |
+|-------------------|-------------------------------|----------------------------------------------------------------------------------------------|
+| **MockEngine**    | Testing/sviluppo (default)    | `cargo run -p infraware-backend`                                                             |
+| **HttpEngine**    | Produzione con LangGraph      | `ENGINE_TYPE=http LANGGRAPH_URL=http://localhost:2024 cargo run -p infraware-backend`        |
+| **ProcessEngine** | Bridge Python                 | `ENGINE_TYPE=process BRIDGE_SCRIPT=bin/engine-bridge/main.py cargo run -p infraware-backend` |
+| **RigEngine**     | Agente Rust nativo con rig-rs | `ENGINE_TYPE=rig ANTHROPIC_API_KEY=sk-... cargo run -p infraware-backend --features rig`     |
 
 ### Produzione con LangGraph
 
@@ -80,6 +81,7 @@ ENGINE_TYPE=mock|http|process    # Default: mock
 PORT=8080                        # Default: 8080
 API_KEY=your-secret-key          # Vuoto = auth disabilitata
 RATE_LIMIT_RPM=100               # 0 = disabilitato
+MOCK_WORKFLOW_FILE=path/to/workflow.json  # MockEngine only
 
 # LangGraph (per http/process engine)
 LANGGRAPH_URL=http://localhost:2024
@@ -124,6 +126,93 @@ infraware-terminal/
 - [Getting Started](docs/GETTING_STARTED.md) - Guida dettagliata
 - [Backend Architecture](docs/BACKEND_ARCHITECTURE.md) - Architettura backend
 - [OpenAPI Spec](http://localhost:8080/api-docs/openapi.json) - API docs (quando il server e' attivo)
+
+## Mock Workflow File
+
+This file lets you create a playbook for the MockEngine.
+
+### Workflow JSON Schema
+
+The workflow file defines the scripted investigation the agent follows.
+
+```json
+{
+  "run_commands": true,
+  "playbooks": {
+    "my-playbook": {
+      "name": "My Playbook",
+      "intents": [
+        "investigate docker issues",
+        "troubleshoot container problems"
+      ],
+      "phases": [
+        {
+          "phase": 1,
+          "name": "Phase Name",
+          "description": "What this phase accomplishes",
+          "duration_minutes": 5,
+          "steps": [
+            {
+              "step": 1,
+              "action": "Human-readable description of what agent is doing",
+              "command": "shell command to execute",
+              "output": "expected output (used for static replay or validation)",
+              "analysis": "Agent's interpretation of the results"
+            }
+          ],
+          "conclusion": "Summary at end of phase (optional)"
+        }
+      ]
+    }
+  }
+}
+```
+
+#### Root Workflow Fields
+
+| Field          | Type                    | Required | Description                                                      |
+|----------------|-------------------------|----------|------------------------------------------------------------------|
+| `run_commands` | `bool`                  | Yes      | Whether to actually run commands or just return the output field |
+| `playbooks`    | `Map<String, Playbook>` | Yes      | Collection of playbooks identified by unique keys                |
+
+#### Playbook Object
+
+| Field     | Type          | Required | Description                                 |
+|-----------|---------------|----------|---------------------------------------------|
+| `name`    | `String`      | Yes      | Display name (e.g., "Docker Investigation") |
+| `intents` | `Vec<String>` | Yes      | List of intents the playbook addresses      |
+| `phases`  | `Vec<Phase>`  | Yes      | Ordered list of phases                      |
+
+#### Phase Object
+
+| Field                  | Type                  | Required | Description                                            |
+|------------------------|-----------------------|----------|--------------------------------------------------------|
+| `phase`                | `u32`                 | Yes      | 1-indexed phase number                                 |
+| `name`                 | `String`              | Yes      | Display name (e.g., "Symptom Verification")            |
+| `description`          | `String`              | Yes      | What this phase accomplishes                           |
+| `duration_minutes`     | `u32`                 | No       | Estimated duration for display                         |
+| `steps`                | `Vec<Step>`           | No       | Steps to execute (absent in documentation-only phases) |
+| `conclusion`           | `String`              | No       | Summary statement at phase end                         |
+| `root_cause`           | `RootCause`           | No       | Present only in root cause phase                       |
+| `verification_summary` | `Map<String, String>` | No       | Present only in verification phase                     |
+
+#### Step Object
+
+| Field      | Type     | Required | Description                                  |
+|------------|----------|----------|----------------------------------------------|
+| `step`     | `u32`    | Yes      | Global step number (continues across phases) |
+| `action`   | `String` | Yes      | What the agent is about to do                |
+| `command`  | `String` | Yes      | Shell command to execute/mock                |
+| `output`   | `String` | Yes      | Expected output or recorded output           |
+| `analysis` | `String` | Yes      | Agent's reasoning about the result           |
+
+#### RootCause Object
+
+| Field        | Type     | Description                                   |
+|--------------|----------|-----------------------------------------------|
+| `issue`      | `String` | Technical description of the problem          |
+| `impact`     | `String` | User-facing impact                            |
+| `drift_type` | `String` | Classification (e.g., "Infrastructure drift") |
 
 ## License
 

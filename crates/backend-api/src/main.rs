@@ -2,6 +2,7 @@
 //!
 //! An axum-based backend that exposes REST/SSE endpoints for the terminal client.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -19,6 +20,7 @@ use infraware_engine::{
     adapters::{HttpEngine, HttpEngineConfig, MockEngine, ProcessEngine, ProcessEngineConfig},
 };
 
+use infraware_engine::adapters::Workflow;
 #[cfg(feature = "rig")]
 use infraware_engine::adapters::{RigEngine, RigEngineConfig};
 
@@ -156,6 +158,8 @@ struct Config {
     api_key: Option<String>,
     /// Rate limit: requests per minute (0 = disabled)
     rate_limit_rpm: u64,
+    /// Mock workflow file (for mock engine)
+    mock_workflow_file: Option<PathBuf>,
 }
 
 impl Config {
@@ -180,6 +184,7 @@ impl Config {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(100), // Default: 100 requests per minute
+            mock_workflow_file: std::env::var("MOCK_WORKFLOW_FILE").ok().map(PathBuf::from),
         }
     }
 }
@@ -256,7 +261,18 @@ fn create_engine(config: &Config) -> anyhow::Result<Arc<dyn AgenticEngine>> {
         }
         _ => {
             tracing::info!("Creating MockEngine (default)");
-            Ok(Arc::new(MockEngine::new()))
+
+            let workflow = if let Some(ref path) = config.mock_workflow_file {
+                tracing::info!(file = %path.display(), "Loading mock workflow from file");
+                // read and parse json
+                let data = std::fs::read_to_string(path)?;
+                let workflow: Workflow = serde_json::from_str(&data)?;
+                Some(workflow)
+            } else {
+                None
+            };
+
+            Ok(Arc::new(MockEngine::new(workflow)))
         }
     }
 }

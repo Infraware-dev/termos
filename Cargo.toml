@@ -6,7 +6,6 @@ members = [
   "crates/backend-engine",
   "terminal-app",
 ]
-default-members = ["terminal-app"]
 
 [workspace.package]
 version = "0.2.0"
@@ -66,8 +65,6 @@ rig-core = "0.28"
 # Logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
-log = "0.4"
-env_logger = "0.11.6"
 
 # OpenAPI / Documentation
 utoipa = { version = "5.3", features = ["axum_extras"] }
