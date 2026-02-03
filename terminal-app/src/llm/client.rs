@@ -4,7 +4,11 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
+use tokio::time::{Duration, timeout};
 use tokio_util::sync::CancellationToken;
+
+/// Idle timeout for SSE streams - if no data received for this duration, the stream is considered dead.
+const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Safely truncate a UTF-8 string to at most `max_bytes` bytes,
 /// ensuring the result ends at a valid char boundary.
@@ -200,7 +204,6 @@ impl HttpLLMClient {
             base_url,
             client: reqwest::Client::builder()
                 .connect_timeout(std::time::Duration::from_secs(10)) // Connection timeout
-                .timeout(std::time::Duration::from_secs(60)) // Overall request timeout (reduced from 120s)
                 .local_address(std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1))) // Force IPv4
                 .pool_max_idle_per_host(0) // Disable connection pooling for SSE
                 .build()
@@ -361,7 +364,26 @@ impl HttpLLMClient {
 
         log::info!("SSE stream started, waiting for chunks...");
 
-        while let Some(chunk_result) = stream.next().await {
+        loop {
+            // Use timeout to detect idle streams (no data for STREAM_IDLE_TIMEOUT)
+            let chunk_result = match timeout(STREAM_IDLE_TIMEOUT, stream.next()).await {
+                Ok(Some(chunk)) => chunk,
+                Ok(None) => {
+                    // Stream ended naturally
+                    break;
+                }
+                Err(_) => {
+                    log::error!(
+                        "SSE stream idle timeout: no data received for {}s",
+                        STREAM_IDLE_TIMEOUT.as_secs()
+                    );
+                    anyhow::bail!(
+                        "Stream idle timeout: no data received for {} seconds",
+                        STREAM_IDLE_TIMEOUT.as_secs()
+                    );
+                }
+            };
+
             // Check for cancellation FIRST (before processing chunk)
             if cancel_token.is_cancelled() {
                 log::info!("SSE stream cancelled by user after {} chunks", chunk_count);
