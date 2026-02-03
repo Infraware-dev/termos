@@ -112,10 +112,18 @@ impl IncrementalRenderer {
         }
 
         // Return partial line if any (for preview)
-        let partial = if !self.line_buffer.is_empty() && !self.in_code_block {
+        // Don't show partial lines that look like code block markers - wait for full line
+        let partial = if !self.line_buffer.is_empty()
+            && !self.in_code_block
+            && !self.line_buffer.starts_with("```")
+        {
             Some(self.format_inline(&self.line_buffer))
-        } else if self.in_code_block && !self.line_buffer.is_empty() {
+        } else if self.in_code_block
+            && !self.line_buffer.is_empty()
+            && !self.line_buffer.starts_with("```")
+        {
             // In code block with incomplete line, show current partial
+            // But not if it looks like a closing marker
             Some(format!("  {}", self.line_buffer))
         } else if self.in_code_block && !self.code_lines.is_empty() {
             // In code block with complete lines, show the last line as preview
@@ -444,5 +452,40 @@ mod tests {
         let (_, partial) = renderer.append("let x = ");
         assert!(partial.is_some());
         assert!(partial.unwrap().starts_with("  ")); // Indented
+    }
+
+    #[test]
+    fn test_partial_code_block_marker_not_shown() {
+        let mut renderer = IncrementalRenderer::new();
+
+        // Partial code block opening marker should not be shown
+        let (lines, partial) = renderer.append("```");
+        assert!(lines.is_empty());
+        assert!(partial.is_none()); // Don't show partial ``` markers
+
+        // When newline arrives, code block starts properly
+        let (lines, _) = renderer.append("rust\nlet x = 5;\n```\n");
+        // Should get highlighted code when block closes
+        assert!(!lines.is_empty());
+    }
+
+    #[test]
+    fn test_partial_closing_marker_not_shown() {
+        let mut renderer = IncrementalRenderer::new();
+
+        // Start a code block
+        renderer.append("```rust\n");
+        renderer.append("let x = 5;\n");
+
+        // Partial closing marker should not be shown as "```"
+        // Instead we continue showing the last code line as preview
+        let (lines, partial) = renderer.append("```");
+        assert!(lines.is_empty()); // Not closed yet (no newline)
+        assert!(partial.is_some()); // Shows last code line as preview
+        assert!(!partial.unwrap().contains("```")); // But NOT the ``` marker
+
+        // When newline arrives, code block closes
+        let (lines, _) = renderer.append("\n");
+        assert!(!lines.is_empty()); // Now we get highlighted code
     }
 }
