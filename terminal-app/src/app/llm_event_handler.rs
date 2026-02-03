@@ -36,10 +36,10 @@ impl<'a> LlmEventHandler<'a> {
         // Log non-chunk events (chunks are too frequent)
         match &event {
             AppBackgroundEvent::LlmChunk(_) => {
-                log::debug!("Received LLM chunk, mode: {:?}", session.mode.name());
+                tracing::debug!("Received LLM chunk, mode: {:?}", session.mode.name());
             }
             _ => {
-                log::info!(
+                tracing::info!(
                     "Received background event: {:?}, current mode: {:?}",
                     event,
                     session.mode.name()
@@ -102,7 +102,7 @@ impl<'a> LlmEventHandler<'a> {
                     None => return,
                 };
                 session.agent_state.end_stream();
-                log::error!("LLM query error: {}", err);
+                tracing::error!("LLM query error: {}", err);
                 let error_msg = format!("\x1b[31mError: {}\x1b[0m", err);
                 session
                     .vte_parser
@@ -170,7 +170,7 @@ impl<'a> LlmEventHandler<'a> {
 
     /// Handles stream completion.
     fn handle_stream_complete(&mut self) {
-        log::info!("LLM stream completed, finalizing output");
+        tracing::info!("LLM stream completed, finalizing output");
 
         // Finalize incremental output
         self.finalize_incremental_output();
@@ -214,7 +214,7 @@ impl<'a> LlmEventHandler<'a> {
 
     /// Handles LLM complete response.
     fn handle_complete(&mut self, text: String) {
-        log::info!(
+        tracing::info!(
             "LLM query complete, response length: {} chars, transitioning to Normal",
             text.len()
         );
@@ -225,13 +225,13 @@ impl<'a> LlmEventHandler<'a> {
         }
 
         if text.is_empty() {
-            log::debug!("Empty response, no output to render");
+            tracing::debug!("Empty response, no output to render");
             return;
         }
 
         // Render response lines (markdown → ANSI)
         let lines = self.llm.response_renderer.render(&text);
-        log::debug!("Rendered {} lines to display", lines.len());
+        tracing::debug!("Rendered {} lines to display", lines.len());
 
         let session = match self.state.active_session_mut() {
             Some(s) => s,
@@ -261,7 +261,7 @@ impl<'a> LlmEventHandler<'a> {
 
     /// Handles LLM command approval request.
     fn handle_command_approval(&mut self, command: String, message: String) {
-        log::info!("LLM requested command approval: {}", command);
+        tracing::info!("LLM requested command approval: {}", command);
 
         let session = match self.state.active_session_mut() {
             Some(s) => s,
@@ -285,7 +285,7 @@ impl<'a> LlmEventHandler<'a> {
 
     /// Handles LLM question.
     fn handle_question(&mut self, question: String, options: Option<Vec<String>>) {
-        log::info!("LLM asked a question: {}", question);
+        tracing::info!("LLM asked a question: {}", question);
 
         let session = match self.state.active_session_mut() {
             Some(s) => s,

@@ -439,7 +439,7 @@ impl HttpLLMClient {
                     break;
                 }
                 Err(_) => {
-                    log::error!(
+                    tracing::error!(
                         "SSE stream idle timeout: no data received for {}s",
                         STREAM_IDLE_TIMEOUT.as_secs()
                     );
@@ -566,12 +566,12 @@ impl HttpLLMClient {
         let mut chunk_count: u32 = 0;
         let stream_start = std::time::Instant::now();
 
-        log::info!("SSE streaming started, emitting chunks in real-time...");
+        tracing::info!("SSE streaming started, emitting chunks in real-time...");
 
         while let Some(chunk_result) = stream.next().await {
             // Check for cancellation
             if cancel_token.is_cancelled() {
-                log::info!(
+                tracing::info!(
                     "SSE streaming cancelled by user after {} chunks",
                     chunk_count
                 );
@@ -585,7 +585,7 @@ impl HttpLLMClient {
                 Ok(chunk) => {
                     chunk_count += 1;
                     let text = String::from_utf8_lossy(&chunk);
-                    log::debug!(
+                    tracing::debug!(
                         "SSE streaming chunk #{} received ({} bytes)",
                         chunk_count,
                         chunk.len()
@@ -649,7 +649,7 @@ impl HttpLLMClient {
                     }
                 }
                 Err(e) => {
-                    log::error!(
+                    tracing::error!(
                         "SSE streaming error after {} chunks ({}ms): {}",
                         chunk_count,
                         stream_start.elapsed().as_millis(),
@@ -676,7 +676,7 @@ impl HttpLLMClient {
             }
         }
 
-        log::info!(
+        tracing::info!(
             "SSE streaming completed: {} chunks, {} content chars, {}ms elapsed",
             chunk_count,
             last_content.len(),
@@ -712,7 +712,7 @@ impl HttpLLMClient {
                         // Content grew - emit the delta
                         let delta = &new_content[last_content.len()..];
                         if !delta.is_empty() {
-                            log::debug!("Streaming chunk: {} chars", delta.len());
+                            tracing::debug!("Streaming chunk: {} chars", delta.len());
                             let _ = chunk_tx
                                 .send(LLMStreamEvent::Chunk(delta.to_string()))
                                 .await;
@@ -732,8 +732,8 @@ impl HttpLLMClient {
                 }
             }
             "error" => return Self::handle_error_event(data),
-            "end" => log::debug!("Stream ended"),
-            _ => log::trace!("Unknown SSE event type: {}", event),
+            "end" => tracing::debug!("Stream ended"),
+            _ => tracing::trace!("Unknown SSE event type: {}", event),
         }
         Ok(None)
     }
@@ -1226,12 +1226,12 @@ impl LLMClientTrait for HttpLLMClient {
         chunk_tx: tokio::sync::mpsc::Sender<LLMStreamEvent>,
         cancel_token: CancellationToken,
     ) -> Result<()> {
-        log::info!("LLM streaming query: {}", text);
+        tracing::info!("LLM streaming query: {}", text);
 
         let thread_id = self.ensure_thread().await?;
 
         let url = format!("{}/threads/{}/runs/stream", self.base_url, thread_id);
-        log::info!("[HTTP-OUT] POST {} | streaming | input={}", url, true);
+        tracing::info!("[HTTP-OUT] POST {} | streaming | input={}", url, true);
 
         let request = StreamRunRequest {
             assistant_id: "supervisor".to_string(),
@@ -1258,13 +1258,13 @@ impl LLMClientTrait for HttpLLMClient {
                     result?
             }
             _ = cancel_token.cancelled() => {
-                log::info!("HTTP streaming request cancelled before response");
+                tracing::info!("HTTP streaming request cancelled before response");
                 let _ = chunk_tx.send(LLMStreamEvent::Error("Query cancelled by user".to_string())).await;
                 anyhow::bail!("Query cancelled by user")
             }
         };
 
-        log::info!(
+        tracing::info!(
             "[HTTP-IN] POST /runs/stream (streaming) | status={} | elapsed={}ms",
             response.status(),
             request_start.elapsed().as_millis()
@@ -1273,7 +1273,7 @@ impl LLMClientTrait for HttpLLMClient {
         if !response.status().is_success() {
             let status = response.status();
             let error_text = response.text().await.unwrap_or_default();
-            log::error!("Stream run failed ({}): {}", status, error_text);
+            tracing::error!("Stream run failed ({}): {}", status, error_text);
             let _ = chunk_tx
                 .send(LLMStreamEvent::Error(format!(
                     "Stream run failed ({}): {}",
@@ -1448,7 +1448,7 @@ impl LLMClientTrait for MockLLMClient {
         while pos < response.len() {
             // Check for cancellation
             if cancel_token.is_cancelled() {
-                log::info!("Mock streaming cancelled at position {}", pos);
+                tracing::info!("Mock streaming cancelled at position {}", pos);
                 let _ = chunk_tx
                     .send(LLMStreamEvent::Error("Query cancelled by user".to_string()))
                     .await;
@@ -1469,7 +1469,7 @@ impl LLMClientTrait for MockLLMClient {
 
             let chunk = &response[pos..chunk_end];
             if !chunk.is_empty() {
-                log::debug!("Mock streaming chunk: {} chars", chunk.len());
+                tracing::debug!("Mock streaming chunk: {} chars", chunk.len());
                 let _ = chunk_tx
                     .send(LLMStreamEvent::Chunk(chunk.to_string()))
                     .await;

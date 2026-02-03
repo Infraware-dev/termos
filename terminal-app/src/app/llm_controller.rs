@@ -75,20 +75,20 @@ impl LlmController {
 
             match auth_result {
                 Ok(response) if response.success => {
-                    log::info!("Authentication successful: {}", response.message);
+                    tracing::info!("Authentication successful: {}", response.message);
                     Arc::new(HttpLLMClient::new(backend_url, api_key))
                 }
                 Ok(response) => {
-                    log::warn!("Authentication rejected: {}", response.message);
+                    tracing::warn!("Authentication rejected: {}", response.message);
                     Arc::new(crate::llm::MockLLMClient::new())
                 }
                 Err(e) => {
-                    log::error!("Authentication failed: {}", e);
+                    tracing::error!("Authentication failed: {}", e);
                     Arc::new(crate::llm::MockLLMClient::new())
                 }
             }
         } else {
-            log::warn!("No API key configured, using Mock LLM Client");
+            tracing::warn!("No API key configured, using Mock LLM Client");
             Arc::new(crate::llm::MockLLMClient::new())
         }
     }
@@ -98,7 +98,7 @@ impl LlmController {
     /// The query runs in the background and emits `LlmChunk` events as text arrives,
     /// followed by either `LlmStreamComplete`, `LlmCommandApproval`, `LlmQuestion`, or `LlmError`.
     pub fn start_query(&mut self, runtime: &Runtime, query: String) {
-        log::info!("Starting streaming LLM query: {}", query);
+        tracing::info!("Starting streaming LLM query: {}", query);
 
         // Reset incremental renderer for new response
         self.incremental_renderer.reset();
@@ -118,29 +118,29 @@ impl LlmController {
             while let Some(event) = stream_rx.recv().await {
                 let app_event = match event {
                     LLMStreamEvent::Chunk(text) => {
-                        log::debug!("LLM chunk received: {} chars", text.len());
+                        tracing::debug!("LLM chunk received: {} chars", text.len());
                         AppBackgroundEvent::LlmChunk(text)
                     }
                     LLMStreamEvent::Complete => {
-                        log::info!("LLM stream completed");
+                        tracing::info!("LLM stream completed");
                         AppBackgroundEvent::LlmStreamComplete
                     }
                     LLMStreamEvent::CommandApproval { command, message } => {
-                        log::info!("LLM command approval requested: {}", command);
+                        tracing::info!("LLM command approval requested: {}", command);
                         AppBackgroundEvent::LlmCommandApproval { command, message }
                     }
                     LLMStreamEvent::Question { question, options } => {
-                        log::info!("LLM question received: {}", question);
+                        tracing::info!("LLM question received: {}", question);
                         AppBackgroundEvent::LlmQuestion { question, options }
                     }
                     LLMStreamEvent::Error(err) => {
-                        log::error!("LLM stream error: {}", err);
+                        tracing::error!("LLM stream error: {}", err);
                         AppBackgroundEvent::LlmError(err)
                     }
                 };
 
                 if let Err(e) = tx_forwarder.send(app_event) {
-                    log::error!("Failed to forward LLM event: {}", e);
+                    tracing::error!("Failed to forward LLM event: {}", e);
                     break;
                 }
             }
@@ -148,17 +148,17 @@ impl LlmController {
 
         // Spawn the actual streaming query
         runtime.spawn(async move {
-            log::info!("Background streaming task started for query: {}", query);
+            tracing::info!("Background streaming task started for query: {}", query);
 
             if let Err(e) = llm_client
                 .query_streaming(&query, stream_tx.clone(), cancel_token)
                 .await
             {
                 // Error already sent through channel in query_streaming
-                log::error!("LLM streaming query failed: {}", e);
+                tracing::error!("LLM streaming query failed: {}", e);
             }
 
-            log::info!("Background streaming task completed");
+            tracing::info!("Background streaming task completed");
         });
     }
 
@@ -173,7 +173,7 @@ impl LlmController {
         runtime.spawn(async move {
             tokio::select! {
                 _ = cancel_token.cancelled() => {
-                    log::info!("Background LLM answer run cancelled");
+                    tracing::info!("Background LLM answer run cancelled");
                 }
                 result = llm_client.resume_with_answer(&answer) => {
                     match result {
@@ -201,7 +201,7 @@ impl LlmController {
         runtime.spawn(async move {
             tokio::select! {
                 _ = cancel_token.cancelled() => {
-                    log::info!("Background LLM command output run cancelled");
+                    tracing::info!("Background LLM command output run cancelled");
                 }
                 result = llm_client.resume_with_command_output(&command, &output) => {
                     match result {
@@ -224,7 +224,7 @@ impl LlmController {
         runtime.spawn(async move {
             tokio::select! {
                 _ = cancel_token.cancelled() => {
-                    log::info!("Background LLM rejected run cancelled");
+                    tracing::info!("Background LLM rejected run cancelled");
                 }
                 result = llm_client.resume_rejected() => {
                     match result {
@@ -248,7 +248,7 @@ impl LlmController {
     /// Cancels the active LLM query if one exists.
     pub fn cancel(&mut self) {
         if let Some(token) = self.cancel_token.take() {
-            log::info!("Cancelling active LLM stream");
+            tracing::info!("Cancelling active LLM stream");
             token.cancel();
         }
     }
