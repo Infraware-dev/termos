@@ -25,17 +25,24 @@ mod state;
 mod terminal_renderer;
 mod tiles_manager;
 
+use std::collections::HashMap;
+use std::time::Instant;
+
 pub use behavior::TerminalBehavior;
 pub use clipboard::ClipboardManager;
+use egui::{Pos2, Rect, Sense, Vec2, ViewportCommand};
+use egui_tiles::Tree;
 pub use hitl_handler::{HitlAction, HitlHandler, HitlSubmission};
 pub use input_handler::{InputAction, InputHandler};
 pub use llm_controller::LlmController;
 pub use llm_event_handler::LlmEventHandler;
 pub use render::RenderState;
 pub use session_manager::{CloseResult, SessionManager};
+use smallvec::SmallVec;
 pub use state::AppState;
 pub use terminal_renderer::TerminalRenderer;
 pub use tiles_manager::TilesManager;
+use tokio::runtime::Runtime;
 
 use crate::config::{rendering, timing};
 use crate::input::{KeyboardHandler, TextSelection};
@@ -43,12 +50,6 @@ use crate::session::{SessionId, TerminalSession};
 use crate::state::AppMode;
 use crate::ui::scrollbar::ScrollAction;
 use crate::ui::{Scrollbar, Theme};
-use egui::{Pos2, Rect, Sense, Vec2, ViewportCommand};
-use egui_tiles::Tree;
-use smallvec::SmallVec;
-use std::collections::HashMap;
-use std::time::Instant;
-use tokio::runtime::Runtime;
 
 /// Events coming from background tasks (LLM, etc.)
 #[derive(Debug)]

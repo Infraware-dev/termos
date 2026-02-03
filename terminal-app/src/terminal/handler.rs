@@ -1,9 +1,10 @@
 //! VTE Perform trait implementation for terminal emulation.
 
-use super::cell::Color;
-use super::grid::TerminalGrid;
 use smallvec::SmallVec;
 use tracing::debug;
+
+use super::cell::Color;
+use super::grid::TerminalGrid;
 
 /// Terminal handler that implements vte::Perform to process escape sequences.
 #[derive(Debug)]

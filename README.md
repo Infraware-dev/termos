@@ -101,7 +101,7 @@ cargo build --workspace
 cargo test --workspace
 
 # Lint
-cargo fmt --all && cargo clippy --workspace
+cargo +nightly fmt --all && cargo clippy --workspace
 
 # Watch mode (ricompila automaticamente)
 cargo watch -x 'run -p infraware-backend'

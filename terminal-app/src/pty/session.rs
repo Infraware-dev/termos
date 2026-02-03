@@ -3,13 +3,15 @@
 //! Handles the lifecycle of a PTY session including the master/slave pair
 //! and the child process.
 
-use crate::pty::io::{PtyReader, PtyWriter};
-use anyhow::{Context, Result};
-use portable_pty::{Child, ExitStatus, MasterPty, PtyPair, PtySize};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+
+use anyhow::{Context, Result};
+use portable_pty::{Child, ExitStatus, MasterPty, PtyPair, PtySize};
 use tokio::sync::Mutex;
+
+use crate::pty::io::{PtyReader, PtyWriter};
 
 /// Configuration for spawning a PTY session.
 #[derive(Debug, Clone)]

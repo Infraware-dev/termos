@@ -3,9 +3,8 @@
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use tokio::sync::RwLock;
-
 use infraware_shared::{Message, ThreadId};
+use tokio::sync::RwLock;
 
 /// In-memory state store for threads and runs
 #[derive(Debug)]

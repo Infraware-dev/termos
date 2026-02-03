@@ -4,7 +4,8 @@ pub mod auth;
 pub mod health;
 pub mod threads;
 
-use axum::{Router, routing::post};
+use axum::Router;
+use axum::routing::post;
 
 use crate::state::AppState;
 

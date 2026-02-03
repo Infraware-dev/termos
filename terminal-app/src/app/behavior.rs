@@ -3,10 +3,11 @@
 //! Provides `TerminalBehavior` which implements the `egui_tiles::Behavior` trait
 //! for rendering and managing terminal panes in the split view.
 
-use super::{InfrawareApp, TilesManager};
-use crate::session::SessionId;
 use egui::Color32;
 use egui_tiles::{EditAction, Tiles, UiResponse};
+
+use super::{InfrawareApp, TilesManager};
+use crate::session::SessionId;
 
 /// Behavior implementation for egui_tiles.
 ///

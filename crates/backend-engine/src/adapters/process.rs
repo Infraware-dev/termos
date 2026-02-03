@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use infraware_shared::MessageEvent;
 use tokio::sync::Mutex;
 
 use crate::error::EngineError;
@@ -15,7 +16,6 @@ use crate::ipc::stdio::{StdioConfig, StdioTransport};
 use crate::traits::{AgenticEngine, EventStream};
 use crate::types::{HealthStatus, ResumeResponse};
 use crate::{AgentEvent, Interrupt, Message, MessageRole, RunInput, ThreadId};
-use infraware_shared::MessageEvent;
 
 /// Default timeout for operations (5 minutes)
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(300);

@@ -2,11 +2,11 @@ name: Rust CI
 
 on:
   pull_request:
-    branches: [main]
+    branches: [ main ]
     paths:
       - 'terminal-app/**'
   push:
-    branches: [main]
+    branches: [ main ]
     paths:
       - 'terminal-app/**'
 
@@ -22,11 +22,12 @@ jobs:
       run:
         working-directory: terminal-app
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
+          toolchain: nightly
           components: rustfmt
 
       - name: Check formatting
@@ -119,7 +120,7 @@ jobs:
         working-directory: terminal-app
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ ubuntu-latest, macos-latest ]
     steps:
       - uses: actions/checkout@v4
 

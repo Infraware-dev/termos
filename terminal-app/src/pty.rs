@@ -19,15 +19,14 @@ mod manager;
 mod session;
 mod traits;
 
-pub use io::{PtyReader, PtyWriter};
-pub use manager::PtyManager;
-pub use session::PtySession;
-
-pub use traits::PtyWrite;
+use std::ffi::OsStr;
 
 use anyhow::Result;
+pub use io::{PtyReader, PtyWriter};
+pub use manager::PtyManager;
 use portable_pty::{CommandBuilder, PtySize, PtySystem, native_pty_system};
-use std::ffi::OsStr;
+pub use session::PtySession;
+pub use traits::PtyWrite;
 
 /// Default PTY size matching typical terminal dimensions.
 pub const DEFAULT_PTY_SIZE: PtySize = PtySize {

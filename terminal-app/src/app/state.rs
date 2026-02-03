@@ -4,8 +4,9 @@
 //! including sessions, buffers, and control flags. This module is designed to be
 //! testable without egui dependencies.
 
-use crate::session::{SessionId, TerminalSession};
 use std::collections::HashMap;
+
+use crate::session::{SessionId, TerminalSession};
 
 /// Core application state holding sessions and control flags.
 ///

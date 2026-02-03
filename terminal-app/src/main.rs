@@ -19,9 +19,10 @@ mod state;
 mod terminal;
 mod ui;
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use app::InfrawareApp;
 use eframe::egui::{IconData, ViewportBuilder};
-use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Load the application icon from embedded PNG.
 fn load_icon() -> Option<IconData> {

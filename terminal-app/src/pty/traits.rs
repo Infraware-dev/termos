@@ -25,9 +25,10 @@ pub trait PtyWrite: Send + Sync {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
 
     /// Mock PTY writer for testing.
     struct MockPtyWriter {

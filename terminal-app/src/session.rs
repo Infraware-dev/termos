@@ -7,17 +7,18 @@
 //!
 //! Multiple sessions can run concurrently in split view.
 
+use std::sync::{Arc, mpsc};
+use std::time::Instant;
+
+use egui::Id as EguiId;
+use tokio::runtime::Handle;
+use tokio::sync::Mutex as TokioMutex;
+
 use crate::config::{pty as pty_config, rendering, size};
 use crate::input::{OutputCapture, PromptDetector, TextSelection};
 use crate::pty::{PtyManager, PtyReader, PtyWrite, PtyWriter};
 use crate::state::{AgentState, AppMode};
 use crate::terminal::TerminalHandler;
-use egui::Id as EguiId;
-use std::sync::Arc;
-use std::sync::mpsc;
-use std::time::Instant;
-use tokio::runtime::Handle;
-use tokio::sync::Mutex as TokioMutex;
 
 /// Unique identifier for a terminal session (used as pane ID in egui_tiles).
 pub type SessionId = usize;

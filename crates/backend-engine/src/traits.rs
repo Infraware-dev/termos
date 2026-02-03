@@ -5,10 +5,10 @@ use std::pin::Pin;
 
 use async_trait::async_trait;
 use futures::Stream;
+use infraware_shared::{AgentEvent, RunInput, ThreadId};
 
 use crate::error::EngineError;
 use crate::types::{HealthStatus, ResumeResponse};
-use infraware_shared::{AgentEvent, RunInput, ThreadId};
 
 /// Type alias for the event stream returned by runs
 pub type EventStream = Pin<Box<dyn Stream<Item = Result<AgentEvent, EngineError>> + Send>>;

@@ -1,11 +1,14 @@
 //! Health check endpoint
 
-use axum::{Json, extract::State, http::StatusCode, response::IntoResponse};
+use axum::Json;
+use axum::extract::State;
+use axum::http::StatusCode;
+use axum::response::IntoResponse;
+use infraware_engine::HealthStatus;
 use serde::Serialize;
 use utoipa::ToSchema;
 
 use crate::state::AppState;
-use infraware_engine::HealthStatus;
 
 /// Health check response
 #[derive(Debug, Serialize, ToSchema)]

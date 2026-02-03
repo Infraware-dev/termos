@@ -3,12 +3,14 @@
 //! Provides `SessionManager` for creating, closing, and initializing terminal sessions.
 //! This module is designed to be testable with minimal egui dependencies.
 
+use std::collections::HashMap;
+
+use egui_tiles::{TileId, Tree};
+
 use super::TilesManager;
 use super::state::AppState;
 use crate::config::timing;
 use crate::session::{SessionId, TerminalSession};
-use egui_tiles::{TileId, Tree};
-use std::collections::HashMap;
 
 /// Result of closing a session.
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -7,22 +7,23 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use axum::{Router, http::Method, response::IntoResponse, routing::get};
+use axum::Router;
+use axum::http::Method;
+use axum::response::IntoResponse;
+use axum::routing::get;
+use infraware_engine::AgenticEngine;
+use infraware_engine::adapters::{
+    HttpEngine, HttpEngineConfig, MockEngine, ProcessEngine, ProcessEngineConfig, Workflow,
+};
+#[cfg(feature = "rig")]
+use infraware_engine::adapters::{RigEngine, RigEngineConfig};
 use metrics_exporter_prometheus::{Matcher, PrometheusBuilder, PrometheusHandle};
 use tower_http::cors::{AllowOrigin, CorsLayer};
 use tower_http::request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer};
 use tower_http::trace::TraceLayer;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 use utoipa::OpenApi;
-
-use infraware_engine::{
-    AgenticEngine,
-    adapters::{HttpEngine, HttpEngineConfig, MockEngine, ProcessEngine, ProcessEngineConfig},
-};
-
-use infraware_engine::adapters::Workflow;
-#[cfg(feature = "rig")]
-use infraware_engine::adapters::{RigEngine, RigEngineConfig};
 
 mod auth_middleware;
 

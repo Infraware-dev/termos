@@ -3,13 +3,13 @@
 //! Provides `RenderState` which holds reusable buffers and font metrics
 //! for efficient terminal rendering.
 
+use egui::{Color32, FontFamily, FontId};
+
 use crate::config::rendering;
 use crate::input::SelectionPoint;
-use crate::terminal::cell::{Cell, Color};
-
 #[cfg(test)]
 use crate::terminal::cell::NamedColor;
-use egui::{Color32, FontFamily, FontId};
+use crate::terminal::cell::{Cell, Color};
 
 /// Reusable render buffers and font metrics.
 ///

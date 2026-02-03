@@ -1,6 +1,8 @@
 //! Authentication endpoint
 
-use axum::{Json, extract::State, http::HeaderMap};
+use axum::Json;
+use axum::extract::State;
+use axum::http::HeaderMap;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
 

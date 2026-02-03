@@ -1,22 +1,20 @@
 //! Thread and run endpoints
 
-use axum::{
-    Json,
-    extract::{Path, State},
-    response::{
-        Sse,
-        sse::{Event, KeepAlive},
-    },
-};
+use std::convert::Infallible;
+use std::time::Duration;
+
+use axum::Json;
+use axum::extract::{Path, State};
+use axum::response::Sse;
+use axum::response::sse::{Event, KeepAlive};
 use futures::{StreamExt, stream};
+use infraware_engine::{AgentEvent, ResumeResponse, RunInput};
+use infraware_shared::{EngineStatus, Interrupt, Message, MessageRole, ThreadId};
 use serde::{Deserialize, Serialize};
-use std::{convert::Infallible, time::Duration};
 use utoipa::ToSchema;
 
 use crate::error::ApiError;
 use crate::state::AppState;
-use infraware_engine::{AgentEvent, ResumeResponse, RunInput};
-use infraware_shared::{EngineStatus, Interrupt, Message, MessageRole, ThreadId};
 
 // === Input Validation Constants ===
 

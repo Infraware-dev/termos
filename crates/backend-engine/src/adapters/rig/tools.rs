@@ -12,14 +12,11 @@ mod shell;
 
 // Tool result types - used by orchestrator for HITL detection
 pub use ask_user::AskUserResult;
-pub use shell::ShellCommandResult;
-
 // Tool implementations - registered with agent via .tool()
 pub use ask_user::{AskUserArgs, AskUserTool};
-pub use shell::{ShellCommandArgs, ShellCommandTool};
-
 use infraware_shared::Interrupt;
 use serde::{Deserialize, Serialize};
+pub use shell::{ShellCommandArgs, ShellCommandResult, ShellCommandTool};
 
 /// Unified HITL marker that can represent any tool result requiring user interaction
 ///

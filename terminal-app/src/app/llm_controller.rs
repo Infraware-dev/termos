@@ -3,15 +3,16 @@
 //! Provides `LlmController` which manages LLM client lifecycle, query execution,
 //! response rendering, and background event channels.
 
+use std::sync::{Arc, mpsc};
+
+use tokio::runtime::Runtime;
+use tokio_util::sync::CancellationToken;
+
 use super::AppBackgroundEvent;
 use crate::auth::{AuthConfig, Authenticator, HttpAuthenticator};
 use crate::llm::{
     HttpLLMClient, IncrementalRenderer, LLMClientTrait, LLMStreamEvent, ResponseRenderer,
 };
-use std::sync::Arc;
-use std::sync::mpsc;
-use tokio::runtime::Runtime;
-use tokio_util::sync::CancellationToken;
 
 /// LLM client, response renderer, and background event channels.
 pub struct LlmController {

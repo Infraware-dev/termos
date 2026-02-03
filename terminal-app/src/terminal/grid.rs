@@ -1,7 +1,8 @@
 //! Terminal grid for storing and manipulating terminal state.
 
-use super::cell::{Cell, CellAttrs, Color, NamedColor};
 use std::collections::VecDeque;
+
+use super::cell::{Cell, CellAttrs, Color, NamedColor};
 
 /// Maximum lines in scrollback buffer
 const MAX_SCROLLBACK: usize = 10_000;

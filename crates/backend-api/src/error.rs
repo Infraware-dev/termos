@@ -2,15 +2,12 @@
 //!
 //! Provides structured error responses with error codes for easier client-side handling.
 
-use axum::{
-    Json,
-    http::StatusCode,
-    response::{IntoResponse, Response},
-};
+use axum::Json;
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
+use infraware_engine::EngineError;
 use serde::Serialize;
 use serde_json::json;
-
-use infraware_engine::EngineError;
 
 /// Error codes for API responses
 ///

@@ -1,7 +1,8 @@
 mod mock;
 
-use serde::Deserialize;
 use std::collections::HashMap;
+
+use serde::Deserialize;
 
 pub use self::mock::mock_workflow;
 

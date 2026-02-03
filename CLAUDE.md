@@ -4,13 +4,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**Infraware** is a Rust monorepo containing an AI-powered terminal emulator and its backend services. The terminal combines VTE-based terminal emulation with an integrated LLM agent for DevOps assistance.
+**Infraware** is a Rust monorepo containing an AI-powered terminal emulator and its backend services. The terminal
+combines VTE-based terminal emulation with an integrated LLM agent for DevOps assistance.
 
 **Key feature**: Prefix any command with `?` for natural language queries (e.g., `? how do I revert a git commit`)
 
 **Tech Stack**: Rust 2024 edition, workspace with 4 members, egui/eframe, axum, tokio
 
 **Prerequisites** (Linux):
+
 ```bash
 sudo apt install -y pkg-config libssl-dev libxcb-shape0-dev libxcb-xfixes0-dev
 ```
@@ -40,7 +42,7 @@ cargo test -- --nocapture            # With output
 cargo watch -x 'run -p infraware-backend'    # Requires: cargo install cargo-watch
 
 # Linting (CI enforces both)
-cargo fmt --all && cargo clippy --workspace
+cargo +nightly fmt --all && cargo clippy --workspace # Always format with nightly to support rustfmt.toml rules
 cargo clippy --workspace -- -D warnings    # CI-strict mode (warnings = errors)
 
 # Coverage (CI enforces 60% minimum, excluding UI/PTY/VTE modules)
@@ -97,10 +99,14 @@ curl -X POST http://localhost:8080/threads -H "Content-Type: application/json" -
 ## Key Crates
 
 ### infraware-shared
-Shared API contract types: `LLMQueryResult` (Complete/CommandApproval/Question), `AgentEvent` (SSE events), `Interrupt` (HITL), `Message`, `ThreadId`, `RunInput`
+
+Shared API contract types: `LLMQueryResult` (Complete/CommandApproval/Question), `AgentEvent` (SSE events),
+`Interrupt` (HITL), `Message`, `ThreadId`, `RunInput`
 
 ### infraware-engine
+
 Engine abstraction with pluggable backends:
+
 - `AgenticEngine` trait: `create_thread()`, `stream_run()`, `resume_run()`, `health_check()`
 - `RigEngine` - Native Rust agent using rig-rs + Anthropic Claude API (primary engine, HITL via tool execution)
 - `MockEngine` - In-memory pattern matching (testing, no external dependencies)
@@ -108,7 +114,9 @@ Engine abstraction with pluggable backends:
 - `ProcessEngine` - Subprocess bridge with JSON-RPC over stdio (alternative for custom bridges)
 
 ### infraware-backend
+
 Axum REST/SSE API:
+
 - `GET /health` - Health check
 - `GET /metrics` - Prometheus metrics
 - `GET /api-docs/openapi.json` - OpenAPI spec
@@ -117,15 +125,19 @@ Axum REST/SSE API:
 - `POST /threads/{id}/runs/stream` - Stream run with SSE
 
 ### infraware-terminal
-Terminal emulator with LLM integration. The main `app.rs` has been decomposed into focused submodules following a handler pattern:
+
+Terminal emulator with LLM integration. The main `app.rs` has been decomposed into focused submodules following a
+handler pattern:
 
 **Core modules:**
+
 - `app.rs` - Main `InfrawareApp` struct, eframe::App implementation, top-level update loop
 - `app/state.rs` - Core application state struct (sessions map, buffers, flags)
 - `state.rs` - `AppMode` state machine and `AgentState` (per-session mode tracking)
 - `session.rs` - `TerminalSession` struct (each tab/pane has independent PTY, VTE parser, state)
 
 **Handler modules (in `app/`):**
+
 - `input_handler.rs` - Keyboard input processing and command classification
 - `hitl_handler.rs` - Human-in-the-loop interaction handling (approval/answer flows)
 - `llm_controller.rs` - LLM query management and background event dispatch
@@ -138,6 +150,7 @@ Terminal emulator with LLM integration. The main `app.rs` has been decomposed in
 - `behavior.rs` - egui_tiles `Behavior` trait implementation
 
 **Other directories:**
+
 - `terminal/` - VTE parser (`handler.rs`), grid (`grid.rs`), cell attributes (`cell.rs`)
 - `pty/` - PTY session, async I/O, DI traits
 - `llm/` - HTTP/SSE client, markdown→ANSI renderer (syntect highlighting)
@@ -147,9 +160,12 @@ Terminal emulator with LLM integration. The main `app.rs` has been decomposed in
 - `ui/` - egui helpers, theme, scrollbar
 - `config.rs` - Constants (timing, rendering, sizes)
 
-**Tab/Split View Architecture**: Uses `egui_tiles` for window management. Each `TerminalSession` represents an independent terminal pane with its own PTY process, VTE parser, and app mode state. Tabs are created at root level; splits can nest within tabs.
+**Tab/Split View Architecture**: Uses `egui_tiles` for window management. Each `TerminalSession` represents an
+independent terminal pane with its own PTY process, VTE parser, and app mode state. Tabs are created at root level;
+splits can nest within tabs.
 
 ### State Machine Flow
+
 ```
 Normal
   │
@@ -168,45 +184,48 @@ Normal
                                 └──► Normal (complete, no further action)
 ```
 
-**ExecutingCommand State**: When user approves a shell command in RigEngine, the terminal enters ExecutingCommand to capture output. After command execution, the `needs_continuation` flag controls whether the agent continues reasoning with the output or completes the interaction.
+**ExecutingCommand State**: When user approves a shell command in RigEngine, the terminal enters ExecutingCommand to
+capture output. After command execution, the `needs_continuation` flag controls whether the agent continues reasoning
+with the output or completes the interaction.
 
 ## Terminal Quick Reference
 
-| Task | Location |
-|------|----------|
-| Add keyboard shortcut | `terminal-app/src/input/keyboard.rs` |
-| Modify terminal rendering | `terminal-app/src/app/terminal_renderer.rs` and `app/render.rs` |
-| Add VTE escape handler | `terminal-app/src/terminal/handler.rs` → `csi_dispatch()` |
-| Modify LLM query flow | `terminal-app/src/app/llm_controller.rs` and `app/llm_event_handler.rs` |
-| Handle HITL interrupts | `terminal-app/src/app/hitl_handler.rs` |
-| Add tab/split behavior | `terminal-app/src/app/tiles_manager.rs` |
-| Modify session lifecycle | `terminal-app/src/app/session_manager.rs` |
-| Modify application state | `terminal-app/src/app/state.rs` (AppState) or `state.rs` (AppMode) |
-| Handle keyboard input | `terminal-app/src/app/input_handler.rs` |
-| Modify clipboard behavior | `terminal-app/src/app/clipboard.rs` |
-| Change theme colors | `terminal-app/src/ui/theme.rs` |
-| Change config constants | `terminal-app/src/config.rs` |
+| Task                      | Location                                                                |
+|---------------------------|-------------------------------------------------------------------------|
+| Add keyboard shortcut     | `terminal-app/src/input/keyboard.rs`                                    |
+| Modify terminal rendering | `terminal-app/src/app/terminal_renderer.rs` and `app/render.rs`         |
+| Add VTE escape handler    | `terminal-app/src/terminal/handler.rs` → `csi_dispatch()`               |
+| Modify LLM query flow     | `terminal-app/src/app/llm_controller.rs` and `app/llm_event_handler.rs` |
+| Handle HITL interrupts    | `terminal-app/src/app/hitl_handler.rs`                                  |
+| Add tab/split behavior    | `terminal-app/src/app/tiles_manager.rs`                                 |
+| Modify session lifecycle  | `terminal-app/src/app/session_manager.rs`                               |
+| Modify application state  | `terminal-app/src/app/state.rs` (AppState) or `state.rs` (AppMode)      |
+| Handle keyboard input     | `terminal-app/src/app/input_handler.rs`                                 |
+| Modify clipboard behavior | `terminal-app/src/app/clipboard.rs`                                     |
+| Change theme colors       | `terminal-app/src/ui/theme.rs`                                          |
+| Change config constants   | `terminal-app/src/config.rs`                                            |
 
 ## Keyboard Shortcuts
 
-| Shortcut | Action | Platform |
-|----------|--------|----------|
-| `Cmd+T` / `Ctrl+Shift+T` | New tab | macOS / Linux |
-| `Cmd+W` / `Ctrl+Shift+W` | Close tab | macOS / Linux |
-| `Ctrl+Tab` | Next tab | All |
-| `Ctrl+Shift+Tab` | Previous tab | All |
-| `Cmd+Shift+H` / `Ctrl+Shift+H` | Split horizontal | macOS / Linux |
-| `Cmd+Shift+J` / `Ctrl+Shift+J` | Split vertical | macOS / Linux |
-| `Cmd+C` / `Ctrl+Shift+C` | Copy | macOS / Linux |
-| `Cmd+V` / `Ctrl+Shift+V` | Paste | macOS / Linux |
-| `Ctrl+C` | SIGINT (interrupt) | All |
-| `Ctrl+D` | EOF | All |
-| `Ctrl+L` | Clear screen | All |
-| `Ctrl+Shift+/` | Enter LLM mode | All |
+| Shortcut                       | Action             | Platform      |
+|--------------------------------|--------------------|---------------|
+| `Cmd+T` / `Ctrl+Shift+T`       | New tab            | macOS / Linux |
+| `Cmd+W` / `Ctrl+Shift+W`       | Close tab          | macOS / Linux |
+| `Ctrl+Tab`                     | Next tab           | All           |
+| `Ctrl+Shift+Tab`               | Previous tab       | All           |
+| `Cmd+Shift+H` / `Ctrl+Shift+H` | Split horizontal   | macOS / Linux |
+| `Cmd+Shift+J` / `Ctrl+Shift+J` | Split vertical     | macOS / Linux |
+| `Cmd+C` / `Ctrl+Shift+C`       | Copy               | macOS / Linux |
+| `Cmd+V` / `Ctrl+Shift+V`       | Paste              | macOS / Linux |
+| `Ctrl+C`                       | SIGINT (interrupt) | All           |
+| `Ctrl+D`                       | EOF                | All           |
+| `Ctrl+L`                       | Clear screen       | All           |
+| `Ctrl+Shift+/`                 | Enter LLM mode     | All           |
 
 ## Configuration
 
 Environment variables (via `.env` or shell):
+
 ```bash
 # Terminal client
 INFRAWARE_BACKEND_URL="http://localhost:8080"
@@ -228,6 +247,7 @@ RUST_LOG="infraware_backend=debug"  # tracing level
 ## Code Style
 
 ### Rust Guidelines (Microsoft Pragmatic)
+
 - All public types implement `Debug` (custom impl for sensitive data)
 - Use `#[expect]` instead of `#[allow]` when lint suppression should be revisited
 - Panic for programming errors, `Result` for expected failures
@@ -235,12 +255,14 @@ RUST_LOG="infraware_backend=debug"  # tracing level
 - Prefer splitting crates over monoliths
 
 ### Git Commits
+
 - Format: `<type>: <description>` (max 50 chars, imperative mood)
 - Types: `feat`, `fix`, `refactor`, `docs`, `test`, `chore`, `perf`, `style`
 - **NO** Co-Authored-By, emojis, or AI attribution
 - Run `cargo fmt` before committing
 
 ### Error Handling
+
 - Use `anyhow::Result` for application code
 - Use `thiserror` for library error types
 - Safe indexing: `.first()`, `.get()` instead of `[0]`
@@ -248,6 +270,7 @@ RUST_LOG="infraware_backend=debug"  # tracing level
 ## Workspace Dependencies
 
 Shared in root `Cargo.toml` under `[workspace.dependencies]`. Use `{ workspace = true }` to inherit:
+
 - Async: `tokio`, `async-trait`, `futures`
 - HTTP: `axum`, `tower`, `reqwest`
 - Serde: `serde`, `serde_json`
@@ -257,6 +280,7 @@ Shared in root `Cargo.toml` under `[workspace.dependencies]`. Use `{ workspace =
 ## Adding New Components
 
 ### New Engine Adapter
+
 1. Create `crates/backend-engine/src/adapters/your_engine.rs`
 2. Implement `AgenticEngine` trait:
    ```rust
@@ -272,6 +296,7 @@ Shared in root `Cargo.toml` under `[workspace.dependencies]`. Use `{ workspace =
 4. Add match arm in `backend-api/src/main.rs` for `ENGINE_TYPE`
 
 ### New API Types
+
 1. Add to `crates/shared/src/models.rs` or `events.rs`
 2. Export from `crates/shared/src/lib.rs`
 
@@ -279,12 +304,13 @@ Shared in root `Cargo.toml` under `[workspace.dependencies]`. Use `{ workspace =
 
 When writing Rust code, these skills are automatically applied:
 
-| Skill | When to Apply |
-|-------|---------------|
-| `microsoft-rust-guidelines` | All Rust code (safety, naming, panics, Debug impl) |
-| `rig-rs` | Code using rig-rs (agents, tools, embeddings, completions, extractors, vector stores, MCP) |
+| Skill                       | When to Apply                                                                              |
+|-----------------------------|--------------------------------------------------------------------------------------------|
+| `microsoft-rust-guidelines` | All Rust code (safety, naming, panics, Debug impl)                                         |
+| `rig-rs`                    | Code using rig-rs (agents, tools, embeddings, completions, extractors, vector stores, MCP) |
 
 **rig-rs key patterns:**
+
 - Always set `max_tokens` for Anthropic
 - Use `schemars::JsonSchema` for tool parameter schemas
 - Use `Option<T>` for extractor fields
@@ -300,8 +326,9 @@ The RigEngine uses **rig-rs** to build a native Rust agent with Anthropic Claude
 1. **Tool Registration**: ShellCommandTool and AskUserTool are registered with the agent via `.tool()`
 2. **PromptHook Interception**: LLM tool calls are intercepted via `PromptHook::on_tool_call()` for HITL approval
 3. **needs_continuation Flag**: Distinguishes command execution intent:
-   - `false` (default): Command output IS the answer (e.g., `ls` → list files directly)
-   - `true`: Command output is INPUT for agent processing (e.g., `uname -s` → then OS-specific instructions)
+
+- `false` (default): Command output IS the answer (e.g., `ls` → list files directly)
+- `true`: Command output is INPUT for agent processing (e.g., `uname -s` → then OS-specific instructions)
 
 ### Files Involved
 
@@ -313,13 +340,16 @@ The RigEngine uses **rig-rs** to build a native Rust agent with Anthropic Claude
 ## CI Pipeline
 
 CI runs on PRs to `main` and pushes to `main` (only when `terminal-app/**` changes):
+
 1. **Format Check**: `cargo fmt --all --check`
 2. **Clippy**: `cargo clippy --all-targets --all-features -- -D warnings`
-3. **Test Coverage**: 75% minimum threshold (excludes `main.rs`, `app/behavior.rs`, `app/terminal_renderer.rs`, `app/render.rs`, `ui/`)
+3. **Test Coverage**: 75% minimum threshold (excludes `main.rs`, `app/behavior.rs`, `app/terminal_renderer.rs`,
+   `app/render.rs`, `ui/`)
 4. **Build**: Cross-platform (ubuntu-latest, macos-latest)
 
 ## Known Issues
 
 ### Command Injection Risk
+
 Location: `terminal-app/src/app.rs` (`submit_hitl_input`)
 LLM-suggested commands sent to PTY without validation. Mitigation TODO: command blocklist, dangerous command warnings.

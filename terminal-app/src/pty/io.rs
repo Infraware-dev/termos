@@ -3,13 +3,15 @@
 //! Provides wrappers around the synchronous PTY reader/writer,
 //! using a dedicated reader thread with sync channel for non-blocking operation.
 
-use super::traits::PtyWrite;
-use anyhow::{Context, Result};
 use std::fmt;
 use std::io::{Read, Write};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::SyncSender;
+
+use anyhow::{Context, Result};
+
+use super::traits::PtyWrite;
 
 /// Reader for PTY output.
 ///
@@ -189,9 +191,10 @@ impl PtyWrite for PtyWriter {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use std::io::Cursor;
     use std::sync::mpsc;
+
+    use super::*;
 
     #[test]
     fn test_pty_reader_creation() {

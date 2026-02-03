@@ -3,8 +3,9 @@
 //! Handles interaction (dragging, clicking, auto-repeat) and visual representation
 //! of the terminal scrollbar.
 
-use egui::{Color32, Painter, Pos2, Rect, Stroke, Ui};
 use std::time::Instant;
+
+use egui::{Color32, Painter, Pos2, Rect, Stroke, Ui};
 
 /// Action requested by the scrollbar interaction.
 #[derive(Debug, Clone, Copy, PartialEq)]

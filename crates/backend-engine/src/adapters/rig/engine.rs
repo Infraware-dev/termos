@@ -3,17 +3,15 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use infraware_shared::{RunInput, ThreadId};
 use rig::providers::anthropic;
-
-use crate::error::EngineError;
-use crate::traits::{AgenticEngine, EventStream};
-use crate::types::{HealthStatus, ResumeResponse};
 
 use super::config::RigEngineConfig;
 use super::orchestrator::{create_resume_stream, create_run_stream};
 use super::state::StateStore;
-
-use infraware_shared::{RunInput, ThreadId};
+use crate::error::EngineError;
+use crate::traits::{AgenticEngine, EventStream};
+use crate::types::{HealthStatus, ResumeResponse};
 
 /// Rig-based agentic engine using rig-core
 ///

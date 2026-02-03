@@ -3,11 +3,13 @@
 //! This module provides a high-level API for managing a persistent shell (bash/zsh)
 //! that runs throughout the application's lifetime.
 
-use super::io::{PtyReader, PtyWriter};
-use super::{DEFAULT_PTY_SIZE, Pty, PtySession};
+use std::sync::Arc;
+
 use anyhow::{Context, Result};
 use portable_pty::PtySize;
-use std::sync::Arc;
+
+use super::io::{PtyReader, PtyWriter};
+use super::{DEFAULT_PTY_SIZE, Pty, PtySession};
 
 /// Shell preference - tries zsh first, then bash.
 const SHELL_PRIORITY: &[&str] = &["zsh", "bash", "sh"];

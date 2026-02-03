@@ -6,6 +6,7 @@
 use std::sync::Arc;
 
 use async_stream::stream;
+use infraware_shared::{AgentEvent, Message, MessageEvent, MessageRole, RunInput};
 use rig::agent::{Agent, CancelSignal, PromptHook};
 use rig::client::CompletionClient;
 use rig::completion::{CompletionModel, CompletionResponse, Prompt};
@@ -13,15 +14,12 @@ use rig::providers::anthropic;
 use rig::tool::Tool;
 use tokio::sync::mpsc;
 
-use crate::error::EngineError;
-use crate::traits::EventStream;
-use crate::types::ResumeResponse;
-
 use super::config::RigEngineConfig;
 use super::state::{PendingInterrupt, ResumeContext, StateStore};
 use super::tools::{AskUserArgs, AskUserTool, HitlMarker, ShellCommandArgs, ShellCommandTool};
-
-use infraware_shared::{AgentEvent, Message, MessageEvent, MessageRole, RunInput};
+use crate::error::EngineError;
+use crate::traits::EventStream;
+use crate::types::ResumeResponse;
 
 /// Safely truncate a UTF-8 string to at most `max_bytes` bytes,
 /// ensuring the result ends at a valid char boundary.
@@ -379,6 +377,7 @@ fn validate_command(command: &str) -> Result<(), String> {
 /// Check if sudo requires a password (passwordless sudo not available)
 async fn check_sudo_password_required() -> bool {
     use std::process::Stdio;
+
     use tokio::process::Command;
     use tokio::time::{Duration, timeout};
 
@@ -409,6 +408,7 @@ async fn check_sudo_password_required() -> bool {
 /// is required and returns `SudoPasswordRequired` if so.
 async fn execute_command(command: &str, timeout_secs: u64) -> CommandExecutionResult {
     use std::process::Stdio;
+
     use tokio::process::Command;
     use tokio::time::{Duration, timeout};
 
@@ -486,6 +486,7 @@ async fn execute_command_with_sudo_password(
     timeout_secs: u64,
 ) -> String {
     use std::process::Stdio;
+
     use tokio::io::AsyncWriteExt;
     use tokio::process::Command;
     use tokio::time::{Duration, timeout};

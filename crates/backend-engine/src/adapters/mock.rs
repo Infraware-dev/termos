@@ -2,13 +2,14 @@
 
 mod workflow;
 
-use async_stream::stream;
-use async_trait::async_trait;
-use futures::stream as futures_stream;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
+
+use async_stream::stream;
+use async_trait::async_trait;
+use futures::stream as futures_stream;
 use tokio::sync::RwLock;
 
 use crate::adapters::mock::workflow::Playbook;
@@ -807,8 +808,9 @@ impl AgenticEngine for MockEngine {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use futures::StreamExt;
+
+    use super::*;
 
     #[tokio::test]
     async fn test_create_thread() {

@@ -16,10 +16,9 @@ mod types;
 pub mod ipc;
 
 pub use error::EngineError;
-pub use traits::{AgenticEngine, EventStream};
-pub use types::{HealthStatus, ResumeResponse};
-
 // Re-export shared types for convenience
 pub use infraware_shared::{
     AgentEvent, Interrupt, LLMQueryResult, Message, MessageRole, RunInput, ThreadId,
 };
+pub use traits::{AgenticEngine, EventStream};
+pub use types::{HealthStatus, ResumeResponse};

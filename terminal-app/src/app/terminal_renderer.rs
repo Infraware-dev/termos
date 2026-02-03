@@ -3,6 +3,8 @@
 //! Provides `TerminalRenderer` which handles the pure rendering phase
 //! of terminal display, separated from input handling.
 
+use egui::{Color32, Painter, Pos2, Rect};
+
 use super::TimingState;
 use super::render::{RenderState, RowRenderContext};
 use super::state::AppState;
@@ -11,7 +13,6 @@ use crate::ui::{
     SPINNER_FRAMES, Theme, render_backgrounds, render_cursor, render_decorations, render_scrollbar,
     render_text_runs_buffered,
 };
-use egui::{Color32, Painter, Pos2, Rect};
 
 /// Handles pure terminal rendering (no input mutation).
 ///

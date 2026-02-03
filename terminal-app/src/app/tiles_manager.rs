@@ -3,9 +3,11 @@
 //! Provides `TilesManager` for managing terminal pane splits and tabs.
 //! This module encapsulates egui_tiles operations.
 
-use crate::session::SessionId;
-use egui_tiles::{Container, LinearDir, Tile, TileId, Tiles, Tree};
 use std::collections::HashMap;
+
+use egui_tiles::{Container, LinearDir, Tile, TileId, Tiles, Tree};
+
+use crate::session::SessionId;
 
 /// Manages egui_tiles tree for split views and tabs.
 ///
