@@ -5,7 +5,9 @@
 
 use super::AppBackgroundEvent;
 use crate::auth::{AuthConfig, Authenticator, HttpAuthenticator};
-use crate::llm::{HttpLLMClient, LLMClientTrait, ResponseRenderer};
+use crate::llm::{
+    HttpLLMClient, IncrementalRenderer, LLMClientTrait, LLMStreamEvent, ResponseRenderer,
+};
 use std::sync::Arc;
 use std::sync::mpsc;
 use tokio::runtime::Runtime;
@@ -15,8 +17,10 @@ use tokio_util::sync::CancellationToken;
 pub struct LlmController {
     /// LLM client for natural language queries
     pub client: Arc<dyn LLMClientTrait>,
-    /// Response renderer (markdown → ANSI)
+    /// Response renderer (markdown → ANSI) for non-streaming responses
     pub response_renderer: ResponseRenderer,
+    /// Incremental renderer for streaming responses
+    pub incremental_renderer: IncrementalRenderer,
     /// Channel for background events (sender)
     bg_event_tx: mpsc::Sender<AppBackgroundEvent>,
     /// Channel for background events (receiver)
@@ -29,6 +33,7 @@ impl std::fmt::Debug for LlmController {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("LlmController")
             .field("client", &self.client)
+            .field("incremental_renderer", &self.incremental_renderer)
             .field("cancel_token", &self.cancel_token.is_some())
             .finish()
     }
@@ -45,6 +50,7 @@ impl LlmController {
         Self {
             client: llm_client,
             response_renderer: ResponseRenderer::new(),
+            incremental_renderer: IncrementalRenderer::new(),
             bg_event_tx,
             bg_event_rx,
             cancel_token: None,
@@ -87,9 +93,15 @@ impl LlmController {
         }
     }
 
-    /// Starts an LLM query in a background task.
+    /// Starts an LLM query in a background task with streaming output.
+    ///
+    /// The query runs in the background and emits `LlmChunk` events as text arrives,
+    /// followed by either `LlmStreamComplete`, `LlmCommandApproval`, `LlmQuestion`, or `LlmError`.
     pub fn start_query(&mut self, runtime: &Runtime, query: String) {
-        log::info!("Starting LLM query: {}", query);
+        log::info!("Starting streaming LLM query: {}", query);
+
+        // Reset incremental renderer for new response
+        self.incremental_renderer.reset();
 
         let llm_client = self.client.clone();
         let tx = self.bg_event_tx.clone();
@@ -97,24 +109,56 @@ impl LlmController {
         let cancel_token = CancellationToken::new();
         self.cancel_token = Some(cancel_token.clone());
 
-        runtime.spawn(async move {
-            log::info!("Background task started for query: {}", query);
+        // Create tokio channel for streaming events
+        let (stream_tx, mut stream_rx) = tokio::sync::mpsc::channel::<LLMStreamEvent>(32);
 
-            match llm_client.query_cancellable(&query, cancel_token).await {
-                Ok(result) => {
-                    log::info!("LLM query succeeded, sending result to channel");
-                    if let Err(e) = tx.send(AppBackgroundEvent::LlmResult(result)) {
-                        log::error!("Failed to send LLM result to channel: {}", e);
+        // Spawn task to forward streaming events to app channel
+        let tx_forwarder = tx.clone();
+        runtime.spawn(async move {
+            while let Some(event) = stream_rx.recv().await {
+                let app_event = match event {
+                    LLMStreamEvent::Chunk(text) => {
+                        log::debug!("LLM chunk received: {} chars", text.len());
+                        AppBackgroundEvent::LlmChunk(text)
                     }
-                }
-                Err(e) => {
-                    log::error!("LLM query failed: {}", e);
-                    if let Err(send_err) = tx.send(AppBackgroundEvent::LlmError(e.to_string())) {
-                        log::error!("Failed to send error to channel: {}", send_err);
+                    LLMStreamEvent::Complete => {
+                        log::info!("LLM stream completed");
+                        AppBackgroundEvent::LlmStreamComplete
                     }
+                    LLMStreamEvent::CommandApproval { command, message } => {
+                        log::info!("LLM command approval requested: {}", command);
+                        AppBackgroundEvent::LlmCommandApproval { command, message }
+                    }
+                    LLMStreamEvent::Question { question, options } => {
+                        log::info!("LLM question received: {}", question);
+                        AppBackgroundEvent::LlmQuestion { question, options }
+                    }
+                    LLMStreamEvent::Error(err) => {
+                        log::error!("LLM stream error: {}", err);
+                        AppBackgroundEvent::LlmError(err)
+                    }
+                };
+
+                if let Err(e) = tx_forwarder.send(app_event) {
+                    log::error!("Failed to forward LLM event: {}", e);
+                    break;
                 }
             }
-            log::info!("Background task completed");
+        });
+
+        // Spawn the actual streaming query
+        runtime.spawn(async move {
+            log::info!("Background streaming task started for query: {}", query);
+
+            if let Err(e) = llm_client
+                .query_streaming(&query, stream_tx.clone(), cancel_token)
+                .await
+            {
+                // Error already sent through channel in query_streaming
+                log::error!("LLM streaming query failed: {}", e);
+            }
+
+            log::info!("Background streaming task completed");
         });
     }
 

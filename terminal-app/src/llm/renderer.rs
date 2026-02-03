@@ -115,7 +115,7 @@ impl ResponseRenderer {
     }
 
     /// Highlight code with syntax highlighting
-    fn highlight_code(&self, lines: &[String], lang: &str) -> Vec<String> {
+    pub fn highlight_code(&self, lines: &[String], lang: &str) -> Vec<String> {
         // Find syntax definition
         let syntax = self
             .syntax_set

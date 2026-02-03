@@ -87,6 +87,33 @@ pub enum LLMQueryResult {
     },
 }
 
+/// Streaming events emitted during LLM query processing.
+///
+/// These events allow incremental display of LLM responses as they arrive.
+#[derive(Debug, Clone)]
+pub enum LLMStreamEvent {
+    /// Incremental text content chunk
+    Chunk(String),
+    /// Stream finished successfully
+    Complete,
+    /// LLM wants to execute a command (HITL interrupt)
+    CommandApproval {
+        /// The command to execute
+        command: String,
+        /// Message describing why the command is needed
+        message: String,
+    },
+    /// LLM is asking a question (HITL interrupt)
+    Question {
+        /// The question being asked
+        question: String,
+        /// Optional predefined choices
+        options: Option<Vec<String>>,
+    },
+    /// An error occurred
+    Error(String),
+}
+
 impl LLMQueryResult {
     /// Returns the response text if Complete, or None otherwise
     #[cfg(test)]
@@ -173,6 +200,45 @@ pub trait LLMClientTrait: Send + Sync + std::fmt::Debug {
     ) -> Result<LLMQueryResult> {
         // Default: ignore cancellation token
         self.query(text).await
+    }
+
+    /// Query the LLM with streaming output.
+    ///
+    /// Emits `LLMStreamEvent` variants as chunks arrive, allowing incremental display.
+    /// The stream ends with either `Complete`, `CommandApproval`, `Question`, or `Error`.
+    ///
+    /// Default implementation: falls back to non-streaming query.
+    async fn query_streaming(
+        &self,
+        text: &str,
+        chunk_tx: tokio::sync::mpsc::Sender<LLMStreamEvent>,
+        cancel_token: CancellationToken,
+    ) -> Result<()> {
+        // Default: fall back to non-streaming query
+        match self.query_cancellable(text, cancel_token).await {
+            Ok(LLMQueryResult::Complete(response)) => {
+                // Emit the full response as a single chunk
+                let _ = chunk_tx.send(LLMStreamEvent::Chunk(response)).await;
+                let _ = chunk_tx.send(LLMStreamEvent::Complete).await;
+                Ok(())
+            }
+            Ok(LLMQueryResult::CommandApproval { command, message }) => {
+                let _ = chunk_tx
+                    .send(LLMStreamEvent::CommandApproval { command, message })
+                    .await;
+                Ok(())
+            }
+            Ok(LLMQueryResult::Question { question, options }) => {
+                let _ = chunk_tx
+                    .send(LLMStreamEvent::Question { question, options })
+                    .await;
+                Ok(())
+            }
+            Err(e) => {
+                let _ = chunk_tx.send(LLMStreamEvent::Error(e.to_string())).await;
+                Err(e)
+            }
+        }
     }
 }
 
@@ -482,6 +548,223 @@ impl HttpLLMClient {
             }
             None => Ok(StreamResult::Complete(result)),
         }
+    }
+
+    /// Parse SSE stream with streaming output via channel.
+    ///
+    /// Emits chunks as they arrive for real-time display.
+    async fn parse_sse_stream_streaming(
+        &self,
+        response: reqwest::Response,
+        cancel_token: CancellationToken,
+        chunk_tx: tokio::sync::mpsc::Sender<LLMStreamEvent>,
+    ) -> Result<()> {
+        let mut last_content = String::new();
+        let mut stream = response.bytes_stream();
+        let mut current_event: Option<String> = None;
+        let mut buffer = String::new();
+        let mut chunk_count: u32 = 0;
+        let stream_start = std::time::Instant::now();
+
+        log::info!("SSE streaming started, emitting chunks in real-time...");
+
+        while let Some(chunk_result) = stream.next().await {
+            // Check for cancellation
+            if cancel_token.is_cancelled() {
+                log::info!(
+                    "SSE streaming cancelled by user after {} chunks",
+                    chunk_count
+                );
+                let _ = chunk_tx
+                    .send(LLMStreamEvent::Error("Query cancelled by user".to_string()))
+                    .await;
+                anyhow::bail!("Query cancelled by user");
+            }
+
+            match chunk_result {
+                Ok(chunk) => {
+                    chunk_count += 1;
+                    let text = String::from_utf8_lossy(&chunk);
+                    log::debug!(
+                        "SSE streaming chunk #{} received ({} bytes)",
+                        chunk_count,
+                        chunk.len()
+                    );
+                    buffer.push_str(&text);
+
+                    // Process complete lines from buffer
+                    while let Some(newline_pos) = buffer.find('\n') {
+                        let line = buffer[..newline_pos].trim_end().to_string();
+                        buffer = buffer[newline_pos + 1..].to_string();
+
+                        if line.is_empty() {
+                            continue;
+                        }
+
+                        // Parse SSE line
+                        if let Some(event_type) = line.strip_prefix("event: ") {
+                            current_event = Some(event_type.trim().to_string());
+                        } else if let Some(data) = line.strip_prefix("data: ")
+                            && let Some(ref event) = current_event
+                        {
+                            match self
+                                .handle_sse_event_streaming(
+                                    event,
+                                    data,
+                                    &mut last_content,
+                                    &chunk_tx,
+                                )
+                                .await
+                            {
+                                Ok(Some(interrupt)) => {
+                                    // Emit interrupt event and return
+                                    match interrupt {
+                                        InterruptData::CommandApproval { command, message } => {
+                                            let _ = chunk_tx
+                                                .send(LLMStreamEvent::CommandApproval {
+                                                    command,
+                                                    message,
+                                                })
+                                                .await;
+                                        }
+                                        InterruptData::Question { question, options } => {
+                                            let _ = chunk_tx
+                                                .send(LLMStreamEvent::Question {
+                                                    question,
+                                                    options,
+                                                })
+                                                .await;
+                                        }
+                                    }
+                                    return Ok(());
+                                }
+                                Ok(None) => {}
+                                Err(e) => {
+                                    let _ =
+                                        chunk_tx.send(LLMStreamEvent::Error(e.to_string())).await;
+                                    return Err(e);
+                                }
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    log::error!(
+                        "SSE streaming error after {} chunks ({}ms): {}",
+                        chunk_count,
+                        stream_start.elapsed().as_millis(),
+                        e
+                    );
+                    let _ = chunk_tx.send(LLMStreamEvent::Error(e.to_string())).await;
+                    return Err(e.into());
+                }
+            }
+        }
+
+        // Process any remaining data in buffer
+        for line in buffer.lines() {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            if let Some(data) = line.strip_prefix("data: ")
+                && let Some(ref event) = current_event
+            {
+                let _ = self
+                    .handle_sse_event_streaming(event, data, &mut last_content, &chunk_tx)
+                    .await;
+            }
+        }
+
+        log::info!(
+            "SSE streaming completed: {} chunks, {} content chars, {}ms elapsed",
+            chunk_count,
+            last_content.len(),
+            stream_start.elapsed().as_millis()
+        );
+
+        // Signal completion
+        let _ = chunk_tx.send(LLMStreamEvent::Complete).await;
+        Ok(())
+    }
+
+    /// Handle SSE event for streaming - emits chunks via channel
+    async fn handle_sse_event_streaming(
+        &self,
+        event: &str,
+        data: &str,
+        last_content: &mut String,
+        chunk_tx: &tokio::sync::mpsc::Sender<LLMStreamEvent>,
+    ) -> Result<Option<InterruptData>> {
+        match event {
+            "metadata" => Self::handle_metadata_event(data),
+            "messages" => {
+                // Messages event can contain incremental content
+                // but we primarily use values for streaming
+            }
+            "updates" => return Self::handle_updates_event(data),
+            "values" => {
+                // Extract content and compute delta from last
+                if let Some(new_content) = Self::extract_values_content(data) {
+                    if new_content.len() > last_content.len()
+                        && new_content.starts_with(last_content.as_str())
+                    {
+                        // Content grew - emit the delta
+                        let delta = &new_content[last_content.len()..];
+                        if !delta.is_empty() {
+                            log::debug!("Streaming chunk: {} chars", delta.len());
+                            let _ = chunk_tx
+                                .send(LLMStreamEvent::Chunk(delta.to_string()))
+                                .await;
+                        }
+                        *last_content = new_content;
+                    } else if new_content != *last_content {
+                        // Content changed (not a simple append) - emit full new content
+                        // This can happen if the LLM revises its response
+                        if !new_content.is_empty() && Self::is_valid_ai_content(&new_content) {
+                            // Clear and emit new content
+                            let _ = chunk_tx
+                                .send(LLMStreamEvent::Chunk(new_content.clone()))
+                                .await;
+                            *last_content = new_content;
+                        }
+                    }
+                }
+            }
+            "error" => return Self::handle_error_event(data),
+            "end" => log::debug!("Stream ended"),
+            _ => log::trace!("Unknown SSE event type: {}", event),
+        }
+        Ok(None)
+    }
+
+    /// Extract AI content from values event for streaming
+    fn extract_values_content(data: &str) -> Option<String> {
+        let values: serde_json::Value = serde_json::from_str(data).ok()?;
+        let msgs = values.get("messages")?.as_array()?;
+
+        // Get the last valid AI message content
+        for msg in msgs.iter().rev() {
+            if !Self::is_ai_message(msg) {
+                continue;
+            }
+
+            // Skip handoff messages
+            let is_handoff = msg
+                .get("response_metadata")
+                .and_then(|m| m.get("__is_handoff_back"))
+                .is_some();
+            if is_handoff {
+                continue;
+            }
+
+            if let Some(content) = Self::extract_message_content(msg)
+                && Self::is_valid_ai_content(&content)
+            {
+                return Some(content);
+            }
+        }
+        None
     }
 
     // ========== SSE Event Parsing Helpers ==========
@@ -936,6 +1219,73 @@ impl LLMClientTrait for HttpLLMClient {
             .await?;
         Self::convert_stream_result(stream_result)
     }
+
+    async fn query_streaming(
+        &self,
+        text: &str,
+        chunk_tx: tokio::sync::mpsc::Sender<LLMStreamEvent>,
+        cancel_token: CancellationToken,
+    ) -> Result<()> {
+        log::info!("LLM streaming query: {}", text);
+
+        let thread_id = self.ensure_thread().await?;
+
+        let url = format!("{}/threads/{}/runs/stream", self.base_url, thread_id);
+        log::info!("[HTTP-OUT] POST {} | streaming | input={}", url, true);
+
+        let request = StreamRunRequest {
+            assistant_id: "supervisor".to_string(),
+            stream_mode: vec!["values".into(), "updates".into(), "messages".into()],
+            input: Some(StreamInput {
+                messages: vec![ChatMessage {
+                    role: "user".into(),
+                    content: text.into(),
+                }],
+            }),
+            command: None,
+        };
+
+        let request_start = std::time::Instant::now();
+
+        // Use tokio::select! to race HTTP request vs cancellation
+        let response = tokio::select! {
+            result = self
+                .client
+                .post(&url)
+                .header("X-Api-Key", &self.api_key)
+                .json(&request)
+                .send() => {
+                    result?
+            }
+            _ = cancel_token.cancelled() => {
+                log::info!("HTTP streaming request cancelled before response");
+                let _ = chunk_tx.send(LLMStreamEvent::Error("Query cancelled by user".to_string())).await;
+                anyhow::bail!("Query cancelled by user")
+            }
+        };
+
+        log::info!(
+            "[HTTP-IN] POST /runs/stream (streaming) | status={} | elapsed={}ms",
+            response.status(),
+            request_start.elapsed().as_millis()
+        );
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_text = response.text().await.unwrap_or_default();
+            log::error!("Stream run failed ({}): {}", status, error_text);
+            let _ = chunk_tx
+                .send(LLMStreamEvent::Error(format!(
+                    "Stream run failed ({}): {}",
+                    status, error_text
+                )))
+                .await;
+            anyhow::bail!("Stream run failed ({}): {}", status, error_text);
+        }
+
+        self.parse_sse_stream_streaming(response, cancel_token, chunk_tx)
+            .await
+    }
 }
 
 impl HttpLLMClient {
@@ -1052,6 +1402,88 @@ impl LLMClientTrait for MockLLMClient {
 
         // Return mock response (same as non-cancellable version)
         self.query(text).await
+    }
+
+    async fn query_streaming(
+        &self,
+        text: &str,
+        chunk_tx: tokio::sync::mpsc::Sender<LLMStreamEvent>,
+        cancel_token: CancellationToken,
+    ) -> Result<()> {
+        // Get the full response first
+        let response = match text.to_lowercase().as_str() {
+            s if s.contains("list files") => {
+                "To list files, you can use the `ls` command. Some common options:\n\n".to_string()
+                    + "- `ls -l` - Long format with details\n"
+                    + "- `ls -a` - Show hidden files\n"
+                    + "- `ls -lh` - Human-readable file sizes"
+            }
+            s if s.contains("docker") => {
+                "Docker is a containerization platform. Some common commands:\n\n".to_string()
+                    + "```bash\n"
+                    + "docker ps          # List running containers\n"
+                    + "docker images      # List images\n"
+                    + "docker run <image> # Run a container\n"
+                    + "```"
+            }
+            s if s.contains("kubernetes") || s.contains("k8s") => {
+                "Kubernetes is a container orchestration platform. Common commands:\n\n".to_string()
+                    + "```bash\n"
+                    + "kubectl get pods              # List pods\n"
+                    + "kubectl get services          # List services\n"
+                    + "kubectl describe pod <name>   # Get pod details\n"
+                    + "```"
+            }
+            _ => {
+                "I'm a mock LLM. In production, I would provide detailed answers ".to_string()
+                    + "about DevOps, cloud platforms, and terminal commands."
+            }
+        };
+
+        // Simulate streaming by emitting chunks with delays
+        const MOCK_CHUNK_SIZE: usize = 20; // chars per chunk
+        const MOCK_CHUNK_DELAY_MS: u64 = 50; // ms between chunks
+
+        let mut pos = 0;
+        while pos < response.len() {
+            // Check for cancellation
+            if cancel_token.is_cancelled() {
+                log::info!("Mock streaming cancelled at position {}", pos);
+                let _ = chunk_tx
+                    .send(LLMStreamEvent::Error("Query cancelled by user".to_string()))
+                    .await;
+                anyhow::bail!("Query cancelled by user");
+            }
+
+            // Find a good chunk boundary (avoid splitting words/escape codes)
+            let end = std::cmp::min(pos + MOCK_CHUNK_SIZE, response.len());
+            let chunk_end = if end < response.len() {
+                // Try to break at word boundary
+                response[pos..end]
+                    .rfind(|c: char| c.is_whitespace())
+                    .map(|i| pos + i + 1)
+                    .unwrap_or(end)
+            } else {
+                end
+            };
+
+            let chunk = &response[pos..chunk_end];
+            if !chunk.is_empty() {
+                log::debug!("Mock streaming chunk: {} chars", chunk.len());
+                let _ = chunk_tx
+                    .send(LLMStreamEvent::Chunk(chunk.to_string()))
+                    .await;
+            }
+
+            pos = chunk_end;
+
+            // Small delay to simulate streaming
+            tokio::time::sleep(std::time::Duration::from_millis(MOCK_CHUNK_DELAY_MS)).await;
+        }
+
+        // Signal completion
+        let _ = chunk_tx.send(LLMStreamEvent::Complete).await;
+        Ok(())
     }
 }
 

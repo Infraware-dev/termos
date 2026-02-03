@@ -52,9 +52,31 @@ use tokio::runtime::Runtime;
 
 /// Events coming from background tasks (LLM, etc.)
 #[derive(Debug)]
+#[expect(
+    clippy::enum_variant_names,
+    reason = "All events are LLM-related, prefix is meaningful"
+)]
 pub enum AppBackgroundEvent {
-    /// LLM produced a chunk of output or completed
+    /// LLM produced a chunk of output or completed (non-streaming)
     LlmResult(crate::llm::LLMQueryResult),
+    /// LLM produced a streaming text chunk
+    LlmChunk(String),
+    /// LLM streaming completed successfully
+    LlmStreamComplete,
+    /// LLM interrupted for command approval (HITL)
+    LlmCommandApproval {
+        /// The command to execute
+        command: String,
+        /// Message describing why
+        message: String,
+    },
+    /// LLM interrupted with a question (HITL)
+    LlmQuestion {
+        /// The question being asked
+        question: String,
+        /// Optional predefined choices
+        options: Option<Vec<String>>,
+    },
     /// An error occurred during LLM query
     LlmError(String),
 }
@@ -359,7 +381,7 @@ impl InfrawareApp {
     fn process_llm_events(&mut self) {
         let events = self.llm.poll_events();
         for event in events {
-            let mut handler = LlmEventHandler::new(&mut self.state, &self.llm);
+            let mut handler = LlmEventHandler::new(&mut self.state, &mut self.llm);
             handler.handle_event(event);
         }
     }
