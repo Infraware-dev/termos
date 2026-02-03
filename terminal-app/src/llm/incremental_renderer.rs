@@ -27,6 +27,8 @@ pub struct IncrementalRenderer {
     code_lines: Vec<String>,
     /// Whether we've started outputting for the current response
     started: bool,
+    /// Whether the previous chunk output ended with partial content on a new line
+    had_partial_on_newline: bool,
 }
 
 impl IncrementalRenderer {
@@ -41,6 +43,7 @@ impl IncrementalRenderer {
             code_lang: String::new(),
             code_lines: Vec::new(),
             started: false,
+            had_partial_on_newline: false,
         }
     }
 
@@ -53,6 +56,7 @@ impl IncrementalRenderer {
         self.code_lang.clear();
         self.code_lines.clear();
         self.started = false;
+        self.had_partial_on_newline = false;
     }
 
     /// Appends a chunk and returns complete lines ready for display.
@@ -223,6 +227,16 @@ impl IncrementalRenderer {
     /// Marks the renderer as started.
     pub fn mark_started(&mut self) {
         self.started = true;
+    }
+
+    /// Returns whether the previous output ended with partial content on a new line.
+    pub fn had_partial_on_newline(&self) -> bool {
+        self.had_partial_on_newline
+    }
+
+    /// Sets whether partial content was output on a new line.
+    pub fn set_partial_on_newline(&mut self, value: bool) {
+        self.had_partial_on_newline = value;
     }
 }
 

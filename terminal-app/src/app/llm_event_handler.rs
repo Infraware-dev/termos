@@ -118,6 +118,10 @@ impl<'a> LlmEventHandler<'a> {
         // Process chunk through incremental renderer
         let (complete_lines, partial) = self.llm.incremental_renderer.append(&text);
 
+        // Check if we need to go back up (previous chunk had partial on newline)
+        let need_cursor_up = self.llm.incremental_renderer.had_partial_on_newline()
+            && (!complete_lines.is_empty() || partial.is_some());
+
         let session = match self.state.active_session_mut() {
             Some(s) => s,
             None => return,
@@ -131,21 +135,19 @@ impl<'a> LlmEventHandler<'a> {
             self.llm.incremental_renderer.mark_started();
         }
 
+        // If previous chunk had partial on newline and we have new output, go back up
+        if need_cursor_up {
+            // Cursor up one line, carriage return, clear line
+            session
+                .vte_parser
+                .advance(&mut session.terminal_handler, b"\x1b[A\r\x1b[K");
+        }
+
         // Output complete lines
-        for (i, line) in complete_lines.iter().enumerate() {
+        for line in complete_lines.iter() {
             session
                 .vte_parser
                 .advance(&mut session.terminal_handler, line.as_bytes());
-            // Add newline after each complete line (except if there's a partial after)
-            if i < complete_lines.len() - 1 || partial.is_none() {
-                session
-                    .vte_parser
-                    .advance(&mut session.terminal_handler, b"\r\n");
-            }
-        }
-
-        // If we have complete lines and a partial, add newline before partial
-        if !complete_lines.is_empty() && partial.is_some() {
             session
                 .vte_parser
                 .advance(&mut session.terminal_handler, b"\r\n");
@@ -153,10 +155,16 @@ impl<'a> LlmEventHandler<'a> {
 
         // Show partial line (will be overwritten by next chunk)
         if let Some(ref partial_text) = partial {
-            // Use carriage return to allow overwriting
             session
                 .vte_parser
                 .advance(&mut session.terminal_handler, partial_text.as_bytes());
+            // Move to new line so throbber appears below partial content
+            session
+                .vte_parser
+                .advance(&mut session.terminal_handler, b"\r\n");
+            self.llm.incremental_renderer.set_partial_on_newline(true);
+        } else {
+            self.llm.incremental_renderer.set_partial_on_newline(false);
         }
     }
 
