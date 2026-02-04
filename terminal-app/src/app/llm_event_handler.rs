@@ -172,6 +172,17 @@ impl<'a> LlmEventHandler<'a> {
     fn handle_stream_complete(&mut self) {
         tracing::info!("LLM stream completed, finalizing output");
 
+        // If previous chunk had partial on newline, clear it before finalizing
+        // (finalize will re-output the content, so we need to avoid duplicate)
+        if self.llm.incremental_renderer.had_partial_on_newline()
+            && let Some(session) = self.state.active_session_mut()
+        {
+            // Cursor up one line, carriage return, clear line
+            session
+                .vte_parser
+                .advance(&mut session.terminal_handler, b"\x1b[A\r\x1b[K");
+        }
+
         // Finalize incremental output
         self.finalize_incremental_output();
 
