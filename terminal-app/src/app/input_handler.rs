@@ -104,6 +104,17 @@ impl InputHandler {
         result
     }
 
+    /// Updates the command buffer with pasted text.
+    ///
+    /// Filters control characters and appends printable text to the buffer.
+    /// This should be called when handling paste operations to ensure pasted
+    /// text is available for classification on Enter.
+    pub fn update_buffer_with_pasted_text(&self, text: &str, command_buffer: &mut String) {
+        for c in text.chars().filter(|c| !c.is_control()) {
+            command_buffer.push(c);
+        }
+    }
+
     /// Processes byte input, updating command buffer and classifying on Enter.
     fn process_bytes(&mut self, bytes: &[u8], command_buffer: &mut String) -> Option<InputAction> {
         let text = String::from_utf8_lossy(bytes);
@@ -292,5 +303,59 @@ mod tests {
         handler.process_actions(vec![KeyboardAction::SendBytes(vec![0x03])], &mut buffer);
 
         assert!(buffer.is_empty());
+    }
+
+    #[test]
+    fn test_update_buffer_with_pasted_text() {
+        let handler = InputHandler::new();
+        let mut buffer = String::new();
+
+        handler.update_buffer_with_pasted_text("hello world", &mut buffer);
+
+        assert_eq!(buffer, "hello world");
+    }
+
+    #[test]
+    fn test_update_buffer_with_pasted_text_appends() {
+        let handler = InputHandler::new();
+        let mut buffer = "existing ".to_string();
+
+        handler.update_buffer_with_pasted_text("pasted", &mut buffer);
+
+        assert_eq!(buffer, "existing pasted");
+    }
+
+    #[test]
+    fn test_pasted_nlp_query_classified_correctly() {
+        let mut handler = InputHandler::new();
+        let mut buffer = String::new();
+
+        // Simulate pasting "? how do I list files"
+        handler.update_buffer_with_pasted_text("? how do I list files", &mut buffer);
+
+        // Now press Enter
+        let actions =
+            handler.process_actions(vec![KeyboardAction::SendBytes(b"\r".to_vec())], &mut buffer);
+
+        // Should be classified as NLP query
+        assert_eq!(actions.len(), 1);
+        match &actions[0] {
+            InputAction::StartLlmQuery(query) => {
+                assert!(query.contains("list files"));
+            }
+            _ => panic!("Expected StartLlmQuery, got {:?}", actions[0]),
+        }
+    }
+
+    #[test]
+    fn test_pasted_text_filters_control_chars() {
+        let handler = InputHandler::new();
+        let mut buffer = String::new();
+
+        // Pasted text with control characters (e.g., from bracketed paste)
+        handler.update_buffer_with_pasted_text("hello\x03world", &mut buffer);
+
+        // Control chars should be filtered
+        assert_eq!(buffer, "helloworld");
     }
 }

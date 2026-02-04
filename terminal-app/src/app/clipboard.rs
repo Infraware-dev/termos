@@ -94,11 +94,12 @@ impl ClipboardManager {
         }
     }
 
-    /// Gets the paste payload, handling bracketed paste mode.
+    /// Gets the paste data: raw text and PTY payload with bracketed paste escapes.
     ///
-    /// Returns the bytes to send to PTY, or None if clipboard is empty.
-    pub fn get_paste_payload(&mut self, state: &AppState) -> Option<Vec<u8>> {
-        tracing::info!("get_paste_payload called");
+    /// Returns tuple of (raw_text, pty_payload), or None if clipboard is empty.
+    /// The raw_text is used for command buffer tracking; pty_payload is sent to PTY.
+    pub fn get_paste_data(&mut self, state: &AppState) -> Option<(String, Vec<u8>)> {
+        tracing::info!("get_paste_data called");
 
         let cb = self.clipboard.as_mut()?;
 
@@ -128,11 +129,11 @@ impl ClipboardManager {
                     if text.len() > 50 {
                         format!("{}...", &text[..50])
                     } else {
-                        text
+                        text.clone()
                     }
                 );
 
-                Some(payload)
+                Some((text, payload))
             }
             Ok(_) => {
                 tracing::warn!("Clipboard is empty, nothing to paste");

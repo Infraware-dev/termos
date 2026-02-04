@@ -471,7 +471,12 @@ impl InfrawareApp {
                 self.clipboard.copy_selection(ctx, &self.state);
             }
             InputAction::Paste => {
-                if let Some(payload) = self.clipboard.get_paste_payload(&self.state) {
+                if let Some((text, payload)) = self.clipboard.get_paste_data(&self.state) {
+                    // Update command buffer with pasted text for proper classification
+                    self.input_handler.update_buffer_with_pasted_text(
+                        &text,
+                        &mut self.state.current_command_buffer,
+                    );
                     self.send_to_pty(&payload);
                 }
             }
