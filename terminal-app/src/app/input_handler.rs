@@ -110,10 +110,8 @@ impl InputHandler {
     /// This should be called when handling paste operations to ensure pasted
     /// text is available for classification on Enter.
     pub fn update_buffer_with_pasted_text(&self, text: &str, command_buffer: &mut String) {
-        for c in text.chars() {
-            if !c.is_control() {
-                command_buffer.push(c);
-            }
+        for c in text.chars().filter(|c| !c.is_control()) {
+            command_buffer.push(c);
         }
     }
 
