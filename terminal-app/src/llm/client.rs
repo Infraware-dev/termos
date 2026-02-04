@@ -1343,6 +1343,8 @@ impl LLMClientTrait for MockLLMClient {
             _ => {
                 "I'm a mock LLM. In production, I would provide detailed answers ".to_string()
                     + "about DevOps, cloud platforms, and terminal commands."
+                    + "\nBeware this is the MOCK CLIENT!!! Not the Mock LLM backend!"
+                    + "\nIf you were expecting the Mock LLM backend, make sure to run it and configure both the ANTHROPIC_API_KEY and INFRAWARE_BACKEND_URL env vars correctly."
             }
         };
 
@@ -1437,6 +1439,8 @@ impl LLMClientTrait for MockLLMClient {
             _ => {
                 "I'm a mock LLM. In production, I would provide detailed answers ".to_string()
                     + "about DevOps, cloud platforms, and terminal commands."
+                    + "\nBeware this is the MOCK CLIENT!!! Not the Mock LLM backend!"
+                    + "\nIf you were expecting the Mock LLM backend, make sure to run it and configure both the ANTHROPIC_API_KEY and INFRAWARE_BACKEND_URL env vars correctly."
             }
         };
 
