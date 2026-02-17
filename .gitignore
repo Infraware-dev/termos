@@ -1,6 +1,9 @@
 # Build artifacts
 /target/
 
+# context directory
+.infraware/
+
 # IDE
 .idea/
 *.swp
