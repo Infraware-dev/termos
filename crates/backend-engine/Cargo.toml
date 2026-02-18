@@ -26,12 +26,16 @@ reqwest = { workspace = true, optional = true }
 bytes = { workspace = true, optional = true }
 
 # For Rig adapter (optional feature)
+chrono = { workspace = true, optional = true, features = ["serde"] }
 rig-core = { workspace = true, optional = true }
 regex = { workspace = true, optional = true }
 schemars = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
 
 [features]
 default = []
 http = ["reqwest", "bytes"]
 process = []
-rig = ["rig-core", "regex", "schemars"]
+rig = ["dep:chrono", "dep:rig-core", "dep:regex", "dep:schemars"]

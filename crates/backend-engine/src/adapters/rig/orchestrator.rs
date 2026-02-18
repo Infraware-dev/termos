@@ -12,27 +12,15 @@ use rig::client::CompletionClient;
 use rig::completion::{CompletionModel, CompletionResponse, Prompt};
 use rig::providers::anthropic;
 use rig::tool::Tool;
-use tokio::sync::mpsc;
+use tokio::sync::{RwLock, mpsc};
 
 use super::config::RigEngineConfig;
 use super::state::{PendingInterrupt, ResumeContext, StateStore};
 use super::tools::{AskUserArgs, AskUserTool, HitlMarker, ShellCommandArgs, ShellCommandTool};
+use crate::adapters::rig::memory::{MemoryStore, SaveMemoryTool};
 use crate::error::EngineError;
 use crate::traits::EventStream;
 use crate::types::ResumeResponse;
-
-/// Safely truncate a UTF-8 string to at most `max_bytes` bytes,
-/// ensuring the result ends at a valid char boundary.
-fn truncate_utf8(s: &str, max_bytes: usize) -> &str {
-    if s.len() <= max_bytes {
-        return s;
-    }
-    let mut end = max_bytes;
-    while end > 0 && !s.is_char_boundary(end) {
-        end -= 1;
-    }
-    &s[..end]
-}
 
 /// Type alias for the base rig-core agent
 pub type RigAgent = Agent<anthropic::completion::CompletionModel>;
@@ -109,14 +97,23 @@ impl PromptHook<anthropic::completion::CompletionModel> for HitlHook {
 ///
 /// Tools are registered using `.tool()` which enables rig-rs's function calling.
 /// The LLM will see the tool schemas and can call them directly.
-pub fn create_agent(client: &anthropic::Client, config: &RigEngineConfig) -> RigAgent {
+pub fn create_agent(
+    client: &anthropic::Client,
+    config: &RigEngineConfig,
+    memory_store: &Arc<RwLock<MemoryStore>>,
+    memory: &MemoryStore,
+) -> RigAgent {
+    let memory_preamble = memory.build_preamble();
+
     client
         .agent(&config.model)
         .preamble(&config.system_prompt)
+        .append_preamble(&memory_preamble)
         .max_tokens(config.max_tokens as u64)
         .temperature(f64::from(config.temperature))
         .tool(ShellCommandTool::new())
         .tool(AskUserTool::new())
+        .tool(SaveMemoryTool::new(Arc::clone(memory_store)))
         .build()
 }
 
@@ -143,6 +140,7 @@ fn to_chat_history(messages: &[Message]) -> Vec<RigMessage> {
 pub fn create_run_stream(
     config: Arc<RigEngineConfig>,
     client: Arc<anthropic::Client>,
+    memory_store: Arc<RwLock<MemoryStore>>,
     state: Arc<StateStore>,
     thread_id: infraware_shared::ThreadId,
     input: RunInput,
@@ -180,7 +178,10 @@ pub fn create_run_stream(
         let hook = HitlHook { tool_call_tx: tx };
 
         // Create the agent with native tools
-        let agent = create_agent(&client, &config);
+        let agent = {
+            let memory = memory_store.read().await;
+            create_agent(&client, &config, &memory_store, &memory)
+        };
         let chat_history = to_chat_history(&history);
 
         tracing::info!(
@@ -198,17 +199,12 @@ pub fn create_run_stream(
         // Each query is independent - history was causing LLM confusion
         // where it would respond to old messages instead of the new prompt.
         // History is still stored for resume operations.
-        eprintln!(
-            ">>> CALLING AGENT with prompt='{}' (history ignored, was {})",
-            truncate_utf8(&prompt, 100),
-            chat_history.len()
-        );
         let result = agent
             .prompt(&prompt)
             .multi_turn(1)
             .with_hook(hook)
             .await;
-        tracing::warn!("AGENT RETURNED result={:?}", result.as_ref().map(|_| "ok").unwrap_or("err"));
+        tracing::debug!("Agent returned result={:?}", result.as_ref().map(|_| "ok").unwrap_or("err"));
 
         // Check if a tool call was intercepted for HITL
         if let Ok(intercepted) = rx.try_recv() {
@@ -579,6 +575,7 @@ async fn execute_command_with_sudo_password(
 pub fn create_resume_stream(
     config: Arc<RigEngineConfig>,
     client: Arc<anthropic::Client>,
+    memory_store: Arc<RwLock<MemoryStore>>,
     state: Arc<StateStore>,
     thread_id: infraware_shared::ThreadId,
     response: ResumeResponse,
@@ -635,7 +632,10 @@ pub fn create_resume_stream(
                         let (tx, mut rx) = mpsc::unbounded_channel();
                         let hook = HitlHook { tool_call_tx: tx };
 
-                        let agent = create_agent(&client, &config);
+                        let agent = {
+                            let memory = memory_store.read().await;
+                            create_agent(&client, &config, &memory_store, &memory)
+                        };
                         let mut chat_history = to_chat_history(&history);
 
                         tracing::debug!(thread_id = %thread_id, run_id = %run_id, "Continuing rig agent after command execution");
@@ -776,7 +776,10 @@ pub fn create_resume_stream(
                 let (tx, mut rx) = mpsc::unbounded_channel();
                 let hook = HitlHook { tool_call_tx: tx };
 
-                let agent = create_agent(&client, &config);
+                let agent = {
+                    let memory = memory_store.read().await;
+                    create_agent(&client, &config, &memory_store, &memory)
+                };
                 let mut chat_history = to_chat_history(&history);
 
                 let result = agent
@@ -865,7 +868,10 @@ pub fn create_resume_stream(
                 let (tx, mut rx) = mpsc::unbounded_channel();
                 let hook = HitlHook { tool_call_tx: tx };
 
-                let agent = create_agent(&client, &config);
+                let agent = {
+                    let memory = memory_store.read().await;
+                    create_agent(&client, &config, &memory_store, &memory)
+                };
                 let mut chat_history = to_chat_history(&history);
 
                 tracing::debug!(thread_id = %thread_id, run_id = %run_id, "Resuming rig agent with answer");
@@ -969,7 +975,10 @@ pub fn create_resume_stream(
                 let (tx, mut rx) = mpsc::unbounded_channel();
                 let hook = HitlHook { tool_call_tx: tx };
 
-                let agent = create_agent(&client, &config);
+                let agent = {
+                    let memory = memory_store.read().await;
+                    create_agent(&client, &config, &memory_store, &memory)
+                };
                 let mut chat_history = to_chat_history(&history);
 
                 tracing::debug!(thread_id = %thread_id, run_id = %run_id, "Continuing rig agent after sudo command");

@@ -16,6 +16,7 @@ fn test_config() -> RigEngineConfig {
         api_key: std::env::var("ANTHROPIC_API_KEY").unwrap_or_else(|_| "test-api-key".to_string()),
         model: "claude-sonnet-4-20250514".to_string(),
         max_tokens: 1024,
+        memory: Default::default(),
         system_prompt: "You are a helpful assistant.".to_string(),
         timeout_secs: 30,
         temperature: 0.7,
@@ -92,6 +93,7 @@ async fn test_stream_run_without_api_key() {
         api_key: "invalid-key".to_string(),
         model: "claude-sonnet-4-20250514".to_string(),
         max_tokens: 1024,
+        memory: Default::default(),
         system_prompt: "Test".to_string(),
         timeout_secs: 30,
         temperature: 0.7,
@@ -230,6 +232,7 @@ mod live_tests {
             api_key: std::env::var("ANTHROPIC_API_KEY").unwrap(),
             model: "claude-sonnet-4-20250514".to_string(),
             max_tokens: 1024,
+            memory: Default::default(),
             system_prompt: "You are a DevOps assistant. When the user asks to run a command, use the shell_command tool.".to_string(),
             timeout_secs: 60,
             temperature: 0.0, // Deterministic for testing

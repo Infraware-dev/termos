@@ -5,6 +5,7 @@
 
 mod config;
 mod engine;
+mod memory;
 mod orchestrator;
 mod state;
 mod tools;

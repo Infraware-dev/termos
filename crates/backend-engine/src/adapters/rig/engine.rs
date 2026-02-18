@@ -5,10 +5,12 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use infraware_shared::{RunInput, ThreadId};
 use rig::providers::anthropic;
+use tokio::sync::RwLock;
 
 use super::config::RigEngineConfig;
 use super::orchestrator::{create_resume_stream, create_run_stream};
 use super::state::StateStore;
+use crate::adapters::rig::memory::MemoryStore;
 use crate::error::EngineError;
 use crate::traits::{AgenticEngine, EventStream};
 use crate::types::{HealthStatus, ResumeResponse};
@@ -24,6 +26,8 @@ pub struct RigEngine {
     config: Arc<RigEngineConfig>,
     /// Cached Anthropic client
     client: Arc<anthropic::Client>,
+    /// Store for context memory
+    memory_store: Arc<RwLock<MemoryStore>>,
     /// State store for threads and runs
     state: Arc<StateStore>,
 }
@@ -50,6 +54,13 @@ impl RigEngine {
             )));
         }
 
+        // load memory store
+        tracing::debug!("Loading memory store");
+        let memory_store = Arc::new(RwLock::new(MemoryStore::load_or_create(
+            &config.memory.path,
+            config.memory.limit,
+        )?));
+
         // Create and cache the Anthropic client
         let client = anthropic::Client::new(&config.api_key).map_err(|e| {
             EngineError::Other(anyhow::anyhow!("Failed to create Anthropic client: {}", e))
@@ -65,6 +76,7 @@ impl RigEngine {
         Ok(Self {
             config: Arc::new(config),
             client: Arc::new(client),
+            memory_store,
             state: Arc::new(StateStore::new()),
         })
     }
@@ -111,6 +123,7 @@ impl AgenticEngine for RigEngine {
         Ok(create_run_stream(
             Arc::clone(&self.config),
             Arc::clone(&self.client),
+            Arc::clone(&self.memory_store),
             Arc::clone(&self.state),
             thread_id.clone(),
             input,
@@ -141,6 +154,7 @@ impl AgenticEngine for RigEngine {
         Ok(create_resume_stream(
             Arc::clone(&self.config),
             Arc::clone(&self.client),
+            Arc::clone(&self.memory_store),
             Arc::clone(&self.state),
             thread_id.clone(),
             response,
