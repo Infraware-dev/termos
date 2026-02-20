@@ -93,6 +93,20 @@ impl<'a> LlmEventHandler<'a> {
                 session.agent_state.end_stream();
                 self.handle_question(question, options);
             }
+            // Incident investigation phase banner
+            AppBackgroundEvent::LlmPhase(phase) => {
+                let session = match self.state.active_session_mut() {
+                    Some(s) => s,
+                    None => return,
+                };
+                let banner = match phase {
+                    infraware_shared::IncidentPhase::Investigating => "\r\n\x1b[1;36m🔍 Investigating...\x1b[0m\r\n",
+                    infraware_shared::IncidentPhase::Analyzing => "\r\n\x1b[1;33m🧠 Analyzing findings...\x1b[0m\r\n",
+                    infraware_shared::IncidentPhase::Reporting => "\r\n\x1b[1;32m📄 Generating post-mortem report...\x1b[0m\r\n",
+                    infraware_shared::IncidentPhase::Completed => "\r\n\x1b[1;34m✅ Incident pipeline completed.\x1b[0m\r\n",
+                };
+                session.vte_parser.advance(&mut session.terminal_handler, banner.as_bytes());
+            }
             // Error
             AppBackgroundEvent::LlmError(err) => {
                 // Finalize any pending output first

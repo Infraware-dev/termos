@@ -80,6 +80,8 @@ pub enum AppBackgroundEvent {
     },
     /// An error occurred during LLM query
     LlmError(String),
+    /// Incident investigation phase transition
+    LlmPhase(infraware_shared::IncidentPhase),
 }
 
 /// Cursor blink and timing state.

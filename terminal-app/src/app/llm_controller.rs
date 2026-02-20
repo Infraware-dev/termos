@@ -138,6 +138,10 @@ impl LlmController {
                         tracing::error!("LLM stream error: {}", err);
                         AppBackgroundEvent::LlmError(err)
                     }
+                    LLMStreamEvent::Phase(phase) => {
+                        tracing::info!("Incident phase: {:?}", phase);
+                        AppBackgroundEvent::LlmPhase(phase)
+                    }
                 };
 
                 if let Err(e) = tx_forwarder.send(app_event) {
