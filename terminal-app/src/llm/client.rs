@@ -112,6 +112,8 @@ pub enum LLMStreamEvent {
     },
     /// An error occurred
     Error(String),
+    /// Incident investigation phase transition
+    Phase(infraware_shared::IncidentPhase),
 }
 
 impl LLMQueryResult {
@@ -273,7 +275,7 @@ impl HttpLLMClient {
                 .local_address(std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1))) // Force IPv4
                 .pool_max_idle_per_host(0) // Disable connection pooling for SSE
                 .build()
-                .unwrap_or_default(),
+                .expect("reqwest client configuration failed"),
             api_key,
             thread_id: RwLock::new(None),
         }
@@ -733,6 +735,28 @@ impl HttpLLMClient {
             }
             "error" => return Self::handle_error_event(data),
             "end" => tracing::debug!("Stream ended"),
+            "phase" => {
+                // Incident investigation phase transition
+                if let Ok(v) = serde_json::from_str::<serde_json::Value>(data) {
+                    if let Some(phase_val) = v.get("phase")
+                        && let Ok(phase) = serde_json::from_value::<infraware_shared::IncidentPhase>(phase_val.clone())
+                    {
+                        let _ = chunk_tx.send(LLMStreamEvent::Phase(phase)).await;
+                    } else if let Some(name) = v.get("name").and_then(|n| n.as_str()) {
+                        // Backward compatibility with older backend payload shape.
+                        let phase = match name {
+                            "Investigating" => Some(infraware_shared::IncidentPhase::Investigating),
+                            "Analyzing" => Some(infraware_shared::IncidentPhase::Analyzing),
+                            "Reporting" => Some(infraware_shared::IncidentPhase::Reporting),
+                            "Completed" => Some(infraware_shared::IncidentPhase::Completed),
+                            _ => None,
+                        };
+                        if let Some(phase) = phase {
+                            let _ = chunk_tx.send(LLMStreamEvent::Phase(phase)).await;
+                        }
+                    }
+                }
+            }
             _ => tracing::trace!("Unknown SSE event type: {}", event),
         }
         Ok(None)
