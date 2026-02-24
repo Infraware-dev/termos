@@ -124,8 +124,7 @@ impl MemoryStore {
         self.flush()?;
         Ok(self
             .entries
-            .iter()
-            .last()
+            .back()
             .expect("cannot be empty after add"))
     }
 

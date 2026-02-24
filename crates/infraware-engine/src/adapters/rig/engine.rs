@@ -10,7 +10,7 @@ use tokio::sync::RwLock;
 use super::config::RigEngineConfig;
 use super::orchestrator::{create_resume_stream, create_run_stream};
 use super::state::StateStore;
-use crate::adapters::rig::memory::MemoryStore;
+use crate::adapters::rig::memory::session::MemoryStore;
 use crate::error::EngineError;
 use crate::traits::{AgenticEngine, EventStream};
 use crate::types::{HealthStatus, ResumeResponse};
