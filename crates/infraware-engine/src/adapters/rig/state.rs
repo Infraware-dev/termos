@@ -4,6 +4,8 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use infraware_shared::{Message, ThreadId};
+
+use super::incident::context::{IncidentContext, RiskLevel};
 use tokio::sync::RwLock;
 
 /// In-memory state store for threads and runs
@@ -120,10 +122,10 @@ pub struct PendingInterrupt {
     /// Context needed to resume after the interrupt
     pub resume_context: ResumeContext,
     /// Tool call ID from rig-rs (for tool result message)
-    #[allow(dead_code)] // Reserved for future tool result handling
+    #[expect(dead_code, reason = "Reserved for future tool result handling")]
     pub tool_call_id: Option<String>,
     /// Original tool arguments (for retry/debug)
-    #[allow(dead_code)] // Reserved for future retry/debug functionality
+    #[expect(dead_code, reason = "Reserved for future retry/debug functionality")]
     pub tool_args: Option<serde_json::Value>,
 }
 
@@ -168,6 +170,41 @@ impl PendingInterrupt {
             tool_args: None,
         }
     }
+
+    /// Create an incident confirmation interrupt (y/n to start pipeline)
+    pub fn incident_confirmation(incident_description: String) -> Self {
+        Self {
+            resume_context: ResumeContext::IncidentConfirmation { incident_description },
+            tool_call_id: None,
+            tool_args: None,
+        }
+    }
+
+    /// Create an incident command interrupt (operator approves diagnostic command)
+    #[expect(clippy::too_many_arguments, reason = "All fields are required for incident context fidelity")]
+    pub fn incident_command(
+        command: String,
+        motivation: String,
+        needs_continuation: bool,
+        risk_level: RiskLevel,
+        expected_diagnostic_value: String,
+        context: IncidentContext,
+        tool_call_id: Option<String>,
+        tool_args: Option<serde_json::Value>,
+    ) -> Self {
+        Self {
+            resume_context: ResumeContext::IncidentCommand {
+                command,
+                motivation,
+                needs_continuation,
+                risk_level,
+                expected_diagnostic_value,
+                context,
+            },
+            tool_call_id,
+            tool_args,
+        }
+    }
 }
 
 /// Context for resuming after an interrupt
@@ -189,6 +226,26 @@ pub enum ResumeContext {
     SudoPassword {
         /// The command that requires sudo with password
         command: String,
+    },
+    /// Waiting for operator to confirm starting the incident investigation pipeline
+    IncidentConfirmation {
+        /// Description of the incident provided by the NormalAgent
+        incident_description: String,
+    },
+    /// Incident investigation in progress — waiting for a diagnostic command to be approved
+    IncidentCommand {
+        /// The diagnostic command to execute after approval
+        command: String,
+        /// Why this command is needed (from DiagnosticCommandTool)
+        motivation: String,
+        /// Whether the InvestigatorAgent needs to process the output to continue
+        needs_continuation: bool,
+        /// Risk level declared by the agent at call time
+        risk_level: RiskLevel,
+        /// What diagnostic value was expected from this command
+        expected_diagnostic_value: String,
+        /// Accumulated investigation context so far
+        context: IncidentContext,
     },
 }
 

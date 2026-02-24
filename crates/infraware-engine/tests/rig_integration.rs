@@ -211,6 +211,7 @@ mod live_tests {
                 Ok(AgentEvent::End { .. }) => received_end = true,
                 Ok(AgentEvent::Values { .. }) => {}
                 Ok(AgentEvent::Updates { .. }) => {}
+                Ok(AgentEvent::Phase { .. }) => {}
                 Ok(AgentEvent::Error { message }) => panic!("Unexpected error: {}", message),
                 Err(e) => panic!("Unexpected error: {}", e),
             }
