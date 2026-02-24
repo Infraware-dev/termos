@@ -1,0 +1,38 @@
+{
+  "description": "API service high latency — Docker Compose stack, local environment",
+  "command_responses": [
+    {
+      "pattern": "docker (ps|container ls)( .*)?",
+      "output": "CONTAINER ID   IMAGE              STATUS          PORTS\nabc123de       api-service:2.1   Up 3 hours      0.0.0.0:8080->8080/tcp\ndef456gh       postgres:15        Up 3 hours      0.0.0.0:5432->5432/tcp\nghi789jk       redis:7            Up 3 hours      0.0.0.0:6379->6379/tcp"
+    },
+    {
+      "pattern": "docker logs",
+      "output": "[2026-02-24T08:10:01Z ERROR] DB connection timeout after 30000ms\n[2026-02-24T08:10:02Z ERROR] Pool exhausted: waiting for connection (pool_size=10, acquired=10)\n[2026-02-24T08:10:32Z ERROR] Request /api/orders failed: 504 Gateway Timeout\n[2026-02-24T08:11:02Z WARN]  Circuit breaker OPEN for db-pool\n[2026-02-24T08:11:15Z ERROR] Health check failed: db unreachable"
+    },
+    {
+      "pattern": "docker stats",
+      "output": "CONTAINER ID   NAME          CPU %   MEM USAGE / LIMIT   MEM %   NET I/O\nabc123de       api-service   82.3%   410MiB / 512MiB     80.1%   1.2GB / 890MB\ndef456gh       postgres      61.7%   380MiB / 512MiB     74.2%   450MB / 1.1GB"
+    },
+    {
+      "pattern": "docker version",
+      "output": "Client: Docker Engine - Community\n Version:           26.1.4\nServer: Docker Engine - Community\n Engine:\n  Version:          26.1.4"
+    },
+    {
+      "pattern": "df -h|df -H|df --human",
+      "output": "Filesystem      Size  Used Avail Use%  Mounted on\n/dev/sda1        20G   19G  500M  97%  /\ntmpfs           7.8G  1.1G  6.7G  14%  /dev/shm"
+    },
+    {
+      "pattern": "du -sh|du -h",
+      "output": "8.4G\t/var/lib/docker/volumes/postgres_data\n6.1G\t/var/lib/docker/volumes/api_logs\n1.9G\t/var/lib/docker/overlay2"
+    },
+    {
+      "pattern": ".*netstat.*|ss -t|ss -s",
+      "output": "State    Recv-Q  Send-Q  Local Address:Port  Peer Address:Port\nESTABLISHED  0  0  172.18.0.3:47832  172.18.0.2:5432\nESTABLISHED  0  0  172.18.0.3:47833  172.18.0.2:5432\nTIME_WAIT    0  0  172.18.0.3:47834  172.18.0.2:5432\nTIME_WAIT    0  0  172.18.0.3:47835  172.18.0.2:5432\nTIME_WAIT    0  0  172.18.0.3:47836  172.18.0.2:5432"
+    },
+    {
+      "pattern": "curl.*localhost|curl.*127\\.0\\.0\\.1",
+      "output": "HTTP/1.1 504 Gateway Timeout\ncontent-type: application/json\n{\"error\":\"upstream timeout\",\"latency_ms\":30142}"
+    }
+  ],
+  "fallback_output": "(SIM) Command not matched in fixture — proceeding with empty output"
+}

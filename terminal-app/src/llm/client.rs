@@ -183,6 +183,9 @@ pub trait LLMClientTrait: Send + Sync + std::fmt::Debug {
     /// Resume an interrupted run with a text answer (for questions)
     async fn resume_with_answer(&self, answer: &str) -> Result<LLMQueryResult>;
 
+    /// Resume an interrupted run with plain approval (no additional input message).
+    async fn resume_approved(&self) -> Result<LLMQueryResult>;
+
     /// Resume with command output after PTY execution.
     /// Called when a command was executed in the terminal and output was captured.
     async fn resume_with_command_output(
@@ -739,7 +742,9 @@ impl HttpLLMClient {
                 // Incident investigation phase transition
                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(data) {
                     if let Some(phase_val) = v.get("phase")
-                        && let Ok(phase) = serde_json::from_value::<infraware_shared::IncidentPhase>(phase_val.clone())
+                        && let Ok(phase) = serde_json::from_value::<infraware_shared::IncidentPhase>(
+                            phase_val.clone(),
+                        )
                     {
                         let _ = chunk_tx.send(LLMStreamEvent::Phase(phase)).await;
                     } else if let Some(name) = v.get("name").and_then(|n| n.as_str()) {
@@ -1117,6 +1122,55 @@ impl LLMClientTrait for HttpLLMClient {
         Self::convert_stream_result(stream_result)
     }
 
+    async fn resume_approved(&self) -> Result<LLMQueryResult> {
+        let thread_id = self
+            .thread_id
+            .read()
+            .await
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("No active thread to resume"))?;
+
+        let url = format!("{}/threads/{}/runs/stream", self.base_url, thread_id);
+        tracing::info!("[HTTP-OUT] POST {} | approved", url);
+
+        let request = StreamRunRequest {
+            assistant_id: "supervisor".to_string(),
+            stream_mode: vec!["values".into(), "updates".into(), "messages".into()],
+            input: None,
+            command: Some(StreamCommand {
+                resume: "approved".into(),
+            }),
+        };
+
+        let request_start = std::time::Instant::now();
+        let response = self
+            .client
+            .post(&url)
+            .header("X-Api-Key", &self.api_key)
+            .json(&request)
+            .send()
+            .await?;
+
+        let elapsed = request_start.elapsed();
+        tracing::info!(
+            "[HTTP-IN] POST /runs/stream (approved) | status={} | elapsed={}ms",
+            response.status(),
+            elapsed.as_millis()
+        );
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_text = response.text().await.unwrap_or_default();
+            tracing::error!("Resume approved failed ({}): {}", status, error_text);
+            anyhow::bail!("Resume approved failed ({}): {}", status, error_text);
+        }
+
+        let stream_result = self
+            .parse_sse_stream(response, CancellationToken::new())
+            .await?;
+        Self::convert_stream_result(stream_result)
+    }
+
     async fn resume_with_command_output(
         &self,
         command: &str,
@@ -1137,6 +1191,13 @@ impl LLMClientTrait for HttpLLMClient {
             output.len()
         );
 
+        // Backend rejects empty message content. Normalize empty command output to an explicit marker.
+        let normalized_output = if output.trim().is_empty() {
+            "(no output)"
+        } else {
+            output
+        };
+
         // Send command and output as two messages with resume type "command_output"
         let request = StreamRunRequest {
             assistant_id: "supervisor".to_string(),
@@ -1149,7 +1210,7 @@ impl LLMClientTrait for HttpLLMClient {
                     },
                     ChatMessage {
                         role: "user".into(),
-                        content: output.into(),
+                        content: normalized_output.into(),
                     },
                 ],
             }),
@@ -1381,6 +1442,12 @@ impl LLMClientTrait for MockLLMClient {
             "Mock received answer: '{}' - Processing complete.",
             answer
         )))
+    }
+
+    async fn resume_approved(&self) -> Result<LLMQueryResult> {
+        Ok(LLMQueryResult::Complete(
+            "Mock: command approved.".to_string(),
+        ))
     }
 
     async fn resume_with_command_output(

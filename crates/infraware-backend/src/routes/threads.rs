@@ -155,7 +155,10 @@ fn validate_role(role: &str) -> Result<MessageRole, ApiError> {
 }
 
 /// Validate input messages
-fn validate_messages(input: &Option<InputContainer>) -> Result<(), ApiError> {
+fn validate_messages(
+    input: &Option<InputContainer>,
+    allow_empty_command_output: bool,
+) -> Result<(), ApiError> {
     if let Some(container) = input {
         if container.messages.len() > MAX_MESSAGES {
             return Err(ApiError::bad_request(format!(
@@ -173,6 +176,12 @@ fn validate_messages(input: &Option<InputContainer>) -> Result<(), ApiError> {
             }
 
             if msg.content.is_empty() {
+                // For command_output resume, allow an empty second message (captured command output can be empty).
+                let is_allowed_empty_command_output =
+                    allow_empty_command_output && i == 1 && container.messages.len() >= 2;
+                if is_allowed_empty_command_output {
+                    continue;
+                }
                 return Err(ApiError::bad_request(format!(
                     "message {} content cannot be empty",
                     i
@@ -215,7 +224,12 @@ pub async fn stream_run(
 ) -> Result<Sse<impl futures::Stream<Item = Result<Event, Infallible>>>, ApiError> {
     // Validate inputs
     validate_thread_id(&thread_id)?;
-    validate_messages(&req.input)?;
+    let allow_empty_command_output = req
+        .command
+        .as_ref()
+        .map(|c| c.resume.as_str() == "command_output")
+        .unwrap_or(false);
+    validate_messages(&req.input, allow_empty_command_output)?;
 
     let thread_id = ThreadId::new(thread_id);
 
@@ -419,4 +433,45 @@ pub async fn stream_run(
             .interval(Duration::from_secs(SSE_KEEP_ALIVE_SECS))
             .text("keep-alive"),
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn input_with_messages(messages: Vec<(&str, &str)>) -> Option<InputContainer> {
+        Some(InputContainer {
+            messages: messages
+                .into_iter()
+                .map(|(role, content)| MessageInput {
+                    role: role.to_string(),
+                    content: content.to_string(),
+                })
+                .collect(),
+        })
+    }
+
+    #[test]
+    fn validate_messages_rejects_empty_content_by_default() {
+        let input = input_with_messages(vec![("user", "docker logs"), ("user", "")]);
+        assert!(
+            validate_messages(&input, false).is_err(),
+            "empty content must be rejected"
+        );
+    }
+
+    #[test]
+    fn validate_messages_allows_empty_second_message_for_command_output_resume() {
+        let input = input_with_messages(vec![("user", "docker logs --tail 100 api"), ("user", "")]);
+        validate_messages(&input, true).expect("empty command output should be accepted");
+    }
+
+    #[test]
+    fn validate_messages_still_rejects_empty_first_message_for_command_output_resume() {
+        let input = input_with_messages(vec![("user", ""), ("user", "some output")]);
+        assert!(
+            validate_messages(&input, true).is_err(),
+            "first message cannot be empty"
+        );
+    }
 }

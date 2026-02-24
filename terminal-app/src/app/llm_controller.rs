@@ -190,6 +190,29 @@ impl LlmController {
         });
     }
 
+    /// Resumes LLM run with plain command approval (backend executes command).
+    pub fn resume_approved(&mut self, runtime: &Runtime) {
+        let llm_client = self.client.clone();
+        let tx = self.bg_event_tx.clone();
+
+        let cancel_token = CancellationToken::new();
+        self.cancel_token = Some(cancel_token.clone());
+
+        runtime.spawn(async move {
+            tokio::select! {
+                _ = cancel_token.cancelled() => {
+                    tracing::info!("Background LLM approved run cancelled");
+                }
+                result = llm_client.resume_approved() => {
+                    match result {
+                        Ok(r) => { let _ = tx.send(AppBackgroundEvent::LlmResult(r)); }
+                        Err(e) => { let _ = tx.send(AppBackgroundEvent::LlmError(e.to_string())); }
+                    }
+                }
+            }
+        });
+    }
+
     /// Resumes LLM run with command output from PTY execution.
     pub fn resume_with_command_output(
         &mut self,

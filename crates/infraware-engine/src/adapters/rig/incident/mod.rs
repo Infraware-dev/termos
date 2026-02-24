@@ -1,4 +1,7 @@
-#![expect(clippy::mod_module_files, reason = "incident is a multi-file module requiring a directory")]
+#![expect(
+    clippy::mod_module_files,
+    reason = "incident is a multi-file module requiring a directory"
+)]
 //! Multi-agent incident investigation pipeline.
 //!
 //! Sequences three specialised rig-rs agents:
@@ -16,6 +19,7 @@ pub mod context;
 use std::sync::Arc;
 
 use async_stream::stream;
+use context::{IncidentContext, RiskLevel};
 use infraware_shared::{AgentEvent, IncidentPhase, MessageEvent};
 use rig::completion::Prompt;
 use rig::providers::anthropic;
@@ -27,7 +31,9 @@ use super::state::{PendingInterrupt, StateStore};
 use super::tools::{DiagnosticCommandArgs, HitlMarker, format_hitl_message};
 use crate::error::EngineError;
 use crate::traits::EventStream;
-use context::{IncidentContext, RiskLevel};
+
+/// Safety guard to avoid endless HITL loops during investigation.
+const MAX_INVESTIGATION_COMMANDS: usize = 6;
 
 // ---------------------------------------------------------------------------
 // Public entry points
@@ -80,7 +86,10 @@ pub fn start_investigation(
 ///
 /// Called by `create_resume_stream` when the operator approves an
 /// `IncidentCommand` interrupt.
-#[expect(clippy::too_many_arguments, reason = "All fields restored from stored interrupt context")]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "All fields restored from stored interrupt context"
+)]
 pub fn resume_investigation_command(
     client: Arc<anthropic::Client>,
     config: Arc<RigEngineConfig>,
@@ -97,7 +106,13 @@ pub fn resume_investigation_command(
 ) -> EventStream {
     Box::pin(stream! {
         // Execute the approved diagnostic command
-        let output = super::shell::spawn_command(&command, timeout_secs).await;
+        let raw = super::shell::spawn_command(&command, timeout_secs).await;
+        // Normalize empty output — Anthropic API rejects messages with empty content
+        let output = if raw.trim().is_empty() {
+            "(no output — command produced no stdout/stderr)".to_string()
+        } else {
+            raw
+        };
 
         // Show command output to operator
         let output_block = format!("```\n$ {}\n{}\n```", command, output.trim());
@@ -119,6 +134,83 @@ pub fn resume_investigation_command(
         }
 
         // Continue investigation with updated context
+        let prompt = format!(
+            "You are continuing an incident investigation.\n\n\
+             Evidence collected so far:\n{}\n\n\
+             The last command you requested was `{}` and here is its output:\n{}\n\n\
+             Continue the investigation. If you need more information, call execute_diagnostic_command. \
+             If you have sufficient evidence to determine the root cause, respond with your findings \
+             as text (do NOT call any tool).",
+            context.to_prompt_json(),
+            command,
+            output.trim()
+        );
+
+        let events = run_investigation_step(
+            Arc::clone(&client),
+            Arc::clone(&config),
+            Arc::clone(&state),
+            thread_id.clone(),
+            context,
+            prompt,
+            run_id.clone(),
+        );
+
+        for await event in events {
+            yield event;
+        }
+    })
+}
+
+/// Resume the investigation with a pre-provided command output.
+///
+/// Called by `create_resume_stream` when the terminal PTY already executed
+/// the diagnostic command and sent back a `CommandOutput` resume response.
+/// Identical to `resume_investigation_command` but skips the `spawn_command` call.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "All fields restored from stored interrupt context"
+)]
+pub fn resume_investigation_with_output(
+    client: Arc<anthropic::Client>,
+    config: Arc<RigEngineConfig>,
+    state: Arc<StateStore>,
+    thread_id: infraware_shared::ThreadId,
+    command: String,
+    motivation: String,
+    needs_continuation: bool,
+    risk_level: RiskLevel,
+    expected_diagnostic_value: String,
+    mut context: IncidentContext,
+    run_id: String,
+    output: String,
+) -> EventStream {
+    Box::pin(stream! {
+        // Normalize empty output — Anthropic API rejects messages with empty content
+        let output = if output.trim().is_empty() {
+            "(no output — command produced no stdout/stderr)".to_string()
+        } else {
+            output
+        };
+
+        // Show command output to operator
+        let output_block = format!("```\n$ {}\n{}\n```", command, output.trim());
+        yield Ok(AgentEvent::Message(MessageEvent::assistant(&output_block)));
+
+        // Record result in context with the full metadata approved by the operator
+        context.add_command_result(context::CommandResult {
+            command: command.clone(),
+            output: output.clone(),
+            motivation,
+            risk_level,
+            expected_diagnostic_value,
+        });
+
+        if !needs_continuation {
+            yield Ok(AgentEvent::end());
+            return;
+        }
+
         let prompt = format!(
             "You are continuing an incident investigation.\n\n\
              Evidence collected so far:\n{}\n\n\
@@ -189,7 +281,68 @@ fn run_investigation_step(
             if intercepted.tool_name == "execute_diagnostic_command"
                 && let Ok(args) = serde_json::from_str::<DiagnosticCommandArgs>(&intercepted.args)
             {
-                let hitl_message = format_hitl_message(&args);
+                let normalized_cmd = args.command.trim().to_ascii_lowercase();
+                let duplicate_count = context
+                    .commands_executed
+                    .iter()
+                    .filter(|r| r.command.trim().to_ascii_lowercase() == normalized_cmd)
+                    .count();
+
+                if duplicate_count > 0 {
+                    tracing::warn!(
+                        run_id = %run_id,
+                        command = %args.command,
+                        duplicate_count,
+                        "Investigator requested a duplicate diagnostic command; forcing analysis phase"
+                    );
+
+                    let forced_findings = format!(
+                        "Loop guard activated: command `{}` was already executed {} time(s). \
+                         Proceeding with available evidence to avoid redundant diagnostics.",
+                        args.command, duplicate_count
+                    );
+                    yield Ok(AgentEvent::Message(MessageEvent::assistant(&forced_findings)));
+                    for await event in run_analysis_and_report(
+                        Arc::clone(&client),
+                        Arc::clone(&config),
+                        context,
+                        forced_findings,
+                        run_id.clone(),
+                    ) {
+                        yield event;
+                    }
+                    return;
+                }
+
+                if context.commands_executed.len() >= MAX_INVESTIGATION_COMMANDS {
+                    tracing::warn!(
+                        run_id = %run_id,
+                        max_steps = MAX_INVESTIGATION_COMMANDS,
+                        "Investigation reached max diagnostic commands; forcing analysis phase"
+                    );
+
+                    let forced_findings = format!(
+                        "Step limit reached ({} diagnostic commands approved). \
+                         Proceeding to analysis with collected evidence.",
+                        MAX_INVESTIGATION_COMMANDS
+                    );
+                    yield Ok(AgentEvent::Message(MessageEvent::assistant(&forced_findings)));
+                    for await event in run_analysis_and_report(
+                        Arc::clone(&client),
+                        Arc::clone(&config),
+                        context,
+                        forced_findings,
+                        run_id.clone(),
+                    ) {
+                        yield event;
+                    }
+                    return;
+                }
+
+                let mut hitl_message = format_hitl_message(&args);
+                if std::env::var("SIM_FIXTURE").is_ok() {
+                    hitl_message.push_str("\n[SIM_MODE=backend_execution]");
+                }
                 let pending = PendingInterrupt::incident_command(
                     args.command.clone(),
                     args.motivation.clone(),

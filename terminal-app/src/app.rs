@@ -617,7 +617,32 @@ impl InfrawareApp {
         match submission {
             HitlSubmission::Approval { command, approved } => {
                 if approved {
-                    self.execute_approved_command(command);
+                    let approval_message = self
+                        .state
+                        .active_session()
+                        .and_then(|s| match &s.mode {
+                            AppMode::AwaitingApproval { message, .. } => Some(message.clone()),
+                            _ => None,
+                        })
+                        .unwrap_or_default();
+
+                    if Self::should_use_backend_execution(&approval_message) {
+                        tracing::info!(
+                            "User approved command (backend execution mode): {}",
+                            command
+                        );
+                        self.llm.resume_approved(&self.runtime);
+                        if let Some(session) = self.state.active_session_mut() {
+                            let echo = format!("Approved (backend execution): {}\r\n", command);
+                            session
+                                .vte_parser
+                                .advance(&mut session.terminal_handler, echo.as_bytes());
+                            session.mode = AppMode::WaitingLLM;
+                            session.agent_state.start_stream();
+                        }
+                    } else {
+                        self.execute_approved_command(command);
+                    }
                 } else {
                     self.reject_command(command);
                 }
@@ -631,6 +656,18 @@ impl InfrawareApp {
                 }
             }
         }
+    }
+
+    /// Decide if approved commands should be executed by backend instead of PTY.
+    ///
+    /// Backend execution is enabled when:
+    /// - `INFRAWARE_HITL_EXECUTION=backend`, or
+    /// - approval message contains the simulation marker injected by backend.
+    fn should_use_backend_execution(approval_message: &str) -> bool {
+        std::env::var("INFRAWARE_HITL_EXECUTION")
+            .map(|v| v.eq_ignore_ascii_case("backend"))
+            .unwrap_or(false)
+            || approval_message.contains("[SIM_MODE=backend_execution]")
     }
 
     /// Executes an approved command.
