@@ -43,7 +43,7 @@ cargo watch -x 'run -p infraware-backend'    # Requires: cargo install cargo-wat
 cargo +nightly fmt --all && cargo clippy --workspace # Always format with nightly to support rustfmt.toml rules
 cargo clippy --workspace -- -D warnings    # CI-strict mode (warnings = errors)
 
-# Coverage (CI enforces 60% minimum, excluding UI/PTY/VTE modules)
+# Coverage (CI enforces 50% minimum, excluding UI/PTY/VTE modules)
 cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info
 cargo llvm-cov --all-features --workspace --summary-only  # Quick summary
 
@@ -248,6 +248,12 @@ RUST_LOG="infraware_backend=debug"  # tracing level
 - **NO** Co-Authored-By, emojis, or AI attribution
 - Run `cargo fmt` before committing
 
+### Pull Requests
+
+- Include how to test (commands and expected outcome)
+- Include screenshots or recordings for UI changes in `terminal-app/`
+- Link related issues if applicable
+
 ### Error Handling
 
 - Use `anyhow::Result` for application code
@@ -324,13 +330,46 @@ The RigEngine uses **rig-rs** to build a native Rust agent with Anthropic Claude
 - `crates/infraware-engine/src/adapters/rig/tools/ask_user.rs` - AskUserTool for questions
 - `crates/shared/src/events.rs` - Interrupt enum with needs_continuation field
 
+## Memory System (RigEngine Feature)
+
+**Status**: `feat/memory` branch — two systems at different maturity levels.
+
+### Session Memory (Complete, Active)
+
+Persistent facts/preferences the LLM learns about the user across sessions.
+
+- **Storage**: JSON at `MEMORY_PATH` (default: `./.infraware/memory.json`)
+- **How it works**: `MemoryStore::load_or_create()` loads on startup; `build_preamble()` injects stored facts into system prompt; `SaveMemoryTool` lets the agent persist new facts mid-conversation
+- **Categories**: Preference, PersonalFact, Workflow, Restriction, Convention
+- **Eviction**: FIFO rotation when `MEMORY_LIMIT` entries exceeded (default: 200)
+- **Files**:
+  - `crates/backend-engine/src/adapters/rig/memory.rs` — MemoryStore, MemoryEntry, SaveMemoryTool
+  - `crates/backend-engine/src/adapters/rig/orchestrator.rs` — preamble injection (line ~106), tool registration (line ~116)
+  - `crates/backend-engine/src/adapters/rig/config.rs` — MemoryConfig with env var loading
+
+### Interaction Memory (Framework Complete, Not Yet Wired)
+
+Learns from past executed commands and NL queries via text similarity search.
+
+- **Storage**: JSONL append-only at `~/.local/share/infraware/memory/interactions.jsonl`
+- **Architecture**: Strategy pattern — `JsonlStorage` (Phase 1 text search) + `NoopEmbedding` (placeholder) + `RegexIntentGenerator` (heuristic intent)
+- **Status**: Module code complete and tested; pre-retrieval/capture hooks not yet called from `create_run_stream()` / `create_resume_stream()`
+- **Files**: `crates/backend-engine/src/adapters/rig/memory/` — `mod.rs` (MemoryStore + ActiveMemory alias), `models.rs`, `traits.rs`, `storage/jsonl.rs`, `intent/regex_intent.rs`
+
+### Memory Env Vars (feature: rig-memory)
+
+```bash
+MEMORY_PATH="./.infraware/memory.json"  # Session memory JSON path
+MEMORY_LIMIT="200"                       # Max session memory entries
+```
+
 ## CI Pipeline
 
 CI runs on PRs to `main` and pushes to `main` (only when `terminal-app/**` changes):
 
 1. **Format Check**: `cargo fmt --all --check`
 2. **Clippy**: `cargo clippy --all-targets --all-features -- -D warnings`
-3. **Test Coverage**: 75% minimum threshold (excludes `main.rs`, `app/behavior.rs`, `app/terminal_renderer.rs`,
+3. **Test Coverage**: 50% minimum threshold (excludes `main.rs`, `app/behavior.rs`, `app/terminal_renderer.rs`,
    `app/render.rs`, `ui/`)
 4. **Build**: Cross-platform (ubuntu-latest, macos-latest)
 

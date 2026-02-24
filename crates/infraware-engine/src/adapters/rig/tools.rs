@@ -8,15 +8,19 @@
 //! rig-rs's native function calling system via `PromptHook`.
 
 mod ask_user;
+mod diagnostic_command;
 mod shell;
+mod start_incident;
 
 // Tool result types - used by orchestrator for HITL detection
 pub use ask_user::AskUserResult;
 // Tool implementations - registered with agent via .tool()
 pub use ask_user::{AskUserArgs, AskUserTool};
+pub use diagnostic_command::{DiagnosticCommandArgs, DiagnosticCommandTool, format_hitl_message};
 use infraware_shared::Interrupt;
 use serde::{Deserialize, Serialize};
 pub use shell::{ShellCommandArgs, ShellCommandResult, ShellCommandTool};
+pub use start_incident::{StartIncidentArgs, StartIncidentInvestigationTool};
 
 /// Unified HITL marker that can represent any tool result requiring user interaction
 ///

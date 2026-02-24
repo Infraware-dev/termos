@@ -5,8 +5,10 @@
 
 mod config;
 mod engine;
+pub mod incident;
 mod memory;
 mod orchestrator;
+mod shell;
 mod state;
 mod tools;
 
