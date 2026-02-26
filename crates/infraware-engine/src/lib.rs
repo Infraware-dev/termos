@@ -3,17 +3,12 @@
 //! This crate provides the `AgenticEngine` trait that allows swapping
 //! different agent implementations:
 //! - `MockEngine` - For testing
-//! - `HttpEngine` - Proxy to LangGraph server (feature: `http`)
-//! - `ProcessEngine` - Subprocess via stdio (feature: `process`)
-//! - `RigEngine` - Native rig-rs implementation (future)
+//! - `RigEngine` - Native rig-rs agent using Anthropic Claude API (default)
 
 pub mod adapters;
 mod error;
 mod traits;
 mod types;
-
-#[cfg(feature = "process")]
-pub mod ipc;
 
 pub use error::EngineError;
 // Re-export shared types for convenience

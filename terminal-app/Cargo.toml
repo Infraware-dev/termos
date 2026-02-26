@@ -18,7 +18,6 @@ egui_tiles = "0.14.1"
 
 # PTY
 portable-pty = "0.9.0"
-uuid = { workspace = true }
 
 # Async runtime
 tokio = { workspace = true }

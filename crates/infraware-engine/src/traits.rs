@@ -17,9 +17,7 @@ pub type EventStream = Pin<Box<dyn Stream<Item = Result<AgentEvent, EngineError>
 ///
 /// This trait abstracts over different agent backends:
 /// - [`MockEngine`](crate::adapters::MockEngine) - Returns canned responses for testing
-/// - [`HttpEngine`](crate::adapters::HttpEngine) - Proxies to a LangGraph server via HTTP
-/// - [`ProcessEngine`](crate::adapters::ProcessEngine) - Communicates with a subprocess via stdio
-/// - [`RigEngine`](crate::adapters::RigEngine) - Native rig-rs implementation (future)
+/// - [`RigEngine`](crate::adapters::RigEngine) - Native rig-rs agent using Anthropic Claude API
 ///
 /// All implementations must be thread-safe (`Send + Sync`).
 #[async_trait]

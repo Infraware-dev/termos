@@ -21,10 +21,6 @@ serde_json = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
 
-# For HTTP adapter (optional feature)
-reqwest = { workspace = true, optional = true }
-bytes = { workspace = true, optional = true }
-
 # For Rig adapter (optional feature)
 chrono = { workspace = true, optional = true, features = ["serde"] }
 rig-core = { workspace = true, optional = true }
@@ -35,7 +31,5 @@ schemars = { workspace = true, optional = true }
 tempfile = { workspace = true }
 
 [features]
-default = []
-http = ["reqwest", "bytes"]
-process = []
+default = ["rig"]
 rig = ["dep:chrono", "dep:rig-core", "dep:regex", "dep:schemars"]

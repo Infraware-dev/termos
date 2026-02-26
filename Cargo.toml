@@ -2,8 +2,8 @@
 resolver = "2"
 members = [
   "crates/shared",
-  "crates/backend-api",
-  "crates/backend-engine",
+  "crates/infraware-backend",
+  "crates/infraware-engine",
   "terminal-app",
 ]
 
@@ -80,7 +80,7 @@ metrics-exporter-prometheus = "0.16"
 
 # Internal crates
 infraware-shared = { path = "crates/shared" }
-infraware-engine = { path = "crates/backend-engine" }
+infraware-engine = { path = "crates/infraware-engine" }
 
 # Optimize dev builds for acceptable frame rates in GUI applications.
 # opt-level 1 enables basic optimizations (inlining, dead code elimination)

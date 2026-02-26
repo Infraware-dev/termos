@@ -14,7 +14,7 @@ path = "src/main.rs"
 
 [dependencies]
 infraware-shared = { workspace = true }
-infraware-engine = { workspace = true, features = ["http", "process"] }
+infraware-engine = { workspace = true }
 
 # Web framework
 axum = { workspace = true }
@@ -46,5 +46,5 @@ metrics = { workspace = true }
 metrics-exporter-prometheus = { workspace = true }
 
 [features]
-default = []
+default = ["rig"]
 rig = ["infraware-engine/rig"]

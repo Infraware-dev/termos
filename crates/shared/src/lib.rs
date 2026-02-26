@@ -2,7 +2,7 @@
 //!
 //! This crate contains the API contract types shared between:
 //! - `terminal-app`: The egui terminal client
-//! - `backend-api`: The axum backend server
+//! - `infraware-backend`: The axum backend server
 
 pub mod events;
 pub mod models;

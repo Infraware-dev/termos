@@ -12,9 +12,7 @@ use axum::http::Method;
 use axum::response::IntoResponse;
 use axum::routing::get;
 use infraware_engine::AgenticEngine;
-use infraware_engine::adapters::{
-    HttpEngine, HttpEngineConfig, MockEngine, ProcessEngine, ProcessEngineConfig, Workflow,
-};
+use infraware_engine::adapters::{MockEngine, Workflow};
 #[cfg(feature = "rig")]
 use infraware_engine::adapters::{RigEngine, RigEngineConfig};
 use metrics_exporter_prometheus::{Matcher, PrometheusBuilder, PrometheusHandle};
@@ -141,18 +139,10 @@ async fn security_headers_middleware(
 
 /// Configuration from environment variables
 struct Config {
-    /// Engine type: "mock", "http", or "process"
+    /// Engine type: "mock" or "rig"
     engine_type: String,
-    /// LangGraph server URL (for http engine)
-    langgraph_url: String,
     /// Port to bind to
     port: u16,
-    /// Bridge command (for process engine)
-    bridge_command: String,
-    /// Bridge script path (for process engine)
-    bridge_script: String,
-    /// Bridge working directory (for process engine)
-    bridge_working_dir: Option<String>,
     /// Allowed CORS origins (comma-separated, or "*" for any)
     allowed_origins: String,
     /// API key for authentication (if empty, auth is disabled)
@@ -167,17 +157,10 @@ impl Config {
     fn from_env() -> Self {
         Self {
             engine_type: std::env::var("ENGINE_TYPE").unwrap_or_else(|_| "mock".to_string()),
-            langgraph_url: std::env::var("LANGGRAPH_URL")
-                .unwrap_or_else(|_| "http://localhost:2024".to_string()),
             port: std::env::var("PORT")
                 .ok()
                 .and_then(|p| p.parse().ok())
                 .unwrap_or(8080),
-            bridge_command: std::env::var("BRIDGE_COMMAND")
-                .unwrap_or_else(|_| "python3".to_string()),
-            bridge_script: std::env::var("BRIDGE_SCRIPT")
-                .unwrap_or_else(|_| "bin/engine-bridge/main.py".to_string()),
-            bridge_working_dir: std::env::var("BRIDGE_WORKING_DIR").ok(),
             allowed_origins: std::env::var("ALLOWED_ORIGINS")
                 .unwrap_or_else(|_| "http://localhost:3000,http://localhost:8080".to_string()),
             api_key: std::env::var("API_KEY").ok().filter(|k| !k.is_empty()),
@@ -232,32 +215,6 @@ fn create_engine(config: &Config) -> anyhow::Result<Arc<dyn AgenticEngine>> {
             tracing::info!("Creating RigEngine");
             let engine_config = RigEngineConfig::from_env()?;
             let engine = RigEngine::new(engine_config)?;
-            Ok(Arc::new(engine))
-        }
-        "http" => {
-            tracing::info!(
-                langgraph_url = %config.langgraph_url,
-                "Creating HttpEngine"
-            );
-            let engine_config = HttpEngineConfig::new(&config.langgraph_url);
-            let engine = HttpEngine::new(engine_config)?;
-            Ok(Arc::new(engine))
-        }
-        "process" => {
-            tracing::info!(
-                command = %config.bridge_command,
-                script = %config.bridge_script,
-                "Creating ProcessEngine"
-            );
-            let mut engine_config = ProcessEngineConfig::new(&config.bridge_command)
-                .with_arg(&config.bridge_script)
-                .with_env("LANGGRAPH_URL", &config.langgraph_url);
-
-            if let Some(ref dir) = config.bridge_working_dir {
-                engine_config = engine_config.with_working_dir(dir);
-            }
-
-            let engine = ProcessEngine::new(engine_config);
             Ok(Arc::new(engine))
         }
         _ => {
