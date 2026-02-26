@@ -1826,6 +1826,7 @@ dependencies = [
  "egui_tiles",
  "futures",
  "image",
+ "infraware-engine",
  "infraware-shared",
  "libc",
  "mimalloc",
