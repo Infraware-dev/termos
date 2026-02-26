@@ -56,7 +56,11 @@ impl<'a> LlmEventHandler<'a> {
                 self.handle_stream_complete();
             }
             // Streaming HITL - command approval
-            AppBackgroundEvent::LlmCommandApproval { command, message, .. } => {
+            AppBackgroundEvent::LlmCommandApproval {
+                command,
+                message,
+                needs_continuation,
+            } => {
                 // Finalize any pending output first
                 self.finalize_incremental_output();
                 let session = match self.state.active_session_mut() {
@@ -64,7 +68,7 @@ impl<'a> LlmEventHandler<'a> {
                     None => return,
                 };
                 session.agent_state.end_stream();
-                self.handle_command_approval(command, message);
+                self.handle_command_approval(command, message, needs_continuation);
             }
             // Streaming HITL - question
             AppBackgroundEvent::LlmQuestion { question, options } => {
@@ -232,8 +236,17 @@ impl<'a> LlmEventHandler<'a> {
     }
 
     /// Handles LLM command approval request.
-    fn handle_command_approval(&mut self, command: String, message: String) {
-        tracing::info!("LLM requested command approval: {}", command);
+    fn handle_command_approval(
+        &mut self,
+        command: String,
+        message: String,
+        needs_continuation: bool,
+    ) {
+        tracing::info!(
+            "LLM requested command approval: {} (needs_continuation={})",
+            command,
+            needs_continuation
+        );
 
         let session = match self.state.active_session_mut() {
             Some(s) => s,
@@ -243,6 +256,7 @@ impl<'a> LlmEventHandler<'a> {
         session.mode = AppMode::AwaitingApproval {
             command: command.clone(),
             message: message.clone(),
+            needs_continuation,
         };
 
         let message_formatted = message.replace('\n', "\r\n");

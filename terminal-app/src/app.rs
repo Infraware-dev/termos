@@ -335,17 +335,35 @@ impl InfrawareApp {
             }
 
             // Handle command completion for HITL flow
-            if command_completed && let AppMode::ExecutingCommand { ref command } = session.mode {
-                let cmd = command.clone();
-                let output = session.output_capture.take_output();
-                tracing::info!(
-                    "Session {}: Command '{}' completed, output length: {} chars",
-                    session_id,
-                    cmd,
-                    output.len()
-                );
-                completed_commands.push((session_id, cmd, output));
-                session.mode = AppMode::WaitingLLM;
+            if command_completed {
+                if let AppMode::ExecutingCommand {
+                    ref command,
+                    needs_continuation,
+                } = session.mode
+                {
+                    if needs_continuation {
+                        let cmd = command.clone();
+                        let output = session.output_capture.take_output();
+                        tracing::info!(
+                            "Session {}: Command '{}' completed (needs_continuation=true), output length: {} chars",
+                            session_id,
+                            cmd,
+                            output.len()
+                        );
+                        completed_commands.push((session_id, cmd, output));
+                        session.mode = AppMode::WaitingLLM;
+                    } else {
+                        tracing::info!(
+                            "Session {}: Command '{}' completed (needs_continuation=false), returning to Normal",
+                            session_id,
+                            command
+                        );
+                        session.output_capture.take_output(); // discard
+                        session.mode = AppMode::Normal;
+                        // Clear shell buffer and trigger fresh prompt
+                        session.send_to_pty(b"\x15\n");
+                    }
+                }
             }
         }
 
@@ -704,7 +722,23 @@ impl InfrawareApp {
             }
         }
 
-        tracing::info!("User approved command: {}", command);
+        // Extract needs_continuation from the current AwaitingApproval mode
+        let needs_continuation = self
+            .state
+            .active_session()
+            .and_then(|s| match &s.mode {
+                AppMode::AwaitingApproval {
+                    needs_continuation, ..
+                } => Some(*needs_continuation),
+                _ => None,
+            })
+            .unwrap_or(false);
+
+        tracing::info!(
+            "User approved command: {} (needs_continuation={})",
+            command,
+            needs_continuation
+        );
         let echo = format!("Approved: {}\r\n", command);
 
         if let Some(session) = self.state.active_session_mut() {
@@ -719,8 +753,13 @@ impl InfrawareApp {
 
             session.mode = AppMode::ExecutingCommand {
                 command: command.clone(),
+                needs_continuation,
             };
-            tracing::debug!("Entered ExecutingCommand mode for: {}", command);
+            tracing::debug!(
+                "Entered ExecutingCommand mode for: {} (needs_continuation={})",
+                command,
+                needs_continuation
+            );
         }
     }
 

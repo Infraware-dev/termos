@@ -26,14 +26,21 @@ pub enum AppMode {
     /// Waiting for LLM response after "command not found"
     WaitingLLM,
     /// LLM requested command approval (y/n)
-    AwaitingApproval { command: String, message: String },
+    AwaitingApproval {
+        command: String,
+        message: String,
+        needs_continuation: bool,
+    },
     /// LLM asked a question (free-text answer)
     AwaitingAnswer {
         question: String,
         options: Option<Vec<String>>,
     },
     /// Executing approved command in PTY, capturing output
-    ExecutingCommand { command: String },
+    ExecutingCommand {
+        command: String,
+        needs_continuation: bool,
+    },
 }
 
 /// Derive AppMode from EngineStatus
@@ -47,8 +54,14 @@ impl From<EngineStatus> for AppMode {
             EngineStatus::Thinking => Self::WaitingLLM,
             EngineStatus::Interrupted(interrupt) => match interrupt {
                 Interrupt::CommandApproval {
-                    command, message, ..
-                } => Self::AwaitingApproval { command, message },
+                    command,
+                    message,
+                    needs_continuation,
+                } => Self::AwaitingApproval {
+                    command,
+                    message,
+                    needs_continuation,
+                },
                 Interrupt::Question { question, options } => {
                     Self::AwaitingAnswer { question, options }
                 }
@@ -175,12 +188,14 @@ mod tests {
         assert!(state.can_transition_to(&AppMode::AwaitingApproval {
             command: "test".to_string(),
             message: "msg".to_string(),
+            needs_continuation: false,
         }));
 
         // AwaitingApproval → Normal
         let state = AppMode::AwaitingApproval {
             command: "test".to_string(),
             message: "msg".to_string(),
+            needs_continuation: false,
         };
         assert!(state.can_transition_to(&AppMode::Normal));
     }
@@ -192,6 +207,7 @@ mod tests {
         assert!(!state.can_transition_to(&AppMode::AwaitingApproval {
             command: "test".to_string(),
             message: "msg".to_string(),
+            needs_continuation: false,
         }));
 
         // Normal → AwaitingAnswer (must go through WaitingLLM)
@@ -208,7 +224,8 @@ mod tests {
         assert_eq!(
             AppMode::AwaitingApproval {
                 command: "test".to_string(),
-                message: "msg".to_string()
+                message: "msg".to_string(),
+                needs_continuation: false,
             }
             .name(),
             "AwaitingApproval"
@@ -244,6 +261,7 @@ mod tests {
             AppMode::AwaitingApproval {
                 command: "ls -la".to_string(),
                 message: "List files".to_string(),
+                needs_continuation: false,
             }
         );
     }

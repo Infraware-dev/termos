@@ -187,6 +187,7 @@ mod tests {
         let mode = AppMode::AwaitingApproval {
             command: "ls -la".to_string(),
             message: "Run this?".to_string(),
+            needs_continuation: false,
         };
 
         let action = HitlHandler::process_keyboard_action(
@@ -211,6 +212,7 @@ mod tests {
         let mode = AppMode::AwaitingApproval {
             command: "rm -rf /".to_string(),
             message: "Run this?".to_string(),
+            needs_continuation: false,
         };
 
         let action = HitlHandler::process_keyboard_action(
