@@ -219,6 +219,8 @@ impl LlmController {
         tx: &mpsc::Sender<AppBackgroundEvent>,
         cancel_token: &CancellationToken,
     ) {
+        let mut hitl_interrupted = false;
+
         while let Some(result) = stream.next().await {
             if cancel_token.is_cancelled() {
                 return;
@@ -245,6 +247,7 @@ impl LlmController {
                                     AppBackgroundEvent::LlmQuestion { question, options }
                                 }
                             };
+                            hitl_interrupted = true;
                             let _ = tx.send(event);
                         }
                     }
@@ -269,7 +272,11 @@ impl LlmController {
             }
         }
 
-        // Stream ended without explicit End event
-        let _ = tx.send(AppBackgroundEvent::LlmStreamComplete);
+        // Stream ended without explicit End event.
+        // If the stream was paused for HITL (interrupt emitted), don't signal
+        // completion — the interaction will resume after user input.
+        if !hitl_interrupted {
+            let _ = tx.send(AppBackgroundEvent::LlmStreamComplete);
+        }
     }
 }
