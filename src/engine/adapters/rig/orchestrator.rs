@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use async_stream::stream;
 use futures::StreamExt;
-use rig::agent::{Agent, CancelSignal, PromptHook};
+use rig::agent::{Agent, HookAction, PromptHook, ToolCallHookAction};
 use rig::client::CompletionClient;
 use rig::completion::{CompletionModel, CompletionResponse, Prompt};
 use rig::providers::anthropic;
@@ -62,9 +62,9 @@ impl PromptHook<anthropic::completion::CompletionModel> for HitlHook {
         &self,
         tool_name: &str,
         tool_call_id: Option<String>,
+        _internal_call_id: &str,
         args: &str,
-        cancel_sig: CancelSignal,
-    ) -> impl Future<Output = ()> + Send {
+    ) -> impl Future<Output = ToolCallHookAction> + Send {
         // Capture values for the async block
         let tool_name = tool_name.to_string();
         let args = args.to_string();
@@ -90,21 +90,24 @@ impl PromptHook<anthropic::completion::CompletionModel> for HitlHook {
                 });
 
                 // Stop automatic tool execution - we'll handle it after user approval
-                cancel_sig.cancel();
+                return ToolCallHookAction::Skip {
+                    reason: "Intercepted for HITL approval".into(),
+                };
             }
+
+            ToolCallHookAction::cont()
         }
     }
 
-    #[allow(clippy::manual_async_fn)] // Trait signature requires this form
+    #[expect(clippy::manual_async_fn, reason = "Trait signature requires this form")]
     fn on_completion_response(
         &self,
         _prompt: &rig::completion::message::Message,
         _response: &CompletionResponse<
             <anthropic::completion::CompletionModel as CompletionModel>::Response,
         >,
-        _cancel_sig: CancelSignal,
-    ) -> impl Future<Output = ()> + Send {
-        async {}
+    ) -> impl Future<Output = HookAction> + Send {
+        async { HookAction::cont() }
     }
 }
 
