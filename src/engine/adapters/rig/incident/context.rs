@@ -137,10 +137,6 @@ impl IncidentContext {
     }
 
     /// Record a significant finding.
-    #[expect(
-        dead_code,
-        reason = "Available for InvestigatorAgent to promote command results to findings"
-    )]
     pub fn add_finding(&mut self, finding: Finding) {
         self.findings.push(finding);
     }

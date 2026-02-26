@@ -854,10 +854,10 @@ mod tests {
 
         let mut found_interrupt = false;
         while let Some(event) = stream.next().await {
-            if let AgentEvent::Updates { interrupts } = event.unwrap() {
-                if interrupts.is_some() {
-                    found_interrupt = true;
-                }
+            if let AgentEvent::Updates { interrupts } = event.unwrap()
+                && interrupts.is_some()
+            {
+                found_interrupt = true;
             }
         }
 

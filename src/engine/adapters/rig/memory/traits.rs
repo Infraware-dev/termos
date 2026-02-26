@@ -8,10 +8,6 @@ use anyhow::Result;
 use super::models::{DataType, InteractionRecord, SearchResult};
 
 /// Storage backend for interaction records
-#[expect(
-    dead_code,
-    reason = "Phase 2 memory infrastructure - used in tests and future phases"
-)]
 pub trait MemoryStorage: Send + Sync {
     /// Append an interaction record to storage
     fn append(&self, record: &InteractionRecord) -> impl Future<Output = Result<()>> + Send;
@@ -39,10 +35,6 @@ pub trait MemoryStorage: Send + Sync {
 }
 
 /// Embedding engine for generating vector representations
-#[expect(
-    dead_code,
-    reason = "Phase 2 memory infrastructure - used in tests and future phases"
-)]
 pub trait EmbeddingEngine: Send + Sync {
     /// Generate an embedding vector for the given text
     fn embed(&self, text: &str) -> Result<Vec<f32>>;
