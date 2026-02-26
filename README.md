@@ -15,32 +15,18 @@ sudo apt install -y pkg-config libssl-dev libxcb-shape0-dev libxcb-xfixes0-dev
 
 ## Quick Start
 
-### 1. Avvia il Backend
-
 ```bash
 # Clona e entra nella directory
 cd infraware-terminal
 
-# Avvia il backend con MockEngine (nessuna dipendenza esterna)
-cargo run -p infraware-backend
+# Avvia con MockEngine (nessuna dipendenza esterna)
+ENGINE_TYPE=mock cargo run
+
+# Oppure con RigEngine (default, richiede API key Anthropic)
+ANTHROPIC_API_KEY=sk-... cargo run
 ```
 
-Il server parte su `http://localhost:8080`. Verifica con:
-
-```bash
-curl http://localhost:8080/health
-# {"status":"healthy","engine":"mock",...}
-```
-
-### 2. Avvia il Terminal
-
-In un altro terminale:
-
-```bash
-cargo run -p infraware-terminal
-```
-
-### 3. Usa l'assistente AI
+### Usa l'assistente AI
 
 Nel terminale, prefissa con `?` per query in linguaggio naturale:
 
@@ -52,60 +38,123 @@ Nel terminale, prefissa con `?` per query in linguaggio naturale:
 
 ## Configurazione Engine
 
-| Engine            | Uso                           | Comando                                                                                      |
-|-------------------|-------------------------------|----------------------------------------------------------------------------------------------|
-| **RigEngine**     | Agente Rust nativo (default)  | `ANTHROPIC_API_KEY=sk-... cargo run -p infraware-backend`                                    |
-| **MockEngine**    | Testing/sviluppo              | `ENGINE_TYPE=mock cargo run -p infraware-backend`                                            |
+L'engine gira in-process nel terminale (nessun backend separato).
+
+| Engine            | Uso                           | Comando                                            |
+|-------------------|-------------------------------|----------------------------------------------------|
+| **RigEngine**     | Agente Rust nativo (default)  | `ANTHROPIC_API_KEY=sk-... cargo run`               |
+| **MockEngine**    | Testing/sviluppo              | `ENGINE_TYPE=mock cargo run`                       |
 
 ## Variabili d'Ambiente
 
 ```bash
-# Backend
+# Engine
 ENGINE_TYPE=rig|mock             # Default: rig
-PORT=8080                        # Default: 8080
 ANTHROPIC_API_KEY=sk-...         # Richiesta per RigEngine
-API_KEY=your-secret-key          # Vuoto = auth disabilitata
-RATE_LIMIT_RPM=100               # 0 = disabilitato
-MOCK_WORKFLOW_FILE=path/to/workflow.json  # MockEngine only
+ANTHROPIC_MODEL=claude-sonnet-4-20250514  # Opzionale, ha un default
+RIG_MAX_TOKENS=4096              # Opzionale
+RIG_TEMPERATURE=0.7              # Opzionale
+RIG_TIMEOUT_SECS=300             # Opzionale
 
-# Terminal
-INFRAWARE_BACKEND_URL=http://localhost:8080
+# Memory
+MEMORY_PATH=./.infraware/memory.json  # Path sessione memoria
+MEMORY_LIMIT=200                      # Max entries memoria
+
+# MockEngine
+MOCK_WORKFLOW_FILE=path/to/workflow.json  # Opzionale
+
+# Logging
 LOG_LEVEL=debug|info|warn|error  # Default: info
 ```
 
 ## Comandi Utili
 
 ```bash
-# Build tutto
-cargo build --workspace
+# Build
+cargo build
 
 # Test
-cargo test --workspace
+cargo test
 
 # Lint
-cargo +nightly fmt --all && cargo clippy --workspace
+cargo +nightly fmt --all && cargo clippy
 
 # Watch mode (ricompila automaticamente)
-cargo watch -x 'run -p infraware-backend'
+cargo watch -x run
 ```
 
 ## Struttura Progetto
 
 ```
 infraware-terminal/
-├── terminal-app/              # Client terminal (egui)
-├── crates/
-│   ├── infraware-backend/     # Server REST/SSE (axum)
-│   ├── infraware-engine/      # Engine trait + adapters
-│   └── shared/                # Tipi condivisi
-└── docs/                      # Documentazione
+├── Cargo.toml                  # Single crate, no workspace
+├── src/
+│   ├── main.rs
+│   ├── app.rs                  # Main InfrawareApp, eframe::App impl
+│   ├── app/                    # Handler modules
+│   │   ├── input_handler.rs    # Keyboard input
+│   │   ├── hitl_handler.rs     # Human-in-the-loop
+│   │   ├── llm_controller.rs   # Drives engine directly
+│   │   ├── llm_event_handler.rs
+│   │   ├── session_manager.rs
+│   │   ├── tiles_manager.rs
+│   │   └── ...
+│   ├── engine/                 # Agentic engine (in-process)
+│   │   ├── mod.rs
+│   │   ├── traits.rs           # AgenticEngine, EventStream
+│   │   ├── adapters/
+│   │   │   ├── mock.rs         # MockEngine (testing)
+│   │   │   └── rig/            # RigEngine (Anthropic Claude)
+│   │   └── shared/             # Event types, models
+│   ├── terminal/               # VTE parser, grid, cell
+│   ├── pty/                    # PTY session, async I/O
+│   ├── llm/                    # Markdown renderer
+│   ├── input/                  # Keyboard mapping, command classification
+│   ├── ui/                     # egui helpers, theme
+│   └── config.rs
+└── docs/
 ```
 
-## Documentazione
+## Architettura
 
-- [Getting Started](docs/GETTING_STARTED.md) - Guida dettagliata
-- [Backend Architecture](docs/BACKEND_ARCHITECTURE.md) - Architettura backend
-- [OpenAPI Spec](http://localhost:8080/api-docs/openapi.json) - API docs (quando il server e' attivo)
+```
+┌─────────────────────────────────────────────┐
+│ infraware-terminal (single binary)          │
+│                                             │
+│  ┌───────────┐     ┌─────────────────────┐  │
+│  │ Terminal   │     │ AgenticEngine       │  │
+│  │ UI (egui) │◄───►│ (in-process)        │  │
+│  └─────┬─────┘     │ ┌────────┐ ┌──────┐ │  │
+│        │           │ │ Mock   │ │ Rig  │ │  │
+│   ┌────▼────┐      │ │ Engine │ │Engine│ │  │
+│   │   PTY   │      │ └────────┘ └──┬───┘ │  │
+│   │ Session │      └───────────────┼─────┘  │
+│   └────┬────┘                      │        │
+│   ┌────▼────┐               ┌──────▼──────┐ │
+│   │  VTE    │               │ Anthropic   │ │
+│   │ Parser  │               │ API         │ │
+│   └─────────┘               └─────────────┘ │
+└─────────────────────────────────────────────┘
+```
+
+I comandi vengono eseguiti tramite il PTY del terminale, non internamente dall'engine.
+
+## Keyboard Shortcuts
+
+| Shortcut                       | Action             | Platform      |
+|--------------------------------|--------------------|---------------|
+| `Cmd+T` / `Ctrl+Shift+T`       | New tab            | macOS / Linux |
+| `Cmd+W` / `Ctrl+Shift+W`       | Close tab          | macOS / Linux |
+| `Ctrl+Tab`                     | Next tab           | All           |
+| `Ctrl+Shift+Tab`               | Previous tab       | All           |
+| `Cmd+Shift+H` / `Ctrl+Shift+H` | Split horizontal   | macOS / Linux |
+| `Cmd+Shift+J` / `Ctrl+Shift+J` | Split vertical     | macOS / Linux |
+| `Cmd+C` / `Ctrl+Shift+C`       | Copy               | macOS / Linux |
+| `Cmd+V` / `Ctrl+Shift+V`       | Paste              | macOS / Linux |
+| `Ctrl+C`                       | SIGINT (interrupt) | All           |
+| `Ctrl+D`                       | EOF                | All           |
+| `Ctrl+L`                       | Clear screen       | All           |
+| `Ctrl+Shift+/`                 | Enter LLM mode     | All           |
 
 ## Mock Workflow File
 
@@ -163,9 +212,6 @@ The workflow file defines the scripted investigation the agent follows.
 | `intents` | `Vec<String>` | Yes      | List of intents the playbook addresses      |
 | `phases`  | `Vec<Phase>`  | Yes      | Ordered list of phases                      |
 
-> Remember that `intents` must start with the words specified at `terminal-app/config/language.toml`, such as "can
-> you", "could you", etc.
-
 #### Phase Object
 
 | Field                  | Type                  | Required | Description                                            |
@@ -197,19 +243,10 @@ The workflow file defines the scripted investigation the agent follows.
 | `impact`     | `String` | User-facing impact                            |
 | `drift_type` | `String` | Classification (e.g., "Infrastructure drift") |
 
-### Run the Backend with a Workflow file
-
-In order to run the `MockEngine` with a custom workflow file, set the
-`MOCK_WORKFLOW_FILE` environment variable to point to the JSON file and the `ENGINE_TYPE` to `mock`:
+### Run with a Workflow file
 
 ```bash
-MOCK_WORKFLOW_FILE=~/Downloads/workflow.json ENGINE_TYPE=mock cargo run -p infraware-backend
-```
-
-Then use the terminal setting a mocked API key and backend URL:
-
-```bash
-ANTHROPIC_API_KEY="abcdef" INFRAWARE_BACKEND_URL="http://localhost:8080" cargo run -p infraware-terminal
+MOCK_WORKFLOW_FILE=~/Downloads/workflow.json ENGINE_TYPE=mock cargo run
 ```
 
 ## License
