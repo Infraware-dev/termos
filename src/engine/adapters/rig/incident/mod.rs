@@ -276,7 +276,7 @@ fn run_investigation_step(
 
         let result = agent
             .prompt(&prompt)
-            .multi_turn(1)
+            .max_turns(1)
             .with_hook(hook)
             .await;
 
@@ -446,7 +446,7 @@ fn run_analysis_and_report(
 
         let report_result = reporter
             .prompt(reporter_prompt)
-            .multi_turn(3)
+            .max_turns(3)
             .with_hook(hook)
             .await;
 

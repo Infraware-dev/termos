@@ -247,7 +247,7 @@ async fn run_agent_turn(
     let result = agent
         .prompt(continuation)
         .with_history(&mut chat_history)
-        .multi_turn(1)
+        .max_turns(1)
         .with_hook(hook)
         .await;
 
@@ -367,7 +367,7 @@ pub fn create_run_stream(
         );
 
         // Execute agent with hook to intercept tool calls
-        // multi_turn(1) allows one round of tool execution before stopping
+        // max_turns(1) allows one round of tool execution before stopping
         //
         // NOTE: We intentionally DON'T use chat_history for new queries.
         // Each query is independent - history was causing LLM confusion
@@ -375,7 +375,7 @@ pub fn create_run_stream(
         // History is still stored for resume operations.
         let result = agent
             .prompt(&prompt)
-            .multi_turn(1)
+            .max_turns(1)
             .with_hook(hook)
             .await;
         tracing::debug!("Agent returned result={:?}", result.as_ref().map(|_| "ok").unwrap_or("err"));
