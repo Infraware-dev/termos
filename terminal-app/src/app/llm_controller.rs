@@ -1,26 +1,28 @@
-//! LLM query management and background event handling.
+//! LLM query management via the `AgenticEngine`.
 //!
-//! Provides `LlmController` which manages LLM client lifecycle, query execution,
-//! response rendering, and background event channels.
+//! Provides `LlmController` which drives the engine directly and converts
+//! its event stream into `AppBackgroundEvent` values for the terminal UI.
 
-use std::sync::{Arc, mpsc};
+use std::sync::mpsc;
+use std::sync::Arc;
 
+use futures::StreamExt as _;
 use tokio::runtime::Runtime;
 use tokio_util::sync::CancellationToken;
 
 use super::AppBackgroundEvent;
-use crate::auth::{AuthConfig, Authenticator, HttpAuthenticator};
-use crate::llm::{
-    HttpLLMClient, IncrementalRenderer, LLMClientTrait, LLMStreamEvent, ResponseRenderer,
+use crate::engine::{
+    AgentEvent, AgenticEngine, Interrupt, MockEngine, ResumeResponse, RunInput, ThreadId,
 };
+use crate::llm::IncrementalRenderer;
 
-/// LLM client, response renderer, and background event channels.
+/// Drives the `AgenticEngine` and converts its event stream into
+/// `AppBackgroundEvent` values that the terminal UI can consume.
+#[derive(Debug)]
 pub struct LlmController {
-    /// LLM client for natural language queries
-    pub client: Arc<dyn LLMClientTrait>,
-    /// Response renderer (markdown → ANSI) for non-streaming responses
-    pub response_renderer: ResponseRenderer,
-    /// Incremental renderer for streaming responses
+    engine: Arc<dyn AgenticEngine>,
+    thread_id: Option<ThreadId>,
+    /// Incremental renderer for streaming responses (markdown -> ANSI)
     pub incremental_renderer: IncrementalRenderer,
     /// Channel for background events (sender)
     bg_event_tx: mpsc::Sender<AppBackgroundEvent>,
@@ -30,27 +32,15 @@ pub struct LlmController {
     cancel_token: Option<CancellationToken>,
 }
 
-impl std::fmt::Debug for LlmController {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("LlmController")
-            .field("client", &self.client)
-            .field("incremental_renderer", &self.incremental_renderer)
-            .field("cancel_token", &self.cancel_token.is_some())
-            .finish()
-    }
-}
-
 impl LlmController {
-    /// Creates a new LLM controller with authentication.
-    pub fn new(runtime: &Runtime) -> Self {
+    /// Creates a new controller, selecting the engine from environment.
+    pub fn new() -> Self {
         let (bg_event_tx, bg_event_rx) = mpsc::channel();
-
-        let auth_config = AuthConfig::from_env();
-        let llm_client: Arc<dyn LLMClientTrait> = Self::create_client(&auth_config, runtime);
+        let engine = Self::create_engine();
 
         Self {
-            client: llm_client,
-            response_renderer: ResponseRenderer::new(),
+            engine,
+            thread_id: None,
             incremental_renderer: IncrementalRenderer::new(),
             bg_event_tx,
             bg_event_rx,
@@ -58,158 +48,77 @@ impl LlmController {
         }
     }
 
-    /// Creates an LLM client based on authentication config.
-    fn create_client(auth_config: &AuthConfig, runtime: &Runtime) -> Arc<dyn LLMClientTrait> {
-        if auth_config.is_configured() {
-            let backend_url = auth_config
-                .backend_url
-                .clone()
-                .expect("backend_url must be Some when is_configured() returns true");
-            let api_key = auth_config
-                .api_key
-                .clone()
-                .expect("api_key must be Some when is_configured() returns true");
+    /// Selects and initialises the engine based on `ENGINE_TYPE` env var.
+    fn create_engine() -> Arc<dyn AgenticEngine> {
+        let engine_type = std::env::var("ENGINE_TYPE").unwrap_or_else(|_| "rig".to_string());
 
-            let authenticator = HttpAuthenticator::new(backend_url.clone());
-            let auth_result =
-                runtime.block_on(async { authenticator.authenticate(&api_key).await });
-
-            match auth_result {
-                Ok(response) if response.success => {
-                    tracing::info!("Authentication successful: {}", response.message);
-                    Arc::new(HttpLLMClient::new(backend_url, api_key))
-                }
-                Ok(response) => {
-                    tracing::warn!("Authentication rejected: {}", response.message);
-                    Arc::new(crate::llm::MockLLMClient::new())
+        match engine_type.as_str() {
+            #[cfg(feature = "rig")]
+            "rig" => match crate::engine::RigEngine::from_env() {
+                Ok(engine) => {
+                    tracing::info!("Initialised RigEngine (Anthropic Claude)");
+                    Arc::new(engine)
                 }
                 Err(e) => {
-                    tracing::error!("Authentication failed: {}", e);
-                    Arc::new(crate::llm::MockLLMClient::new())
+                    tracing::warn!("RigEngine init failed ({e}), falling back to MockEngine");
+                    Arc::new(MockEngine::new(None))
                 }
+            },
+            _ => {
+                tracing::info!("Using MockEngine");
+                let workflow = std::env::var("MOCK_WORKFLOW_FILE")
+                    .ok()
+                    .and_then(|path| {
+                        let data = std::fs::read_to_string(&path).ok()?;
+                        serde_json::from_str(&data).ok()
+                    });
+                Arc::new(MockEngine::new(workflow))
             }
-        } else {
-            tracing::warn!("No API key configured, using Mock LLM Client");
-            Arc::new(crate::llm::MockLLMClient::new())
         }
     }
 
-    /// Starts an LLM query in a background task with streaming output.
-    ///
-    /// The query runs in the background and emits `LlmChunk` events as text arrives,
-    /// followed by either `LlmStreamComplete`, `LlmCommandApproval`, `LlmQuestion`, or `LlmError`.
-    pub fn start_query(&mut self, runtime: &Runtime, query: String) {
-        tracing::info!("Starting streaming LLM query: {}", query);
+    /// Starts a new LLM query, spawning a background task that streams
+    /// engine events and forwards them as `AppBackgroundEvent`.
+    pub fn start_query(&mut self, runtime: &Runtime, text: String) {
+        if let Some(token) = self.cancel_token.take() {
+            token.cancel();
+        }
 
-        // Reset incremental renderer for new response
         self.incremental_renderer.reset();
 
-        let llm_client = self.client.clone();
-        let tx = self.bg_event_tx.clone();
-
         let cancel_token = CancellationToken::new();
         self.cancel_token = Some(cancel_token.clone());
 
-        // Create tokio channel for streaming events
-        let (stream_tx, mut stream_rx) = tokio::sync::mpsc::channel::<LLMStreamEvent>(32);
-
-        // Spawn task to forward streaming events to app channel
-        let tx_forwarder = tx.clone();
-        runtime.spawn(async move {
-            while let Some(event) = stream_rx.recv().await {
-                let app_event = match event {
-                    LLMStreamEvent::Chunk(text) => {
-                        tracing::debug!("LLM chunk received: {} chars", text.len());
-                        AppBackgroundEvent::LlmChunk(text)
-                    }
-                    LLMStreamEvent::Complete => {
-                        tracing::info!("LLM stream completed");
-                        AppBackgroundEvent::LlmStreamComplete
-                    }
-                    LLMStreamEvent::CommandApproval { command, message } => {
-                        tracing::info!("LLM command approval requested: {}", command);
-                        AppBackgroundEvent::LlmCommandApproval { command, message }
-                    }
-                    LLMStreamEvent::Question { question, options } => {
-                        tracing::info!("LLM question received: {}", question);
-                        AppBackgroundEvent::LlmQuestion { question, options }
-                    }
-                    LLMStreamEvent::Error(err) => {
-                        tracing::error!("LLM stream error: {}", err);
-                        AppBackgroundEvent::LlmError(err)
-                    }
-                    LLMStreamEvent::Phase(phase) => {
-                        tracing::info!("Incident phase: {:?}", phase);
-                        AppBackgroundEvent::LlmPhase(phase)
-                    }
-                };
-
-                if let Err(e) = tx_forwarder.send(app_event) {
-                    tracing::error!("Failed to forward LLM event: {}", e);
-                    break;
-                }
-            }
-        });
-
-        // Spawn the actual streaming query
-        runtime.spawn(async move {
-            tracing::info!("Background streaming task started for query: {}", query);
-
-            if let Err(e) = llm_client
-                .query_streaming(&query, stream_tx.clone(), cancel_token)
-                .await
-            {
-                // Error already sent through channel in query_streaming
-                tracing::error!("LLM streaming query failed: {}", e);
-            }
-
-            tracing::info!("Background streaming task completed");
-        });
-    }
-
-    /// Resumes LLM run with a text answer.
-    pub fn resume_with_answer(&mut self, runtime: &Runtime, answer: String) {
-        let llm_client = self.client.clone();
+        let engine = Arc::clone(&self.engine);
         let tx = self.bg_event_tx.clone();
-
-        let cancel_token = CancellationToken::new();
-        self.cancel_token = Some(cancel_token.clone());
+        let thread_id = self.thread_id.clone();
 
         runtime.spawn(async move {
-            tokio::select! {
-                _ = cancel_token.cancelled() => {
-                    tracing::info!("Background LLM answer run cancelled");
-                }
-                result = llm_client.resume_with_answer(&answer) => {
-                    match result {
-                        Ok(r) => { let _ = tx.send(AppBackgroundEvent::LlmResult(r)); }
-                        Err(e) => { let _ = tx.send(AppBackgroundEvent::LlmError(e.to_string())); }
+            let thread_id = match thread_id {
+                Some(id) => id,
+                None => match engine.create_thread(None).await {
+                    Ok(id) => id,
+                    Err(e) => {
+                        let _ = tx.send(AppBackgroundEvent::LlmError(format!(
+                            "Failed to create thread: {e}"
+                        )));
+                        return;
                     }
-                }
-            }
-        });
-    }
+                },
+            };
 
-    /// Resumes LLM run with plain command approval (backend executes command).
-    pub fn resume_approved(&mut self, runtime: &Runtime) {
-        let llm_client = self.client.clone();
-        let tx = self.bg_event_tx.clone();
-
-        let cancel_token = CancellationToken::new();
-        self.cancel_token = Some(cancel_token.clone());
-
-        runtime.spawn(async move {
-            tokio::select! {
-                _ = cancel_token.cancelled() => {
-                    tracing::info!("Background LLM approved run cancelled");
+            let input = RunInput::single_user_message(text);
+            let stream = match engine.stream_run(&thread_id, input).await {
+                Ok(s) => s,
+                Err(e) => {
+                    let _ = tx.send(AppBackgroundEvent::LlmError(format!(
+                        "Failed to start run: {e}"
+                    )));
+                    return;
                 }
-                result = llm_client.resume_approved() => {
-                    match result {
-                        Ok(r) => { let _ = tx.send(AppBackgroundEvent::LlmResult(r)); }
-                        Err(e) => { let _ = tx.send(AppBackgroundEvent::LlmError(e.to_string())); }
-                    }
-                }
-            }
+            };
+
+            Self::consume_event_stream(stream, &tx, &cancel_token).await;
         });
     }
 
@@ -220,48 +129,30 @@ impl LlmController {
         command: String,
         output: String,
     ) {
-        let llm_client = self.client.clone();
-        let tx = self.bg_event_tx.clone();
+        self.spawn_resume(runtime, ResumeResponse::command_output(command, output));
+    }
 
-        let cancel_token = CancellationToken::new();
-        self.cancel_token = Some(cancel_token.clone());
+    /// Resumes LLM run with a text answer.
+    pub fn resume_with_answer(&mut self, runtime: &Runtime, answer: String) {
+        self.spawn_resume(runtime, ResumeResponse::answer(answer));
+    }
 
-        runtime.spawn(async move {
-            tokio::select! {
-                _ = cancel_token.cancelled() => {
-                    tracing::info!("Background LLM command output run cancelled");
-                }
-                result = llm_client.resume_with_command_output(&command, &output) => {
-                    match result {
-                        Ok(r) => { let _ = tx.send(AppBackgroundEvent::LlmResult(r)); }
-                        Err(e) => { let _ = tx.send(AppBackgroundEvent::LlmError(e.to_string())); }
-                    }
-                }
-            }
-        });
+    /// Resumes LLM run with plain command approval (backend executes command).
+    pub fn resume_approved(&mut self, runtime: &Runtime) {
+        self.spawn_resume(runtime, ResumeResponse::Approved);
     }
 
     /// Resumes LLM run with rejection (user rejected the command).
     pub fn resume_rejected(&mut self, runtime: &Runtime) {
-        let llm_client = self.client.clone();
-        let tx = self.bg_event_tx.clone();
+        self.spawn_resume(runtime, ResumeResponse::Rejected);
+    }
 
-        let cancel_token = CancellationToken::new();
-        self.cancel_token = Some(cancel_token.clone());
-
-        runtime.spawn(async move {
-            tokio::select! {
-                _ = cancel_token.cancelled() => {
-                    tracing::info!("Background LLM rejected run cancelled");
-                }
-                result = llm_client.resume_rejected() => {
-                    match result {
-                        Ok(r) => { let _ = tx.send(AppBackgroundEvent::LlmResult(r)); }
-                        Err(e) => { let _ = tx.send(AppBackgroundEvent::LlmError(e.to_string())); }
-                    }
-                }
-            }
-        });
+    /// Cancels the active LLM query if one exists.
+    pub fn cancel(&mut self) {
+        if let Some(token) = self.cancel_token.take() {
+            tracing::info!("Cancelling active LLM stream");
+            token.cancel();
+        }
     }
 
     /// Polls and returns pending background events (non-blocking).
@@ -273,11 +164,106 @@ impl LlmController {
         events
     }
 
-    /// Cancels the active LLM query if one exists.
-    pub fn cancel(&mut self) {
+    /// Stores the thread ID for reuse across queries.
+    pub fn set_thread_id(&mut self, id: ThreadId) {
+        self.thread_id = Some(id);
+    }
+
+    /// Spawns a background task that resumes an interrupted run.
+    fn spawn_resume(&mut self, runtime: &Runtime, response: ResumeResponse) {
         if let Some(token) = self.cancel_token.take() {
-            tracing::info!("Cancelling active LLM stream");
             token.cancel();
         }
+
+        self.incremental_renderer.reset();
+
+        let cancel_token = CancellationToken::new();
+        self.cancel_token = Some(cancel_token.clone());
+
+        let engine = Arc::clone(&self.engine);
+        let tx = self.bg_event_tx.clone();
+        let thread_id = self.thread_id.clone();
+
+        runtime.spawn(async move {
+            let Some(thread_id) = thread_id else {
+                let _ = tx.send(AppBackgroundEvent::LlmError(
+                    "No active thread for resume".to_string(),
+                ));
+                return;
+            };
+
+            let stream = match engine.resume_run(&thread_id, response).await {
+                Ok(s) => s,
+                Err(e) => {
+                    let _ = tx.send(AppBackgroundEvent::LlmError(format!(
+                        "Failed to resume run: {e}"
+                    )));
+                    return;
+                }
+            };
+
+            Self::consume_event_stream(stream, &tx, &cancel_token).await;
+        });
+    }
+
+    /// Consumes an engine event stream and forwards events to the UI channel.
+    async fn consume_event_stream(
+        mut stream: crate::engine::EventStream,
+        tx: &mpsc::Sender<AppBackgroundEvent>,
+        cancel_token: &CancellationToken,
+    ) {
+        while let Some(result) = stream.next().await {
+            if cancel_token.is_cancelled() {
+                return;
+            }
+
+            match result {
+                Ok(AgentEvent::Message(msg)) => {
+                    let _ = tx.send(AppBackgroundEvent::LlmChunk(msg.content));
+                }
+                Ok(AgentEvent::Updates { interrupts }) => {
+                    if let Some(interrupts) = interrupts {
+                        for interrupt in interrupts {
+                            let event = match interrupt {
+                                Interrupt::CommandApproval {
+                                    command,
+                                    message,
+                                    needs_continuation,
+                                } => AppBackgroundEvent::LlmCommandApproval {
+                                    command,
+                                    message,
+                                    needs_continuation,
+                                },
+                                Interrupt::Question { question, options } => {
+                                    AppBackgroundEvent::LlmQuestion { question, options }
+                                }
+                            };
+                            let _ = tx.send(event);
+                        }
+                    }
+                }
+                Ok(AgentEvent::Phase { phase }) => {
+                    let _ = tx.send(AppBackgroundEvent::LlmPhase(phase));
+                }
+                Ok(AgentEvent::Error { message }) => {
+                    let _ = tx.send(AppBackgroundEvent::LlmError(message));
+                }
+                Ok(AgentEvent::End) => {
+                    let _ = tx.send(AppBackgroundEvent::LlmStreamComplete);
+                    return;
+                }
+                Ok(AgentEvent::Metadata { .. } | AgentEvent::Values { .. }) => {
+                    // Backend-only concerns; skip
+                }
+                Err(e) => {
+                    let _ =
+                        tx.send(AppBackgroundEvent::LlmError(format!("Stream error: {e}")));
+                    return;
+                }
+            }
+        }
+
+        // Stream ended without explicit End event
+        let _ = tx.send(AppBackgroundEvent::LlmStreamComplete);
     }
 }

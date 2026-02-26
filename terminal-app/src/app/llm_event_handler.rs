@@ -6,7 +6,6 @@
 use super::AppBackgroundEvent;
 use super::llm_controller::LlmController;
 use super::state::AppState;
-use crate::llm::LLMQueryResult;
 use crate::state::AppMode;
 
 /// Handles LLM background events.
@@ -48,21 +47,6 @@ impl<'a> LlmEventHandler<'a> {
         }
 
         match event {
-            // Legacy non-streaming result (fallback path)
-            AppBackgroundEvent::LlmResult(result) => {
-                session.agent_state.end_stream();
-                match result {
-                    LLMQueryResult::Complete(text) => {
-                        self.handle_complete(text);
-                    }
-                    LLMQueryResult::CommandApproval { command, message } => {
-                        self.handle_command_approval(command, message);
-                    }
-                    LLMQueryResult::Question { question, options } => {
-                        self.handle_question(question, options);
-                    }
-                }
-            }
             // Streaming chunk - render incrementally
             AppBackgroundEvent::LlmChunk(text) => {
                 self.handle_chunk(text);
@@ -72,7 +56,7 @@ impl<'a> LlmEventHandler<'a> {
                 self.handle_stream_complete();
             }
             // Streaming HITL - command approval
-            AppBackgroundEvent::LlmCommandApproval { command, message } => {
+            AppBackgroundEvent::LlmCommandApproval { command, message, .. } => {
                 // Finalize any pending output first
                 self.finalize_incremental_output();
                 let session = match self.state.active_session_mut() {
@@ -100,12 +84,22 @@ impl<'a> LlmEventHandler<'a> {
                     None => return,
                 };
                 let banner = match phase {
-                    infraware_shared::IncidentPhase::Investigating => "\r\n\x1b[1;36m🔍 Investigating...\x1b[0m\r\n",
-                    infraware_shared::IncidentPhase::Analyzing => "\r\n\x1b[1;33m🧠 Analyzing findings...\x1b[0m\r\n",
-                    infraware_shared::IncidentPhase::Reporting => "\r\n\x1b[1;32m📄 Generating post-mortem report...\x1b[0m\r\n",
-                    infraware_shared::IncidentPhase::Completed => "\r\n\x1b[1;34m✅ Incident pipeline completed.\x1b[0m\r\n",
+                    infraware_shared::IncidentPhase::Investigating => {
+                        "\r\n\x1b[1;36m🔍 Investigating...\x1b[0m\r\n"
+                    }
+                    infraware_shared::IncidentPhase::Analyzing => {
+                        "\r\n\x1b[1;33m🧠 Analyzing findings...\x1b[0m\r\n"
+                    }
+                    infraware_shared::IncidentPhase::Reporting => {
+                        "\r\n\x1b[1;32m📄 Generating post-mortem report...\x1b[0m\r\n"
+                    }
+                    infraware_shared::IncidentPhase::Completed => {
+                        "\r\n\x1b[1;34m✅ Incident pipeline completed.\x1b[0m\r\n"
+                    }
                 };
-                session.vte_parser.advance(&mut session.terminal_handler, banner.as_bytes());
+                session
+                    .vte_parser
+                    .advance(&mut session.terminal_handler, banner.as_bytes());
             }
             // Error
             AppBackgroundEvent::LlmError(err) => {
@@ -235,53 +229,6 @@ impl<'a> LlmEventHandler<'a> {
 
         // Reset for next response
         self.llm.incremental_renderer.reset();
-    }
-
-    /// Handles LLM complete response.
-    fn handle_complete(&mut self, text: String) {
-        tracing::info!(
-            "LLM query complete, response length: {} chars, transitioning to Normal",
-            text.len()
-        );
-
-        // Set mode FIRST to stop throbber immediately
-        if let Some(session) = self.state.active_session_mut() {
-            session.mode = AppMode::Normal;
-        }
-
-        if text.is_empty() {
-            tracing::debug!("Empty response, no output to render");
-            return;
-        }
-
-        // Render response lines (markdown → ANSI)
-        let lines = self.llm.response_renderer.render(&text);
-        tracing::debug!("Rendered {} lines to display", lines.len());
-
-        let session = match self.state.active_session_mut() {
-            Some(s) => s,
-            None => return,
-        };
-
-        // Start with newline to avoid overwriting current prompt
-        session
-            .vte_parser
-            .advance(&mut session.terminal_handler, b"\r\n");
-
-        let last_idx = lines.len().saturating_sub(1);
-        for (i, line) in lines.iter().enumerate() {
-            session
-                .vte_parser
-                .advance(&mut session.terminal_handler, line.as_bytes());
-            if i < last_idx {
-                session
-                    .vte_parser
-                    .advance(&mut session.terminal_handler, b"\r\n");
-            }
-        }
-
-        // Clear shell buffer and trigger fresh prompt
-        session.send_to_pty(b"\x15\n");
     }
 
     /// Handles LLM command approval request.

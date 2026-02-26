@@ -58,8 +58,6 @@ use crate::ui::{Scrollbar, Theme};
     reason = "All events are LLM-related, prefix is meaningful"
 )]
 pub enum AppBackgroundEvent {
-    /// LLM produced a chunk of output or completed (non-streaming)
-    LlmResult(crate::llm::LLMQueryResult),
     /// LLM produced a streaming text chunk
     LlmChunk(String),
     /// LLM streaming completed successfully
@@ -70,6 +68,8 @@ pub enum AppBackgroundEvent {
         command: String,
         /// Message describing why
         message: String,
+        /// Whether the agent needs to process the output after execution
+        needs_continuation: bool,
     },
     /// LLM interrupted with a question (HITL)
     LlmQuestion {
@@ -234,7 +234,7 @@ impl InfrawareApp {
         sessions.insert(initial_session_id, initial_session);
 
         // Initialize LLM controller
-        let llm = LlmController::new(&runtime);
+        let llm = LlmController::new();
 
         // Create tiles and track the initial pane's tile ID
         let mut tiles = egui_tiles::Tiles::default();
