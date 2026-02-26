@@ -9,7 +9,6 @@ workspace = true
 
 [dependencies]
 # Internal crates
-infraware-shared = { workspace = true }
 infraware-engine = { workspace = true, features = ["rig"] }
 
 # GUI3
@@ -23,8 +22,7 @@ portable-pty = "0.9.0"
 # Async runtime
 tokio = { workspace = true }
 
-# LLM client
-reqwest = { workspace = true }
+# Serialization
 serde = { workspace = true }
 serde_json = { workspace = true }
 

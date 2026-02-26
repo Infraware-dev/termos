@@ -8,7 +8,6 @@
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 mod app;
-mod auth;
 mod config;
 mod engine;
 mod input;

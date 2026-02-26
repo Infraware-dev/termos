@@ -11,7 +11,7 @@
 //!
 //! `AppMode` is derived from `EngineStatus` via `From` trait implementation.
 
-use infraware_shared::{EngineStatus, Interrupt};
+use crate::engine::{EngineStatus, Interrupt};
 
 /// Application mode states.
 ///
