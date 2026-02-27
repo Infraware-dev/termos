@@ -2,13 +2,8 @@ name: Rust CI
 
 on:
   pull_request:
-    branches: [ main ]
-    paths:
-      - 'terminal-app/**'
   push:
     branches: [ main ]
-    paths:
-      - 'terminal-app/**'
 
 env:
   CARGO_TERM_COLOR: always
