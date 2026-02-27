@@ -1,7 +1,3 @@
-#![expect(
-    clippy::mod_module_files,
-    reason = "incident is a multi-file module requiring a directory"
-)]
 //! Multi-agent incident investigation pipeline.
 //!
 //! Sequences three specialised rig-rs agents:
@@ -171,10 +167,6 @@ pub fn resume_investigation_command(
     clippy::too_many_arguments,
     reason = "All fields restored from stored interrupt context"
 )]
-#[expect(
-    dead_code,
-    reason = "Will be wired when PTY-based command execution is integrated"
-)]
 pub fn resume_investigation_with_output(
     client: Arc<anthropic::Client>,
     config: Arc<RigEngineConfig>,
@@ -343,10 +335,7 @@ fn run_investigation_step(
                     return;
                 }
 
-                let mut hitl_message = format_hitl_message(&args);
-                if std::env::var("SIM_FIXTURE").is_ok() {
-                    hitl_message.push_str("\n[SIM_MODE=backend_execution]");
-                }
+                let hitl_message = format_hitl_message(&args);
                 let pending = PendingInterrupt::incident_command(
                     args.command.clone(),
                     args.motivation.clone(),

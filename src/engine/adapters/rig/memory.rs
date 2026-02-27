@@ -1,7 +1,3 @@
-#![expect(
-    clippy::mod_module_files,
-    reason = "memory is a multi-file module requiring directory structure"
-)]
 //! Contextual memory system for the RigEngine
 //!
 //! Stores and retrieves past interactions (commands + NL queries) to provide

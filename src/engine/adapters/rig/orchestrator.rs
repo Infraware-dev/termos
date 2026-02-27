@@ -437,15 +437,6 @@ pub fn create_resume_stream(
         let pending = pending.unwrap();
 
         match (&response, &pending.resume_context) {
-            // Command approved — terminal will execute via PTY
-            (ResumeResponse::Approved, ResumeContext::CommandApproval { command, .. }) => {
-                tracing::info!(command = %command, "Command approved for execution");
-                yield Ok(AgentEvent::Message(MessageEvent::assistant(
-                    format!("Command `{}` approved for execution.", command),
-                )));
-                yield Ok(AgentEvent::end());
-            }
-
             // Command rejected
             (ResumeResponse::Rejected, ResumeContext::CommandApproval { command, .. }) => {
                 let response_text = format!(
@@ -548,9 +539,9 @@ pub fn create_resume_stream(
                 }
             }
 
-            // Operator approved (or rejected) a diagnostic command
-            (ResumeResponse::Approved, ResumeContext::IncidentCommand { command, motivation, needs_continuation, risk_level, expected_diagnostic_value, context, .. }) => {
-                let mut stream = incident::resume_investigation_command(
+            // Diagnostic command executed via terminal PTY
+            (ResumeResponse::CommandOutput { output, .. }, ResumeContext::IncidentCommand { command, motivation, needs_continuation, risk_level, expected_diagnostic_value, context, .. }) => {
+                let mut stream = incident::resume_investigation_with_output(
                     Arc::clone(&client),
                     Arc::clone(&config),
                     Arc::clone(&state),
@@ -562,7 +553,7 @@ pub fn create_resume_stream(
                     expected_diagnostic_value.clone(),
                     context.clone(),
                     run_id.clone(),
-                    config.timeout_secs,
+                    output.clone(),
                 );
 
                 while let Some(event) = stream.next().await {

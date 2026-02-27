@@ -95,14 +95,19 @@ impl LlmController {
             let thread_id = {
                 let existing = thread_id_lock
                     .read()
-                    .expect("thread_id lock poisoned")
+                    .unwrap_or_else(|e| {
+                        tracing::warn!("thread_id read lock was poisoned, recovering");
+                        e.into_inner()
+                    })
                     .clone();
                 match existing {
                     Some(id) => id,
                     None => match engine.create_thread(None).await {
                         Ok(id) => {
-                            *thread_id_lock.write().expect("thread_id lock poisoned") =
-                                Some(id.clone());
+                            *thread_id_lock.write().unwrap_or_else(|e| {
+                                tracing::warn!("thread_id write lock was poisoned, recovering");
+                                e.into_inner()
+                            }) = Some(id.clone());
                             id
                         }
                         Err(e) => {
@@ -145,11 +150,6 @@ impl LlmController {
         self.spawn_resume(runtime, ResumeResponse::answer(answer));
     }
 
-    /// Resumes LLM run with plain command approval (engine executes command).
-    pub fn resume_approved(&mut self, runtime: &Runtime) {
-        self.spawn_resume(runtime, ResumeResponse::Approved);
-    }
-
     /// Resumes LLM run with rejection (user rejected the command).
     pub fn resume_rejected(&mut self, runtime: &Runtime) {
         self.spawn_resume(runtime, ResumeResponse::Rejected);
@@ -164,6 +164,7 @@ impl LlmController {
     }
 
     /// Polls and returns pending background events (non-blocking).
+    #[must_use]
     pub fn poll_events(&mut self) -> Vec<AppBackgroundEvent> {
         let mut events = Vec::new();
         while let Ok(event) = self.bg_event_rx.try_recv() {
@@ -190,7 +191,10 @@ impl LlmController {
         runtime.spawn(async move {
             let thread_id = thread_id_lock
                 .read()
-                .expect("thread_id lock poisoned")
+                .unwrap_or_else(|e| {
+                    tracing::warn!("thread_id read lock was poisoned, recovering");
+                    e.into_inner()
+                })
                 .clone();
             let Some(thread_id) = thread_id else {
                 let _ = tx.send(AppBackgroundEvent::LlmError(

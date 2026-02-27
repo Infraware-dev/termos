@@ -7,7 +7,10 @@
 
 // Engine was a standalone library crate — some public API items and
 // re-exports are used only by tests or will be used by future consumers.
-#![expect(dead_code, reason = "engine exposes public API surface used by tests and future consumers")]
+#![expect(
+    dead_code,
+    reason = "engine exposes public API surface used by tests and future consumers"
+)]
 #![expect(unused_imports, reason = "re-exports for engine public API surface")]
 
 pub mod adapters;
