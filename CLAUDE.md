@@ -4,12 +4,12 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-**Infraware** is a Rust monorepo containing an AI-powered terminal emulator and its backend services. The terminal
-combines VTE-based terminal emulation with an integrated LLM agent for DevOps assistance.
+**Infraware** is a Rust single-crate project containing an AI-powered terminal emulator with an integrated LLM agent
+for DevOps assistance. The terminal combines VTE-based terminal emulation with an in-process agentic engine.
 
 **Key feature**: Prefix any command with `?` for natural language queries (e.g., `? how do I revert a git commit`)
 
-**Tech Stack**: Rust 2024 edition, workspace with 4 members, egui/eframe, axum, tokio
+**Tech Stack**: Rust 2024 edition, single crate, egui/eframe, tokio
 
 **Prerequisites** (Linux):
 
@@ -21,99 +21,101 @@ sudo apt install -y pkg-config libssl-dev libxcb-shape0-dev libxcb-xfixes0-dev
 
 ```bash
 # Build & Run
-cargo build --workspace              # Build all crates
-cargo run -p infraware-terminal      # Run terminal app
-cargo run -p infraware-backend       # Run backend server (port 8080)
-LOG_LEVEL=debug cargo run -p infraware-terminal  # With debug logging
+cargo build                          # Build the crate
+cargo run                            # Run terminal app
+LOG_LEVEL=debug cargo run            # With debug logging
 
-# Backend with different engines
-ENGINE_TYPE=mock cargo run -p infraware-backend    # MockEngine (for testing)
-ENGINE_TYPE=rig ANTHROPIC_API_KEY=sk-... cargo run -p infraware-backend  # RigEngine (default)
+# Run with different engines
+ENGINE_TYPE=mock cargo run           # MockEngine (for testing)
+ENGINE_TYPE=rig ANTHROPIC_API_KEY=sk-... cargo run  # RigEngine (default)
 
 # Testing
-cargo test --workspace               # All tests
-cargo test -p infraware-terminal -- test_name    # Single test by name
-cargo test -p infraware-engine       # Test engine crate only
+cargo test                           # All tests
+cargo test -- test_name              # Single test by name
 cargo test -- --nocapture            # With output
 
 # Watch mode (auto-rebuild)
-cargo watch -x 'run -p infraware-backend'    # Requires: cargo install cargo-watch
+cargo watch -x run                   # Requires: cargo install cargo-watch
 
 # Linting (CI enforces both)
-cargo +nightly fmt --all && cargo clippy --workspace # Always format with nightly to support rustfmt.toml rules
-cargo clippy --workspace -- -D warnings    # CI-strict mode (warnings = errors)
+cargo +nightly fmt --all && cargo clippy  # Always format with nightly to support rustfmt.toml rules
+cargo clippy -- -D warnings          # CI-strict mode (warnings = errors)
 
 # Coverage (CI enforces 50% minimum, excluding UI/PTY/VTE modules)
-cargo llvm-cov --all-features --workspace --lcov --output-path lcov.info
-cargo llvm-cov --all-features --workspace --summary-only  # Quick summary
-
-# Quick API verification
-curl http://localhost:8080/health
-curl -X POST http://localhost:8080/threads -H "Content-Type: application/json" -d '{}'
+cargo llvm-cov --all-features --lcov --output-path lcov.info
+cargo llvm-cov --all-features --summary-only  # Quick summary
 ```
 
-## Workspace Structure
+## Project Structure
 
 ```
-├── terminal-app/              # egui terminal client (infraware-terminal)
-├── crates/
-│   ├── shared/                # API contract types (infraware-shared)
-│   ├── infraware-backend/     # axum REST/SSE server (infraware-backend)
-│   └── infraware-engine/      # AgenticEngine trait + adapters
+├── src/
+│   ├── main.rs                # Entry point
+│   ├── app.rs                 # InfrawareApp struct, eframe::App impl
+│   ├── app/                   # App submodules (handlers, rendering)
+│   ├── state.rs               # AppMode state machine, AgentState
+│   ├── session.rs             # TerminalSession (PTY + VTE + state per tab)
+│   ├── config.rs              # Constants (timing, rendering, sizes)
+│   ├── engine.rs              # Engine module root (re-exports)
+│   ├── engine/                # AgenticEngine trait + adapters
+│   │   ├── traits.rs          # AgenticEngine trait, EventStream type
+│   │   ├── error.rs           # EngineError type
+│   │   ├── types.rs           # HealthStatus, ResumeResponse
+│   │   ├── shared/            # Shared types (AgentEvent, Interrupt, etc.)
+│   │   └── adapters/          # Engine implementations
+│   │       ├── mock/          # MockEngine (testing)
+│   │       └── rig/           # RigEngine (Anthropic Claude, default)
+│   ├── terminal/              # VTE parser, grid, cell attributes
+│   ├── pty/                   # PTY session, async I/O, DI traits
+│   ├── llm/                   # Markdown→ANSI renderer (syntect highlighting)
+│   ├── input/                 # Keyboard mapping, text selection, command classification
+│   ├── orchestrators/         # hitl.rs utility (parse_approval)
+│   └── ui/                    # egui helpers, theme, scrollbar
 └── docs/                      # Design documents and technical debt analysis
 ```
 
 ## Architecture
 
 ```
-┌─────────────────┐     HTTP/SSE      ┌──────────────────────────────────────────┐
-│ infraware-      │◄────────────────► │ infraware-backend (axum)                 │
-│ terminal (egui) │                   │ Port 8080                                │
-└────────┬────────┘                   │                                          │
-         │                            │  ┌──────────────────────────────────────┐│
-    ┌────▼────┐                       │  │ AgenticEngine trait                  ││
-    │   PTY   │                       │  │ ┌────────┐ ┌────────────────────┐    ││
-    │ Session │                       │  │ │ Mock   │ │ RigEngine (Default)│    ││
-    └────┬────┘                       │  │ │ Engine │ │ - Anthropic Claude │    ││
-         │                            │  │ └────────┘ │ - HITL tool exec   │    ││
-    ┌────▼────┐                       │  │            │ - needs_continuation│    ││
-    │  VTE    │                       │  │            └─────────┬───────────┘    ││
-    │ Parser  │                       │  └──────────────────────┼───────────────┘│
-    └────┬────┘                       └─────────────────────────┼───────────────┘
-         │                                                      │
-    ┌────▼────┐                                          ┌──────▼──────┐
-    │Terminal │                                          │ Anthropic   │
-    │  Grid   │                                          │ API         │
-    └─────────┘                                          └─────────────┘
+┌─────────────────────────────────────────────────┐
+│ infraware-terminal (single binary)              │
+│                                                 │
+│  ┌───────────┐      ┌────────────────────────┐  │
+│  │ Terminal   │      │ AgenticEngine (trait)   │  │
+│  │ UI (egui) │─────►│ ┌────────┐ ┌─────────┐ │  │
+│  └─────┬─────┘      │ │ Mock   │ │ Rig     │ │  │
+│        │            │ │ Engine │ │ Engine  │ │  │
+│   ┌────▼────┐       │ └────────┘ └────┬────┘ │  │
+│   │   PTY   │       └────────────────┼──────┘  │
+│   │ Session │                        │          │
+│   └────┬────┘                        │          │
+│        │                             │          │
+│   ┌────▼────┐                 ┌──────▼──────┐   │
+│   │  VTE    │                 │ Anthropic   │   │
+│   │ Parser  │                 │ API         │   │
+│   └────┬────┘                 └─────────────┘   │
+│        │                                        │
+│   ┌────▼────┐                                   │
+│   │Terminal │                                   │
+│   │  Grid   │                                   │
+│   └─────────┘                                   │
+└─────────────────────────────────────────────────┘
 ```
 
-## Key Crates
+## Key Modules
 
-### infraware-shared
+### engine (src/engine/)
 
-Shared API contract types: `LLMQueryResult` (Complete/CommandApproval/Question), `AgentEvent` (SSE events),
-`Interrupt` (HITL), `Message`, `ThreadId`, `RunInput`
-
-### infraware-engine
-
-Engine abstraction with pluggable backends:
+Engine abstraction with pluggable backends, running in-process:
 
 - `AgenticEngine` trait: `create_thread()`, `stream_run()`, `resume_run()`, `health_check()`
 - `RigEngine` - Native Rust agent using rig-rs + Anthropic Claude API (default engine, HITL via tool execution)
-- `MockEngine` - In-memory pattern matching (testing, no external dependencies)
+- `MockEngine` - In-memory workflow-based matching (testing, no external dependencies)
 
-### infraware-backend
+**Shared types** (in `src/engine/shared/`): `AgentEvent` (engine events), `Interrupt` (HITL),
+`Message`, `ThreadId`, `RunInput`, `EngineStatus`
 
-Axum REST/SSE API:
-
-- `GET /health` - Health check
-- `GET /metrics` - Prometheus metrics
-- `GET /api-docs/openapi.json` - OpenAPI spec
-- `POST /api/auth` - Authentication validation
-- `POST /threads` - Create new thread
-- `POST /threads/{id}/runs/stream` - Stream run with SSE
-
-### infraware-terminal
+### Terminal UI (src/)
 
 Terminal emulator with LLM integration. The main `app.rs` has been decomposed into focused submodules following a
 handler pattern:
@@ -130,7 +132,7 @@ handler pattern:
 - `input_handler.rs` - Keyboard input processing and command classification
 - `hitl_handler.rs` - Human-in-the-loop interaction handling (approval/answer flows)
 - `llm_controller.rs` - LLM query management and background event dispatch
-- `llm_event_handler.rs` - LLM event processing (SSE stream handling)
+- `llm_event_handler.rs` - LLM event processing (engine event stream handling)
 - `session_manager.rs` - Session lifecycle (create, close, initialize)
 - `tiles_manager.rs` - Split view and tab management via egui_tiles
 - `clipboard.rs` - Copy/paste operations
@@ -142,10 +144,9 @@ handler pattern:
 
 - `terminal/` - VTE parser (`handler.rs`), grid (`grid.rs`), cell attributes (`cell.rs`)
 - `pty/` - PTY session, async I/O, DI traits
-- `llm/` - HTTP/SSE client, markdown→ANSI renderer (syntect highlighting)
+- `llm/` - Markdown to ANSI renderer (syntect highlighting)
 - `input/` - Keyboard mapping, text selection, command classification, prompt detection
 - `orchestrators/` - Only `hitl.rs` utility function (`parse_approval()`)
-- `auth/` - Authentication (trait + HTTP/Mock implementations)
 - `ui/` - egui helpers, theme, scrollbar
 - `config.rs` - Constants (timing, rendering, sizes)
 
@@ -158,8 +159,8 @@ splits can nest within tabs.
 ```
 Normal
   │
-  ├──(? query)──► WaitingLLM ──┬──► AwaitingApproval (y/n for commands)
-                                │       │ (approve) ──► ExecutingCommand
+  ├──(? query)──► WaitingLLM ──┬──► AwaitingApproval (y/n for commands, has needs_continuation)
+                                │       │ (approve) ──► ExecutingCommand (has needs_continuation)
                                 │       │                    │
                                 │       │                    ├──► WaitingLLM (needs_continuation=true)
                                 │       │                    │
@@ -173,26 +174,28 @@ Normal
                                 └──► Normal (complete, no further action)
 ```
 
-**ExecutingCommand State**: When user approves a shell command in RigEngine, the terminal enters ExecutingCommand to
+**ExecutingCommand State**: When user approves a shell command, the terminal enters ExecutingCommand to
 capture output. After command execution, the `needs_continuation` flag controls whether the agent continues reasoning
 with the output or completes the interaction.
 
 ## Terminal Quick Reference
 
-| Task                      | Location                                                                |
-|---------------------------|-------------------------------------------------------------------------|
-| Add keyboard shortcut     | `terminal-app/src/input/keyboard.rs`                                    |
-| Modify terminal rendering | `terminal-app/src/app/terminal_renderer.rs` and `app/render.rs`         |
-| Add VTE escape handler    | `terminal-app/src/terminal/handler.rs` → `csi_dispatch()`               |
-| Modify LLM query flow     | `terminal-app/src/app/llm_controller.rs` and `app/llm_event_handler.rs` |
-| Handle HITL interrupts    | `terminal-app/src/app/hitl_handler.rs`                                  |
-| Add tab/split behavior    | `terminal-app/src/app/tiles_manager.rs`                                 |
-| Modify session lifecycle  | `terminal-app/src/app/session_manager.rs`                               |
-| Modify application state  | `terminal-app/src/app/state.rs` (AppState) or `state.rs` (AppMode)      |
-| Handle keyboard input     | `terminal-app/src/app/input_handler.rs`                                 |
-| Modify clipboard behavior | `terminal-app/src/app/clipboard.rs`                                     |
-| Change theme colors       | `terminal-app/src/ui/theme.rs`                                          |
-| Change config constants   | `terminal-app/src/config.rs`                                            |
+| Task                      | Location                                                      |
+|---------------------------|---------------------------------------------------------------|
+| Add keyboard shortcut     | `src/input/keyboard.rs`                                       |
+| Modify terminal rendering | `src/app/terminal_renderer.rs` and `src/app/render.rs`        |
+| Add VTE escape handler    | `src/terminal/handler.rs` -> `csi_dispatch()`                 |
+| Modify LLM query flow     | `src/app/llm_controller.rs` and `src/app/llm_event_handler.rs`|
+| Handle HITL interrupts    | `src/app/hitl_handler.rs`                                     |
+| Add tab/split behavior    | `src/app/tiles_manager.rs`                                    |
+| Modify session lifecycle  | `src/app/session_manager.rs`                                  |
+| Modify application state  | `src/app/state.rs` (AppState) or `src/state.rs` (AppMode)     |
+| Handle keyboard input     | `src/app/input_handler.rs`                                    |
+| Modify clipboard behavior | `src/app/clipboard.rs`                                        |
+| Change theme colors       | `src/ui/theme.rs`                                             |
+| Change config constants   | `src/config.rs`                                               |
+| Add engine adapter        | `src/engine/adapters/`                                        |
+| Modify shared types       | `src/engine/shared/`                                          |
 
 ## Keyboard Shortcuts
 
@@ -216,19 +219,23 @@ with the output or completes the interaction.
 Environment variables (via `.env` or shell):
 
 ```bash
-# Terminal client
-INFRAWARE_BACKEND_URL="http://localhost:8080"
-ANTHROPIC_API_KEY="your-api-key"
-LOG_LEVEL="debug"  # debug, info, warn, error
+# Engine selection
+ENGINE_TYPE="rig"                    # rig (default), mock
+MOCK_WORKFLOW_FILE="path/to/wf.json" # MockEngine workflow file
 
-# Backend server
-ENGINE_TYPE="rig"               # rig (default), mock
-ANTHROPIC_API_KEY="sk-..."      # for rig engine (native Rust agent)
-PORT="8080"
-API_KEY=""                      # empty = auth disabled
-ALLOWED_ORIGINS="*"             # CORS origins
-RATE_LIMIT_RPM="100"            # requests per minute (0 = disabled)
-RUST_LOG="infraware_backend=debug"  # tracing level
+# Anthropic / RigEngine
+ANTHROPIC_API_KEY="sk-..."           # Required for rig engine
+ANTHROPIC_MODEL="claude-sonnet-4-20250514"  # Model to use
+RIG_MAX_TOKENS="8096"               # Max tokens per response
+RIG_TEMPERATURE="1.0"               # Sampling temperature
+RIG_TIMEOUT_SECS="120"              # Request timeout
+
+# Memory (RigEngine)
+MEMORY_PATH="./.infraware/memory.json"  # Session memory JSON path
+MEMORY_LIMIT="200"                      # Max session memory entries
+
+# Application
+LOG_LEVEL="debug"                    # debug, info, warn, error
 ```
 
 ## Code Style
@@ -239,7 +246,6 @@ RUST_LOG="infraware_backend=debug"  # tracing level
 - Use `#[expect]` instead of `#[allow]` when lint suppression should be revisited
 - Panic for programming errors, `Result` for expected failures
 - Avoid weasel words in names (Service, Manager, Factory)
-- Prefer splitting crates over monoliths
 
 ### Git Commits
 
@@ -251,7 +257,7 @@ RUST_LOG="infraware_backend=debug"  # tracing level
 ### Pull Requests
 
 - Include how to test (commands and expected outcome)
-- Include screenshots or recordings for UI changes in `terminal-app/`
+- Include screenshots or recordings for UI changes
 - Link related issues if applicable
 
 ### Error Handling
@@ -260,38 +266,40 @@ RUST_LOG="infraware_backend=debug"  # tracing level
 - Use `thiserror` for library error types
 - Safe indexing: `.first()`, `.get()` instead of `[0]`
 
-## Workspace Dependencies
+## Dependencies
 
-Shared in root `Cargo.toml` under `[workspace.dependencies]`. Use `{ workspace = true }` to inherit:
+Key dependencies in `Cargo.toml`:
 
+- GUI: `egui`, `eframe`, `egui_tiles`
+- Terminal: `portable-pty`, `vte`
 - Async: `tokio`, `async-trait`, `futures`
-- HTTP: `axum`, `tower`, `reqwest`
 - Serde: `serde`, `serde_json`
 - Error: `anyhow`, `thiserror`
-- Logging: `tracing`, `log`
+- Logging: `tracing`, `tracing-subscriber`
+- AI (behind `rig` feature): `rig-core`, `chrono`, `schemars`
 
 ## Adding New Components
 
 ### New Engine Adapter
 
-1. Create `crates/infraware-engine/src/adapters/your_engine.rs`
+1. Create `src/engine/adapters/your_engine.rs` (or a directory `src/engine/adapters/your_engine/`)
 2. Implement `AgenticEngine` trait:
    ```rust
    #[async_trait]
    pub trait AgenticEngine: Send + Sync + Debug {
-       async fn create_thread(&self) -> Result<ThreadId>;
-       async fn stream_run(&self, thread_id: &ThreadId, input: RunInput) -> Result<EventStream>;
-       async fn resume_run(&self, thread_id: &ThreadId, response: ResumeResponse) -> Result<EventStream>;
-       async fn health_check(&self) -> Result<HealthStatus>;
+       async fn create_thread(&self, metadata: Option<serde_json::Value>) -> Result<ThreadId, EngineError>;
+       async fn stream_run(&self, thread_id: &ThreadId, input: RunInput) -> Result<EventStream, EngineError>;
+       async fn resume_run(&self, thread_id: &ThreadId, response: ResumeResponse) -> Result<EventStream, EngineError>;
+       async fn health_check(&self) -> Result<HealthStatus, EngineError>;
    }
    ```
-3. Export from `adapters/mod.rs`
-4. Add match arm in `infraware-backend/src/main.rs` for `ENGINE_TYPE`
+3. Export from `src/engine/adapters.rs`
+4. Add construction logic in app initialization
 
-### New API Types
+### New Shared Types
 
-1. Add to `crates/shared/src/models.rs` or `events.rs`
-2. Export from `crates/shared/src/lib.rs`
+1. Add to `src/engine/shared/models.rs` or `src/engine/shared/events.rs`
+2. Re-export from `src/engine/shared.rs` and `src/engine.rs` as needed
 
 ## Skills (`.claude/skills/`)
 
@@ -316,23 +324,23 @@ The RigEngine uses **rig-rs** to build a native Rust agent with Anthropic Claude
 
 ### How It Works
 
-1. **Tool Registration**: ShellCommandTool and AskUserTool are registered with the agent via `.tool()`
+1. **Tool Registration**: ShellCommandTool, AskUserTool, DiagnosticCommandTool, and StartIncidentTool are registered with the agent via `.tool()`
 2. **PromptHook Interception**: LLM tool calls are intercepted via `PromptHook::on_tool_call()` for HITL approval
 3. **needs_continuation Flag**: Distinguishes command execution intent:
 
-- `false` (default): Command output IS the answer (e.g., `ls` → list files directly)
-- `true`: Command output is INPUT for agent processing (e.g., `uname -s` → then OS-specific instructions)
+- `false` (default): Command output IS the answer (e.g., `ls` -> list files directly)
+- `true`: Command output is INPUT for agent processing (e.g., `uname -s` -> then OS-specific instructions)
 
 ### Files Involved
 
-- `crates/infraware-engine/src/adapters/rig/orchestrator.rs` - Handles tool call interception and HITL flow
-- `crates/infraware-engine/src/adapters/rig/tools/shell.rs` - ShellCommandTool with needs_continuation parameter
-- `crates/infraware-engine/src/adapters/rig/tools/ask_user.rs` - AskUserTool for questions
-- `crates/shared/src/events.rs` - Interrupt enum with needs_continuation field
+- `src/engine/adapters/rig/orchestrator.rs` - Handles tool call interception and HITL flow
+- `src/engine/adapters/rig/tools/shell.rs` - ShellCommandTool with needs_continuation parameter
+- `src/engine/adapters/rig/tools/ask_user.rs` - AskUserTool for questions
+- `src/engine/adapters/rig/tools/diagnostic_command.rs` - DiagnosticCommandTool
+- `src/engine/adapters/rig/tools/start_incident.rs` - StartIncidentTool
+- `src/engine/shared/events.rs` - Interrupt enum with needs_continuation field
 
 ## Memory System (RigEngine Feature)
-
-**Status**: `feat/memory` branch — two systems at different maturity levels.
 
 ### Session Memory (Complete, Active)
 
@@ -343,39 +351,25 @@ Persistent facts/preferences the LLM learns about the user across sessions.
 - **Categories**: Preference, PersonalFact, Workflow, Restriction, Convention
 - **Eviction**: FIFO rotation when `MEMORY_LIMIT` entries exceeded (default: 200)
 - **Files**:
-  - `crates/backend-engine/src/adapters/rig/memory.rs` — MemoryStore, MemoryEntry, SaveMemoryTool
-  - `crates/backend-engine/src/adapters/rig/orchestrator.rs` — preamble injection (line ~106), tool registration (line ~116)
-  - `crates/backend-engine/src/adapters/rig/config.rs` — MemoryConfig with env var loading
+  - `src/engine/adapters/rig/memory/session.rs` - MemoryStore, MemoryEntry, SaveMemoryTool
+  - `src/engine/adapters/rig/orchestrator.rs` - preamble injection, tool registration
+  - `src/engine/adapters/rig/config.rs` - MemoryConfig with env var loading
 
 ### Interaction Memory (Framework Complete, Not Yet Wired)
 
 Learns from past executed commands and NL queries via text similarity search.
 
 - **Storage**: JSONL append-only at `~/.local/share/infraware/memory/interactions.jsonl`
-- **Architecture**: Strategy pattern — `JsonlStorage` (Phase 1 text search) + `NoopEmbedding` (placeholder) + `RegexIntentGenerator` (heuristic intent)
-- **Status**: Module code complete and tested; pre-retrieval/capture hooks not yet called from `create_run_stream()` / `create_resume_stream()`
-- **Files**: `crates/backend-engine/src/adapters/rig/memory/` — `mod.rs` (MemoryStore + ActiveMemory alias), `models.rs`, `traits.rs`, `storage/jsonl.rs`, `intent/regex_intent.rs`
-
-### Memory Env Vars (feature: rig-memory)
-
-```bash
-MEMORY_PATH="./.infraware/memory.json"  # Session memory JSON path
-MEMORY_LIMIT="200"                       # Max session memory entries
-```
+- **Architecture**: Strategy pattern - `JsonlStorage` (Phase 1 text search) + `NoopEmbedding` (placeholder) + `RegexIntentGenerator` (heuristic intent)
+- **Status**: Module code complete and tested; pre-retrieval/capture hooks not yet called from engine streams
+- **Files**: `src/engine/adapters/rig/memory/` - `mod.rs`, `models.rs`, `traits.rs`, `storage/`, `intent/`
 
 ## CI Pipeline
 
-CI runs on PRs to `main` and pushes to `main` (only when `terminal-app/**` changes):
+CI runs on PRs to `main` and pushes to `main`:
 
 1. **Format Check**: `cargo fmt --all --check`
 2. **Clippy**: `cargo clippy --all-targets --all-features -- -D warnings`
 3. **Test Coverage**: 50% minimum threshold (excludes `main.rs`, `app/behavior.rs`, `app/terminal_renderer.rs`,
    `app/render.rs`, `ui/`)
 4. **Build**: Cross-platform (ubuntu-latest, macos-latest)
-
-## Known Issues
-
-### Command Injection Risk
-
-Location: `terminal-app/src/app.rs` (`submit_hitl_input`)
-LLM-suggested commands sent to PTY without validation. Mitigation TODO: command blocklist, dangerous command warnings.
