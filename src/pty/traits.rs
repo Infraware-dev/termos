@@ -1,9 +1,17 @@
 //! Trait definitions for PTY abstraction.
 //!
 //! These traits enable dependency injection and testing without a real PTY.
-//! Implemented by `PtyWriter` (PtyWrite).
+//! - `PtyWrite` — byte-level write trait implemented by `PtyWriter`.
+//! - `PtySession` — async trait for interactive terminal sessions (local, SSH, K8s, mock).
+
+use std::sync::Arc;
+use std::sync::mpsc::SyncSender;
 
 use anyhow::Result;
+use async_trait::async_trait;
+use portable_pty::PtySize;
+
+use super::io::{PtyReader, PtyWriter};
 
 /// Trait for writing to a PTY.
 ///
@@ -23,9 +31,33 @@ pub trait PtyWrite: Send + Sync {
     fn write_bytes(&self, data: &[u8]) -> Result<usize>;
 }
 
+/// An interactive terminal session on a host (local, SSH, K8s, mock).
+///
+/// Implementations wrap the transport layer (local PTY, SSH channel, K8s exec)
+/// and provide byte-level I/O via [`PtyReader`]/[`PtyWriter`].
+#[async_trait]
+pub trait PtySession: Send + Sync + std::fmt::Debug {
+    /// Take a reader that streams output bytes to the given channel.
+    async fn take_reader(&mut self, sender: SyncSender<Vec<u8>>) -> Result<PtyReader>;
+
+    /// Take a writer handle for sending input bytes.
+    async fn take_writer(&mut self) -> Result<Arc<PtyWriter>>;
+
+    /// Resize the terminal dimensions.
+    async fn resize(&self, size: PtySize) -> Result<()>;
+
+    /// Send an interrupt signal (SIGINT / Ctrl+C equivalent).
+    fn send_sigint(&self) -> Result<()>;
+
+    /// Check if the remote process is still alive.
+    async fn is_running(&self) -> bool;
+
+    /// Kill the session.
+    async fn kill(&self) -> Result<()>;
+}
+
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
