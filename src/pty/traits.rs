@@ -97,4 +97,10 @@ mod tests {
         writer.write_bytes(b" world").unwrap();
         assert_eq!(writer.bytes_written(), 11);
     }
+
+    #[test]
+    fn test_pty_session_is_object_safe() {
+        // Compile-time guard: PtySession must remain usable as Box<dyn PtySession>
+        fn _assert_object_safe(_: &dyn PtySession) {}
+    }
 }
