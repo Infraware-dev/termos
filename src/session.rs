@@ -125,9 +125,9 @@ impl TerminalSession {
         // Initialize PTY
         let (pty_writer, pty_output_rx, pty_reader, pty_manager, shell) =
             runtime_handle.block_on(async {
-                match PtyManager::new().await {
+                match PtyManager::local() {
                     Ok(mut manager) => {
-                        let shell = manager.shell().to_string();
+                        let shell = manager.label().to_string();
                         tracing::info!("Session {id}: PTY initialized with shell: {shell}");
 
                         let (tx, rx) = mpsc::sync_channel(pty_config::CHANNEL_CAPACITY);
