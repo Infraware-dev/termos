@@ -3,9 +3,7 @@
 //! Wraps the native platform PTY (`portable_pty`) to provide interactive
 //! terminal sessions for local shell and command execution.
 
-use std::collections::HashMap;
 use std::ffi::OsStr;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::SyncSender;
 
@@ -205,109 +203,9 @@ fn spawn_command<S: AsRef<OsStr>>(cmd: &str, args: &[S], size: PtySize) -> Resul
     Ok(LocalPtySession::new(pair, child))
 }
 
-// ---------------------------------------------------------------------------
-// PtySessionConfig (builder for future spawn customization, used in tests)
-// ---------------------------------------------------------------------------
-
-/// Configuration for spawning a PTY session.
-#[derive(Debug, Clone)]
-#[allow(dead_code)] // Builder pattern API for future PTY spawn customization
-pub struct PtySessionConfig {
-    /// Command to execute
-    pub command: String,
-    /// Command arguments
-    pub args: Vec<String>,
-    /// Working directory (None = inherit from parent)
-    pub working_dir: Option<PathBuf>,
-    /// Environment variables
-    pub env: HashMap<String, String>,
-    /// Terminal size
-    pub size: PtySize,
-}
-
-#[allow(dead_code)] // Builder pattern API for future PTY spawn customization
-impl PtySessionConfig {
-    /// Create a new configuration with default settings.
-    #[must_use]
-    pub fn new(command: impl Into<String>) -> Self {
-        Self {
-            command: command.into(),
-            args: Vec::new(),
-            working_dir: None,
-            env: HashMap::new(),
-            size: crate::pty::DEFAULT_PTY_SIZE,
-        }
-    }
-
-    /// Add arguments to the command.
-    #[must_use]
-    pub fn args<I, S>(mut self, args: I) -> Self
-    where
-        I: IntoIterator<Item = S>,
-        S: Into<String>,
-    {
-        self.args = args.into_iter().map(Into::into).collect();
-        self
-    }
-
-    /// Set the working directory.
-    #[must_use]
-    pub fn working_dir(mut self, path: impl Into<PathBuf>) -> Self {
-        self.working_dir = Some(path.into());
-        self
-    }
-
-    /// Set an environment variable.
-    #[must_use]
-    pub fn env(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
-        self.env.insert(key.into(), value.into());
-        self
-    }
-
-    /// Set the terminal size.
-    #[must_use]
-    pub fn size(mut self, rows: u16, cols: u16) -> Self {
-        self.size = PtySize {
-            rows,
-            cols,
-            pixel_width: 0,
-            pixel_height: 0,
-        };
-        self
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_pty_session_config_builder() {
-        let config = PtySessionConfig::new("ssh")
-            .args(["user@host", "-p", "22"])
-            .working_dir("/tmp")
-            .env("MY_VAR", "value")
-            .size(40, 120);
-
-        assert_eq!(config.command, "ssh");
-        assert_eq!(config.args, vec!["user@host", "-p", "22"]);
-        assert_eq!(config.working_dir, Some(PathBuf::from("/tmp")));
-        assert_eq!(config.env.get("MY_VAR"), Some(&"value".to_string()));
-        assert_eq!(config.size.rows, 40);
-        assert_eq!(config.size.cols, 120);
-    }
-
-    #[test]
-    fn test_pty_session_config_default() {
-        let config = PtySessionConfig::new("bash");
-
-        assert_eq!(config.command, "bash");
-        assert!(config.args.is_empty());
-        assert!(config.working_dir.is_none());
-        assert!(config.env.is_empty());
-        assert_eq!(config.size.rows, 24);
-        assert_eq!(config.size.cols, 80);
-    }
 
     #[tokio::test]
     async fn test_pty_echo_command() {
