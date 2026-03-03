@@ -5,11 +5,6 @@ mod io;
 mod manager;
 mod traits;
 
-#[expect(
-    unused_imports,
-    reason = "Public API for consumers that need the concrete local adapter"
-)]
-pub use adapters::local::LocalPtySession;
 pub use io::{PtyReader, PtyWriter};
 pub use manager::PtyManager;
 use portable_pty::PtySize;

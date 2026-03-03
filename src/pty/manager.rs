@@ -9,7 +9,7 @@ use anyhow::Result;
 use portable_pty::PtySize;
 
 use super::DEFAULT_PTY_SIZE;
-use super::adapters::local::LocalPtySession;
+use super::adapters::LocalPtySession;
 use super::io::{PtyReader, PtyWriter};
 use super::traits::PtySession;
 
