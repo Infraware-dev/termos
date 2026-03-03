@@ -1,22 +1,14 @@
-//! Shell command execution tool for rig-rs
+//! Shell command tool for rig-rs
 //!
-//! This module implements a proper rig-rs Tool for executing shell commands
-//! with HITL (Human-in-the-Loop) approval support.
-//!
-//! Note: These tools are currently not integrated with rig-rs's automatic
-//! tool execution due to complex type handling in rig 0.31. They are kept
-//! as reference implementations for future integration.
-
-// Shell command tool integrated with rig-rs native function calling
-
-use std::process::Stdio;
+//! This module implements a rig-rs Tool for shell commands with HITL
+//! (Human-in-the-Loop) approval. The tool is pure schema + validation:
+//! it always returns `PendingApproval` and never executes commands itself.
+//! Actual execution happens via the PTY session after user approval.
 
 use rig::completion::ToolDefinition;
 use rig::tool::Tool;
 use schemars::{JsonSchema, schema_for};
 use serde::{Deserialize, Serialize};
-use tokio::process::Command;
-use tokio::time::{Duration, timeout};
 
 /// Arguments for the shell command tool
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema)]
@@ -39,7 +31,7 @@ pub struct ShellCommandArgs {
     pub needs_continuation: bool,
 }
 
-/// Result of a shell command execution
+/// Result of a shell command tool call
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum ShellCommandResult {
@@ -52,40 +44,14 @@ pub enum ShellCommandResult {
         /// Whether agent needs to process output after execution
         needs_continuation: bool,
     },
-    /// Command was executed successfully
-    Executed {
-        /// The command that was executed
-        command: String,
-        /// Combined stdout and stderr output
-        output: String,
-        /// Whether the command exited successfully (exit code 0)
-        success: bool,
-        /// Exit code if available
-        exit_code: Option<i32>,
-    },
-    /// Command execution failed
-    Failed {
-        /// The command that failed
-        command: String,
-        /// Error message
-        error: String,
-    },
 }
 
-/// Error type for shell command execution
+/// Error type for shell command tool
 #[derive(Debug, thiserror::Error)]
 pub enum ShellError {
-    /// Command execution failed due to I/O error
-    #[error("Command execution failed: {0}")]
-    ExecutionFailed(String),
-
-    /// Command timed out
-    #[error("Command timed out after {0} seconds")]
-    Timeout(u64),
-
     /// Command was not approved (reserved for future HITL rejection handling)
     #[error("Command was not approved by user")]
-    #[expect(dead_code, reason = "Reserved for future HITL rejection handling")]
+    #[expect(dead_code, reason = "reserved for future HITL rejection handling")]
     NotApproved,
 
     /// Command contains dangerous patterns
@@ -93,17 +59,16 @@ pub enum ShellError {
     DangerousCommand(String),
 }
 
-/// Tool for executing shell commands with HITL approval
+/// Tool for shell commands with HITL approval
 ///
 /// This tool integrates with rig-rs's native function calling system.
-/// When the LLM wants to execute a shell command, it will call this tool
-/// with the command and explanation. The tool returns a `PendingApproval`
-/// status, which the orchestrator converts into an interrupt event.
+/// When the LLM wants to execute a shell command, it calls this tool
+/// with the command and explanation. The tool validates the command and
+/// returns `PendingApproval`, which the orchestrator converts into an
+/// interrupt event. Actual execution happens via the PTY session.
 #[derive(Debug, Clone)]
 pub struct ShellCommandTool {
-    /// Whether to require user approval before execution
-    pub require_approval: bool,
-    /// Timeout in seconds for command execution
+    /// Timeout hint in seconds (metadata for the frontend, not enforced here)
     pub timeout_secs: u64,
 }
 
@@ -116,21 +81,13 @@ impl Default for ShellCommandTool {
 impl ShellCommandTool {
     /// Create a new shell command tool with default settings
     ///
-    /// By default, requires approval and has a 30 second timeout.
+    /// Default timeout hint is 30 seconds.
     pub fn new() -> Self {
-        Self {
-            require_approval: true,
-            timeout_secs: 30,
-        }
+        Self { timeout_secs: 30 }
     }
 
-    /// Set whether to require approval (builder pattern)
-    pub fn with_approval(mut self, require: bool) -> Self {
-        self.require_approval = require;
-        self
-    }
-
-    /// Set the timeout in seconds (builder pattern)
+    /// Set the timeout hint in seconds (builder pattern)
+    #[expect(dead_code, reason = "public API for future configurability")]
     pub fn with_timeout(mut self, secs: u64) -> Self {
         self.timeout_secs = secs;
         self
@@ -181,54 +138,6 @@ impl ShellCommandTool {
 
         Ok(())
     }
-
-    /// Execute a shell command asynchronously with safety checks
-    ///
-    /// Uses `tokio::process::Command` for non-blocking execution.
-    /// Validates command against dangerous patterns before execution.
-    pub async fn execute(&self, command: &str) -> Result<ShellCommandResult, ShellError> {
-        // Validate command before execution
-        Self::validate_command(command)?;
-
-        // Spawn with safety settings
-        let child = Command::new("sh")
-            .arg("-c")
-            .arg(command)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-            .map_err(|e| ShellError::ExecutionFailed(e.to_string()))?;
-
-        let output = timeout(
-            Duration::from_secs(self.timeout_secs),
-            child.wait_with_output(),
-        )
-        .await
-        .map_err(|_| ShellError::Timeout(self.timeout_secs))?
-        .map_err(|e| ShellError::ExecutionFailed(e.to_string()))?;
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let stderr = String::from_utf8_lossy(&output.stderr);
-
-        let combined = if stdout.is_empty() && stderr.is_empty() {
-            "(no output)".to_string()
-        } else if stderr.is_empty() {
-            stdout.to_string()
-        } else if stdout.is_empty() {
-            stderr.to_string()
-        } else {
-            format!("{}\n{}", stdout.trim_end(), stderr.trim_end())
-        };
-
-        Ok(ShellCommandResult::Executed {
-            command: command.to_string(),
-            output: combined,
-            success: output.status.success(),
-            exit_code: output.status.code(),
-        })
-    }
 }
 
 impl Tool for ShellCommandTool {
@@ -238,9 +147,10 @@ impl Tool for ShellCommandTool {
     type Args = ShellCommandArgs;
     type Output = ShellCommandResult;
 
+    // Note: rig-rs 0.28 requires `impl Future` signature, not `async fn`
     #[expect(
         clippy::manual_async_fn,
-        reason = "rig-rs Tool trait requires impl Future return type"
+        reason = "rig-rs 0.28 requires impl Future signature"
     )]
     fn definition(&self, _prompt: String) -> impl Future<Output = ToolDefinition> + Send + Sync {
         async {
@@ -261,29 +171,17 @@ impl Tool for ShellCommandTool {
         &self,
         args: Self::Args,
     ) -> impl Future<Output = Result<Self::Output, Self::Error>> + Send {
-        let require_approval = self.require_approval;
-        let timeout_secs = self.timeout_secs;
         let command = args.command.clone();
         let explanation = args.explanation.clone();
-
         let needs_continuation = args.needs_continuation;
 
         async move {
-            if require_approval {
-                // Return pending approval - the orchestrator will handle HITL
-                Ok(ShellCommandResult::PendingApproval {
-                    command,
-                    explanation,
-                    needs_continuation,
-                })
-            } else {
-                // Direct execution (used after approval)
-                let tool = ShellCommandTool {
-                    require_approval: false,
-                    timeout_secs,
-                };
-                tool.execute(&command).await
-            }
+            Self::validate_command(&command)?;
+            Ok(ShellCommandResult::PendingApproval {
+                command,
+                explanation,
+                needs_continuation,
+            })
         }
     }
 }
@@ -295,18 +193,7 @@ mod tests {
     #[test]
     fn test_shell_tool_default() {
         let tool = ShellCommandTool::new();
-        assert!(tool.require_approval);
         assert_eq!(tool.timeout_secs, 30);
-    }
-
-    #[test]
-    fn test_shell_tool_builder() {
-        let tool = ShellCommandTool::new()
-            .with_approval(false)
-            .with_timeout(60);
-
-        assert!(!tool.require_approval);
-        assert_eq!(tool.timeout_secs, 60);
     }
 
     #[tokio::test]
@@ -329,7 +216,6 @@ mod tests {
                 assert_eq!(command, "ls -la");
                 assert!(!needs_continuation);
             }
-            _ => panic!("Expected PendingApproval"),
         }
     }
 
@@ -350,39 +236,6 @@ mod tests {
             } => {
                 assert!(needs_continuation);
             }
-            _ => panic!("Expected PendingApproval"),
-        }
-    }
-
-    #[tokio::test]
-    async fn test_execute_simple_command() {
-        let tool = ShellCommandTool::new().with_approval(false);
-        let result = tool.execute("echo hello").await.unwrap();
-
-        match result {
-            ShellCommandResult::Executed {
-                output, success, ..
-            } => {
-                assert!(success);
-                assert!(output.contains("hello"));
-            }
-            _ => panic!("Expected Executed"),
-        }
-    }
-
-    #[tokio::test]
-    async fn test_execute_failing_command() {
-        let tool = ShellCommandTool::new().with_approval(false);
-        let result = tool.execute("exit 1").await.unwrap();
-
-        match result {
-            ShellCommandResult::Executed {
-                success, exit_code, ..
-            } => {
-                assert!(!success);
-                assert_eq!(exit_code, Some(1));
-            }
-            _ => panic!("Expected Executed"),
         }
     }
 

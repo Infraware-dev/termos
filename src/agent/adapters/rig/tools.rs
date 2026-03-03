@@ -87,18 +87,16 @@ impl From<HitlMarker> for Interrupt {
 
 impl From<ShellCommandResult> for Option<HitlMarker> {
     fn from(result: ShellCommandResult) -> Self {
-        match result {
-            ShellCommandResult::PendingApproval {
-                command,
-                explanation,
-                needs_continuation,
-            } => Some(HitlMarker::CommandApproval {
-                command,
-                message: explanation,
-                needs_continuation,
-            }),
-            _ => None,
-        }
+        let ShellCommandResult::PendingApproval {
+            command,
+            explanation,
+            needs_continuation,
+        } = result;
+        Some(HitlMarker::CommandApproval {
+            command,
+            message: explanation,
+            needs_continuation,
+        })
     }
 }
 
@@ -150,19 +148,6 @@ mod tests {
             marker.unwrap(),
             HitlMarker::CommandApproval { .. }
         ));
-    }
-
-    #[test]
-    fn test_shell_executed_no_marker() {
-        let result = ShellCommandResult::Executed {
-            command: "ls".to_string(),
-            output: "file1".to_string(),
-            success: true,
-            exit_code: Some(0),
-        };
-
-        let marker: Option<HitlMarker> = result.into();
-        assert!(marker.is_none());
     }
 
     #[test]
