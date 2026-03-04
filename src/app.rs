@@ -81,7 +81,7 @@ pub enum AppBackgroundEvent {
     /// An error occurred during LLM query
     LlmError(String),
     /// Incident investigation phase transition
-    LlmPhase(crate::engine::IncidentPhase),
+    LlmPhase(crate::agent::IncidentPhase),
 }
 
 /// Cursor blink and timing state.

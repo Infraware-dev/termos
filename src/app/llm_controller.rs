@@ -1,6 +1,6 @@
-//! LLM query management via the `AgenticEngine`.
+//! LLM query management via the `Agent`.
 //!
-//! Provides `LlmController` which drives the engine directly and converts
+//! Provides `LlmController` which drives the agent directly and converts
 //! its event stream into `AppBackgroundEvent` values for the terminal UI.
 
 use std::sync::{Arc, RwLock, mpsc};
@@ -10,16 +10,14 @@ use tokio::runtime::Runtime;
 use tokio_util::sync::CancellationToken;
 
 use super::AppBackgroundEvent;
-use crate::engine::{
-    AgentEvent, AgenticEngine, Interrupt, MockEngine, ResumeResponse, RunInput, ThreadId,
-};
-use crate::llm::IncrementalRenderer;
+use crate::agent::{Agent, AgentEvent, Interrupt, MockAgent, ResumeResponse, RunInput, ThreadId};
+use crate::markdown::IncrementalRenderer;
 
-/// Drives the `AgenticEngine` and converts its event stream into
+/// Drives the `Agent` and converts its event stream into
 /// `AppBackgroundEvent` values that the terminal UI can consume.
 #[derive(Debug)]
 pub struct LlmController {
-    engine: Arc<dyn AgenticEngine>,
+    agent: Arc<dyn Agent>,
     thread_id: Arc<RwLock<Option<ThreadId>>>,
     /// Incremental renderer for streaming responses (markdown -> ANSI)
     pub incremental_renderer: IncrementalRenderer,
@@ -32,13 +30,13 @@ pub struct LlmController {
 }
 
 impl LlmController {
-    /// Creates a new controller, selecting the engine from environment.
+    /// Creates a new controller, selecting the agent from environment.
     pub fn new() -> Self {
         let (bg_event_tx, bg_event_rx) = mpsc::channel();
-        let engine = Self::create_engine();
+        let agent = Self::create_agent();
 
         Self {
-            engine,
+            agent,
             thread_id: Arc::new(RwLock::new(None)),
             incremental_renderer: IncrementalRenderer::new(),
             bg_event_tx,
@@ -47,35 +45,35 @@ impl LlmController {
         }
     }
 
-    /// Selects and initialises the engine based on `ENGINE_TYPE` env var.
-    fn create_engine() -> Arc<dyn AgenticEngine> {
-        let engine_type = std::env::var("ENGINE_TYPE").unwrap_or_else(|_| "rig".to_string());
+    /// Selects and initialises the agent based on `AGENT_TYPE` env var.
+    fn create_agent() -> Arc<dyn Agent> {
+        let agent_type = std::env::var("AGENT_TYPE").unwrap_or_else(|_| "rig".to_string());
 
-        match engine_type.as_str() {
+        match agent_type.as_str() {
             #[cfg(feature = "rig")]
-            "rig" => match crate::engine::RigEngine::from_env() {
-                Ok(engine) => {
-                    tracing::info!("Initialised RigEngine (Anthropic Claude)");
-                    Arc::new(engine)
+            "rig" => match crate::agent::RigAgent::from_env() {
+                Ok(agent) => {
+                    tracing::info!("Initialised RigAgent (Anthropic Claude)");
+                    Arc::new(agent)
                 }
                 Err(e) => {
-                    tracing::warn!("RigEngine init failed ({e}), falling back to MockEngine");
-                    Arc::new(MockEngine::new(None))
+                    tracing::warn!("RigAgent init failed ({e}), falling back to MockAgent");
+                    Arc::new(MockAgent::new(None))
                 }
             },
             _ => {
-                tracing::info!("Using MockEngine");
+                tracing::info!("Using MockAgent");
                 let workflow = std::env::var("MOCK_WORKFLOW_FILE").ok().and_then(|path| {
                     let data = std::fs::read_to_string(&path).ok()?;
                     serde_json::from_str(&data).ok()
                 });
-                Arc::new(MockEngine::new(workflow))
+                Arc::new(MockAgent::new(workflow))
             }
         }
     }
 
     /// Starts a new LLM query, spawning a background task that streams
-    /// engine events and forwards them as `AppBackgroundEvent`.
+    /// agent events and forwards them as `AppBackgroundEvent`.
     pub fn start_query(&mut self, runtime: &Runtime, text: String) {
         if let Some(token) = self.cancel_token.take() {
             token.cancel();
@@ -86,7 +84,7 @@ impl LlmController {
         let cancel_token = CancellationToken::new();
         self.cancel_token = Some(cancel_token.clone());
 
-        let engine = Arc::clone(&self.engine);
+        let agent = Arc::clone(&self.agent);
         let tx = self.bg_event_tx.clone();
         let thread_id_lock = Arc::clone(&self.thread_id);
 
@@ -102,7 +100,7 @@ impl LlmController {
                     .clone();
                 match existing {
                     Some(id) => id,
-                    None => match engine.create_thread(None).await {
+                    None => match agent.create_thread(None).await {
                         Ok(id) => {
                             *thread_id_lock.write().unwrap_or_else(|e| {
                                 tracing::warn!("thread_id write lock was poisoned, recovering");
@@ -121,7 +119,7 @@ impl LlmController {
             };
 
             let input = RunInput::single_user_message(text);
-            let stream = match engine.stream_run(&thread_id, input).await {
+            let stream = match agent.stream_run(&thread_id, input).await {
                 Ok(s) => s,
                 Err(e) => {
                     let _ = tx.send(AppBackgroundEvent::LlmError(format!(
@@ -184,7 +182,7 @@ impl LlmController {
         let cancel_token = CancellationToken::new();
         self.cancel_token = Some(cancel_token.clone());
 
-        let engine = Arc::clone(&self.engine);
+        let agent = Arc::clone(&self.agent);
         let tx = self.bg_event_tx.clone();
         let thread_id_lock = Arc::clone(&self.thread_id);
 
@@ -203,7 +201,7 @@ impl LlmController {
                 return;
             };
 
-            let stream = match engine.resume_run(&thread_id, response).await {
+            let stream = match agent.resume_run(&thread_id, response).await {
                 Ok(s) => s,
                 Err(e) => {
                     let _ = tx.send(AppBackgroundEvent::LlmError(format!(
@@ -217,9 +215,9 @@ impl LlmController {
         });
     }
 
-    /// Consumes an engine event stream and forwards events to the UI channel.
+    /// Consumes an agent event stream and forwards events to the UI channel.
     async fn consume_event_stream(
-        mut stream: crate::engine::EventStream,
+        mut stream: crate::agent::EventStream,
         tx: &mpsc::Sender<AppBackgroundEvent>,
         cancel_token: &CancellationToken,
     ) {
@@ -267,7 +265,7 @@ impl LlmController {
                     return;
                 }
                 Ok(AgentEvent::Metadata { .. } | AgentEvent::Values { .. }) => {
-                    // Engine-internal events; not displayed in terminal UI
+                    // Agent-internal events; not displayed in terminal UI
                 }
                 Err(e) => {
                     let _ = tx.send(AppBackgroundEvent::LlmError(format!("Stream error: {e}")));

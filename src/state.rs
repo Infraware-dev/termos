@@ -6,12 +6,12 @@
 //! # Architecture
 //!
 //! ```text
-//! EngineStatus (from backend) → AppMode (UI state) → Throbber ON/OFF
+//! AgentStatus (from backend) → AppMode (UI state) → Throbber ON/OFF
 //! ```
 //!
-//! `AppMode` is derived from `EngineStatus` via `From` trait implementation.
+//! `AppMode` is derived from `AgentStatus` via `From` trait implementation.
 
-use crate::engine::{EngineStatus, Interrupt};
+use crate::agent::{AgentStatus, Interrupt};
 
 /// Application mode states.
 ///
@@ -43,16 +43,16 @@ pub enum AppMode {
     },
 }
 
-/// Derive AppMode from EngineStatus
+/// Derive AppMode from AgentStatus
 ///
 /// This is the primary way to convert backend state to UI state.
-/// Throbber is ON when `AppMode::WaitingLLM` (i.e., `EngineStatus::Thinking`).
-impl From<EngineStatus> for AppMode {
-    fn from(status: EngineStatus) -> Self {
+/// Throbber is ON when `AppMode::WaitingLLM` (i.e., `AgentStatus::Thinking`).
+impl From<AgentStatus> for AppMode {
+    fn from(status: AgentStatus) -> Self {
         match status {
-            EngineStatus::Ready => Self::Normal,
-            EngineStatus::Thinking => Self::WaitingLLM,
-            EngineStatus::Interrupted(interrupt) => match interrupt {
+            AgentStatus::Ready => Self::Normal,
+            AgentStatus::Thinking => Self::WaitingLLM,
+            AgentStatus::Interrupted(interrupt) => match interrupt {
                 Interrupt::CommandApproval {
                     command,
                     message,
@@ -73,7 +73,7 @@ impl From<EngineStatus> for AppMode {
 /// Tracks LLM agent stream timing for timeout detection.
 ///
 /// Note: `stream_active` was removed as it's now redundant with
-/// `EngineStatus::Thinking`. The throbber is controlled directly
+/// `AgentStatus::Thinking`. The throbber is controlled directly
 /// by `AppMode::WaitingLLM`.
 #[derive(Debug, Clone, Default)]
 pub struct AgentState {
@@ -232,25 +232,25 @@ mod tests {
         );
     }
 
-    // Tests for From<EngineStatus> implementation
+    // Tests for From<AgentStatus> implementation
 
     #[test]
-    fn test_from_engine_status_ready() {
-        let status = EngineStatus::Ready;
+    fn test_from_agent_status_ready() {
+        let status = AgentStatus::Ready;
         let mode: AppMode = status.into();
         assert_eq!(mode, AppMode::Normal);
     }
 
     #[test]
-    fn test_from_engine_status_thinking() {
-        let status = EngineStatus::Thinking;
+    fn test_from_agent_status_thinking() {
+        let status = AgentStatus::Thinking;
         let mode: AppMode = status.into();
         assert_eq!(mode, AppMode::WaitingLLM);
     }
 
     #[test]
-    fn test_from_engine_status_interrupted_command() {
-        let status = EngineStatus::Interrupted(Interrupt::CommandApproval {
+    fn test_from_agent_status_interrupted_command() {
+        let status = AgentStatus::Interrupted(Interrupt::CommandApproval {
             command: "ls -la".to_string(),
             message: "List files".to_string(),
             needs_continuation: false,
@@ -267,8 +267,8 @@ mod tests {
     }
 
     #[test]
-    fn test_from_engine_status_interrupted_question() {
-        let status = EngineStatus::Interrupted(Interrupt::Question {
+    fn test_from_agent_status_interrupted_question() {
+        let status = AgentStatus::Interrupted(Interrupt::Question {
             question: "Which env?".to_string(),
             options: Some(vec!["dev".to_string(), "prod".to_string()]),
         });
@@ -283,8 +283,8 @@ mod tests {
     }
 
     #[test]
-    fn test_from_engine_status_question_no_options() {
-        let status = EngineStatus::Interrupted(Interrupt::Question {
+    fn test_from_agent_status_question_no_options() {
+        let status = AgentStatus::Interrupted(Interrupt::Question {
             question: "What name?".to_string(),
             options: None,
         });

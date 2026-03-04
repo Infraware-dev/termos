@@ -7,11 +7,11 @@
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+mod agent;
 mod app;
 mod config;
-mod engine;
 mod input;
-mod llm;
+mod markdown;
 mod orchestrators;
 mod pty;
 mod session;

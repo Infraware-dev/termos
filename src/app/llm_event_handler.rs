@@ -88,16 +88,16 @@ impl<'a> LlmEventHandler<'a> {
                     None => return,
                 };
                 let banner = match phase {
-                    crate::engine::IncidentPhase::Investigating => {
+                    crate::agent::IncidentPhase::Investigating => {
                         "\r\n\x1b[1;36m🔍 Investigating...\x1b[0m\r\n"
                     }
-                    crate::engine::IncidentPhase::Analyzing => {
+                    crate::agent::IncidentPhase::Analyzing => {
                         "\r\n\x1b[1;33m🧠 Analyzing findings...\x1b[0m\r\n"
                     }
-                    crate::engine::IncidentPhase::Reporting => {
+                    crate::agent::IncidentPhase::Reporting => {
                         "\r\n\x1b[1;32m📄 Generating post-mortem report...\x1b[0m\r\n"
                     }
-                    crate::engine::IncidentPhase::Completed => {
+                    crate::agent::IncidentPhase::Completed => {
                         "\r\n\x1b[1;34m✅ Incident pipeline completed.\x1b[0m\r\n"
                     }
                 };
