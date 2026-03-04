@@ -14,7 +14,7 @@ use tokio::time::{Duration, timeout};
 #[serde(deny_unknown_fields)]
 struct SimFixture {
     /// Optional human-readable scenario description.
-    #[allow(dead_code)]
+    #[expect(dead_code, reason = "Deserialized from fixture JSON but not read in code")]
     #[serde(default)]
     description: Option<String>,
     command_responses: Vec<SimEntry>,

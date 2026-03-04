@@ -4,7 +4,7 @@
 //! with HITL (Human-in-the-Loop) approval support.
 //!
 //! Note: These tools are currently not integrated with rig-rs's automatic
-//! tool execution due to complex type handling in rig 0.28. They are kept
+//! tool execution due to complex type handling in rig 0.31. They are kept
 //! as reference implementations for future integration.
 
 // Shell command tool integrated with rig-rs native function calling
@@ -85,7 +85,7 @@ pub enum ShellError {
 
     /// Command was not approved (reserved for future HITL rejection handling)
     #[error("Command was not approved by user")]
-    #[allow(dead_code)]
+    #[expect(dead_code, reason = "Reserved for future HITL rejection handling")]
     NotApproved,
 
     /// Command contains dangerous patterns
@@ -125,14 +125,12 @@ impl ShellCommandTool {
     }
 
     /// Set whether to require approval (builder pattern)
-    #[allow(dead_code)] // Public API for future configurability
     pub fn with_approval(mut self, require: bool) -> Self {
         self.require_approval = require;
         self
     }
 
     /// Set the timeout in seconds (builder pattern)
-    #[allow(dead_code)] // Public API for future configurability
     pub fn with_timeout(mut self, secs: u64) -> Self {
         self.timeout_secs = secs;
         self
@@ -240,8 +238,10 @@ impl Tool for ShellCommandTool {
     type Args = ShellCommandArgs;
     type Output = ShellCommandResult;
 
-    // Note: rig-rs 0.28 requires `impl Future` signature, not `async fn`
-    #[allow(clippy::manual_async_fn)]
+    #[expect(
+        clippy::manual_async_fn,
+        reason = "rig-rs Tool trait requires impl Future return type"
+    )]
     fn definition(&self, _prompt: String) -> impl Future<Output = ToolDefinition> + Send + Sync {
         async {
             ToolDefinition {
@@ -257,8 +257,6 @@ impl Tool for ShellCommandTool {
         }
     }
 
-    // Note: rig-rs 0.28 requires `impl Future` signature, not `async fn`
-    #[allow(clippy::manual_async_fn)]
     fn call(
         &self,
         args: Self::Args,

@@ -18,8 +18,8 @@ use super::config::RigEngineConfig;
 use super::incident;
 use super::state::{PendingInterrupt, ResumeContext, StateStore};
 use super::tools::{
-    AskUserArgs, AskUserTool, DiagnosticCommandTool, HitlMarker, ShellCommandArgs,
-    ShellCommandTool, StartIncidentArgs, StartIncidentInvestigationTool,
+    AskUserArgs, AskUserTool, HitlMarker, ShellCommandArgs, ShellCommandTool, StartIncidentArgs,
+    StartIncidentInvestigationTool,
 };
 use crate::engine::adapters::rig::memory::session::{MemoryStore, SaveMemoryTool};
 use crate::engine::error::EngineError;
@@ -75,7 +75,6 @@ impl PromptHook<anthropic::completion::CompletionModel> for HitlHook {
             if tool_name == <ShellCommandTool as Tool>::NAME
                 || tool_name == <AskUserTool as Tool>::NAME
                 || tool_name == <StartIncidentInvestigationTool as Tool>::NAME
-                || tool_name == <DiagnosticCommandTool as Tool>::NAME
             {
                 tracing::debug!(
                     tool_name = %tool_name,
@@ -428,13 +427,10 @@ pub fn create_resume_stream(
     Box::pin(stream! {
         yield Ok(AgentEvent::metadata(&run_id));
 
-        let pending = state.take_interrupt(&thread_id).await;
-        if pending.is_none() {
+        let Some(pending) = state.take_interrupt(&thread_id).await else {
             yield Err(EngineError::run_not_resumable(thread_id.as_str()));
             return;
-        }
-
-        let pending = pending.unwrap();
+        };
 
         match (&response, &pending.resume_context) {
             // Command rejected

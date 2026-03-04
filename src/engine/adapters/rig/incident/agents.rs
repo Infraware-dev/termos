@@ -90,7 +90,19 @@ impl Tool for SaveReportTool {
             use tokio::fs;
 
             let today = chrono::Utc::now().format("%Y-%m-%d");
-            let filename = format!("{today}-{}.md", args.slug.trim().replace(' ', "-"));
+            let sanitized_slug: String = args
+                .slug
+                .trim()
+                .replace(' ', "-")
+                .chars()
+                .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
+                .collect();
+            if sanitized_slug.is_empty() {
+                return Err(SaveReportError::Io(
+                    "slug is empty after sanitization".to_string(),
+                ));
+            }
+            let filename = format!("{today}-{sanitized_slug}.md");
             let dir = ".infraware/incidents";
 
             fs::create_dir_all(dir)
@@ -321,6 +333,44 @@ mod tests {
         assert!(result.saved);
         assert!(result.path.contains("test-incident"));
         assert!(result.path.ends_with(".md"));
+
+        // Cleanup
+        let _ = fs::remove_file(&result.path);
+    }
+
+    #[tokio::test]
+    async fn test_save_report_rejects_empty_slug() {
+        let tool = SaveReportTool;
+        let args = SaveReportArgs {
+            slug: "../../..".to_string(),
+            content: "# Report".to_string(),
+        };
+
+        let result = tool.call(args).await;
+        assert!(
+            result.is_err(),
+            "Slug with only path-traversal chars should fail"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_save_report_sanitizes_slug() {
+        use std::fs;
+
+        let tool = SaveReportTool;
+        let args = SaveReportArgs {
+            slug: "../../my-incident/../../hack".to_string(),
+            content: "# Report".to_string(),
+        };
+
+        let result = tool.call(args).await.unwrap();
+        assert!(result.saved);
+        assert!(
+            !result.path.contains(".."),
+            "Path should not contain traversal: {}",
+            result.path
+        );
+        assert!(result.path.contains("my-incidenthack"));
 
         // Cleanup
         let _ = fs::remove_file(&result.path);

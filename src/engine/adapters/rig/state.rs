@@ -8,6 +8,9 @@ use tokio::sync::RwLock;
 use super::incident::context::{IncidentContext, RiskLevel};
 use crate::engine::shared::{Message, ThreadId};
 
+/// Maximum number of messages retained per thread before oldest are evicted.
+const MAX_THREAD_MESSAGES: usize = 200;
+
 /// In-memory state store for threads and runs
 #[derive(Debug)]
 pub struct StateStore {
@@ -51,11 +54,17 @@ impl StateStore {
         self.threads.read().await.contains_key(&thread_id.0)
     }
 
-    /// Add messages to a thread's history
+    /// Add messages to a thread's history.
+    ///
+    /// Evicts oldest messages when the total exceeds `MAX_THREAD_MESSAGES`.
     pub async fn add_messages(&self, thread_id: &ThreadId, messages: Vec<Message>) -> bool {
         let mut threads = self.threads.write().await;
         if let Some(state) = threads.get_mut(&thread_id.0) {
             state.messages.extend(messages);
+            if state.messages.len() > MAX_THREAD_MESSAGES {
+                let excess = state.messages.len() - MAX_THREAD_MESSAGES;
+                state.messages.drain(..excess);
+            }
             true
         } else {
             false

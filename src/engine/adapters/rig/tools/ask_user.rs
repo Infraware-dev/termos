@@ -4,7 +4,7 @@
 //! when the LLM needs clarification or additional information.
 //!
 //! Note: These tools are currently not integrated with rig-rs's automatic
-//! tool execution due to complex type handling in rig 0.28. They are kept
+//! tool execution due to complex type handling in rig 0.31. They are kept
 //! as reference implementations for future integration.
 
 // Ask user tool integrated with rig-rs native function calling
@@ -90,8 +90,10 @@ impl Tool for AskUserTool {
     type Args = AskUserArgs;
     type Output = AskUserResult;
 
-    // Note: rig-rs 0.28 requires `impl Future` signature, not `async fn`
-    #[allow(clippy::manual_async_fn)]
+    #[expect(
+        clippy::manual_async_fn,
+        reason = "rig-rs Tool trait requires impl Future return type"
+    )]
     fn definition(&self, _prompt: String) -> impl Future<Output = ToolDefinition> + Send + Sync {
         async {
             ToolDefinition {
@@ -107,8 +109,10 @@ impl Tool for AskUserTool {
         }
     }
 
-    // Note: rig-rs 0.28 requires `impl Future` signature, not `async fn`
-    #[allow(clippy::manual_async_fn)]
+    #[expect(
+        clippy::manual_async_fn,
+        reason = "rig-rs Tool trait requires impl Future return type"
+    )]
     fn call(
         &self,
         args: Self::Args,
