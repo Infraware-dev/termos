@@ -138,9 +138,7 @@ impl InputClassifier {
 
         // 3. NL patterns (question words, request phrases, articles) → NL
         //    Only reached when the first word is NOT a known command.
-        if PATTERNS.natural_language.is_match(input)
-            && !PATTERNS.shell_operators.is_match(input)
-        {
+        if PATTERNS.natural_language.is_match(input) && !PATTERNS.shell_operators.is_match(input) {
             return true;
         }
 
