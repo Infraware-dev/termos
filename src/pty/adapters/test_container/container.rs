@@ -90,7 +90,10 @@ impl Container {
     pub async fn stop(&self) -> anyhow::Result<()> {
         tracing::debug!("Stopping container {}", self.name);
         if let Err(e) = self.docker.stop_container(&self.name, None).await {
-            tracing::debug!("Stop request for container {} returned error (will still attempt removal): {e}", self.name);
+            tracing::debug!(
+                "Stop request for container {} returned error (will still attempt removal): {e}",
+                self.name
+            );
         } else {
             tracing::debug!("Stopped container {}", self.name);
         }
