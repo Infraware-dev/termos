@@ -19,7 +19,6 @@ pub struct TerminalHandler {
     pending_llm_query: Option<String>,
 }
 
-#[allow(dead_code)]
 impl TerminalHandler {
     /// Create a new terminal handler with given dimensions.
     #[must_use]
@@ -55,12 +54,6 @@ impl TerminalHandler {
     /// Get a mutable reference to the grid.
     pub fn grid_mut(&mut self) -> &mut TerminalGrid {
         &mut self.grid
-    }
-
-    /// Get the window title.
-    #[must_use]
-    pub fn window_title(&self) -> &str {
-        &self.window_title
     }
 
     /// Resize the terminal.

@@ -4,28 +4,15 @@ use egui::Color32;
 
 /// Theme colors for the terminal.
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 pub struct Theme {
     /// Background color
     pub background: Color32,
     /// Default text color
     pub text: Color32,
-    /// Prompt prefix color (|~|)
-    pub prompt_prefix: Color32,
-    /// Prompt path color (user@host:path)
-    pub prompt_path: Color32,
     /// Cursor color
     pub cursor: Color32,
     /// Selection color
     pub selection: Color32,
-    /// LLM response color
-    pub llm_response: Color32,
-    /// Error color
-    pub error: Color32,
-    /// Title bar background
-    pub titlebar_bg: Color32,
-    /// Title bar text
-    pub titlebar_text: Color32,
     /// Split separator color
     pub split_separator: Color32,
 }
@@ -40,17 +27,11 @@ impl Theme {
     /// Dark theme matching the UI mockups.
     pub fn dark() -> Self {
         Self {
-            background: Color32::from_rgb(27, 27, 27),       // #1b1b1b
-            text: Color32::from_rgb(204, 204, 204),          // #cccccc
-            prompt_prefix: Color32::from_rgb(198, 208, 214), // #c6d0d6
-            prompt_path: Color32::from_rgb(198, 208, 214),   // #c6d0d6
-            cursor: Color32::from_rgb(204, 204, 204),        // #cccccc
+            background: Color32::from_rgb(27, 27, 27), // #1b1b1b
+            text: Color32::from_rgb(204, 204, 204),    // #cccccc
+            cursor: Color32::from_rgb(204, 204, 204),  // #cccccc
             selection: Color32::from_rgba_unmultiplied(97, 175, 239, 100), // #61afef with alpha
-            llm_response: Color32::from_rgb(204, 204, 204),  // #cccccc
-            error: Color32::from_rgb(224, 108, 117),         // #e06c75 (red)
-            titlebar_bg: Color32::from_rgb(27, 27, 27),      // #1b1b1b
-            titlebar_text: Color32::from_rgb(204, 204, 204), // #cccccc
-            split_separator: Color32::from_rgb(97, 97, 97),  // #616161
+            split_separator: Color32::from_rgb(97, 97, 97), // #616161
         }
     }
 
@@ -108,9 +89,6 @@ mod tests {
 
         // Text should be light gray
         assert_eq!(theme.text, Color32::from_rgb(204, 204, 204));
-
-        // Error should be reddish
-        assert_eq!(theme.error, Color32::from_rgb(224, 108, 117));
     }
 
     #[test]

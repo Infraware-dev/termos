@@ -212,17 +212,6 @@ impl CellAttrs {
         *self = Self::empty();
     }
 
-    // Getter methods (replaces field access)
-    #[inline]
-    #[allow(dead_code)]
-    pub fn bold(&self) -> bool {
-        self.contains(Self::BOLD)
-    }
-    #[inline]
-    #[allow(dead_code)]
-    pub fn italic(&self) -> bool {
-        self.contains(Self::ITALIC)
-    }
     #[inline]
     pub fn underline(&self) -> bool {
         self.contains(Self::UNDERLINE)
@@ -243,12 +232,6 @@ impl CellAttrs {
     pub fn hidden(&self) -> bool {
         self.contains(Self::HIDDEN)
     }
-    #[inline]
-    #[allow(dead_code)]
-    pub fn blink(&self) -> bool {
-        self.contains(Self::BLINK)
-    }
-
     // Setter methods (replaces field assignment)
     #[inline]
     pub fn set_bold(&mut self, on: bool) {
@@ -278,11 +261,6 @@ impl CellAttrs {
     pub fn set_hidden(&mut self, on: bool) {
         self.set(Self::HIDDEN, on);
     }
-    #[inline]
-    #[allow(dead_code)]
-    pub fn set_blink(&mut self, on: bool) {
-        self.set(Self::BLINK, on);
-    }
 }
 
 /// A single cell in the terminal grid.
@@ -305,9 +283,9 @@ impl Default for Cell {
     }
 }
 
-#[allow(dead_code)]
 impl Cell {
     /// Create a new cell with a character.
+    #[cfg(test)]
     #[must_use]
     pub fn new(ch: char, fg: Color, bg: Color, attrs: CellAttrs) -> Self {
         Self { ch, fg, bg, attrs }
@@ -476,10 +454,10 @@ mod tests {
         let mut attrs = CellAttrs::default();
 
         attrs.set_bold(true);
-        assert!(attrs.bold());
+        assert!(attrs.contains(CellAttrs::BOLD));
 
         attrs.set_italic(true);
-        assert!(attrs.italic());
+        assert!(attrs.contains(CellAttrs::ITALIC));
 
         attrs.set_underline(true);
         assert!(attrs.underline());
@@ -495,9 +473,6 @@ mod tests {
 
         attrs.set_hidden(true);
         assert!(attrs.hidden());
-
-        attrs.set_blink(true);
-        assert!(attrs.blink());
     }
 
     #[test]
@@ -513,10 +488,10 @@ mod tests {
     fn test_cell_attrs_toggle() {
         let mut attrs = CellAttrs::default();
         attrs.set_bold(true);
-        assert!(attrs.bold());
+        assert!(attrs.contains(CellAttrs::BOLD));
 
         attrs.set_bold(false);
-        assert!(!attrs.bold());
+        assert!(!attrs.contains(CellAttrs::BOLD));
     }
 
     // Cell tests

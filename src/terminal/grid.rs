@@ -78,7 +78,6 @@ struct AltScreenState {
     saved_cursor: Option<SavedCursor>,
 }
 
-#[allow(dead_code)]
 impl TerminalGrid {
     /// Create a new terminal grid with given dimensions.
     #[must_use]
@@ -141,12 +140,6 @@ impl TerminalGrid {
         self.cursor_visible = visible;
     }
 
-    /// Get cells for rendering (current screen only).
-    /// Note: Returns physical array order, use visible_rows() for logical order.
-    pub fn cells(&self) -> &[Vec<Cell>] {
-        &self.cells
-    }
-
     // ========== Ring Buffer Helpers ==========
 
     /// Convert logical row index to physical index in the ring buffer.
@@ -170,6 +163,7 @@ impl TerminalGrid {
     }
 
     /// Get scrollback buffer.
+    #[cfg(test)]
     pub fn scrollback(&self) -> &VecDeque<Vec<Cell>> {
         &self.scrollback
     }
@@ -177,11 +171,6 @@ impl TerminalGrid {
     /// Get current scroll offset (0 = live view, >0 = scrolled up).
     pub fn scroll_offset(&self) -> usize {
         self.scroll_offset
-    }
-
-    /// Get total scrollable lines (scrollback + visible).
-    pub fn total_lines(&self) -> usize {
-        self.scrollback.len() + self.cells.len()
     }
 
     /// Maximum scroll offset.
@@ -210,6 +199,7 @@ impl TerminalGrid {
     }
 
     /// Check if at bottom (live view).
+    #[cfg(test)]
     pub fn is_at_bottom(&self) -> bool {
         self.scroll_offset == 0
     }
@@ -219,6 +209,7 @@ impl TerminalGrid {
     /// Uses ring buffer for correct logical row ordering.
     ///
     /// DEPRECATED: Use `visible_row()` and `visible_row_count()` for zero-allocation access.
+    #[cfg(test)]
     pub fn visible_rows(&self) -> Vec<&[Cell]> {
         let total = self.scrollback.len() + self.cells.len();
         let visible_count = self.rows as usize;
@@ -302,6 +293,7 @@ impl TerminalGrid {
     }
 
     /// Check if alternate screen is active.
+    #[cfg(test)]
     #[must_use]
     pub fn is_alt_screen(&self) -> bool {
         self.alt_screen.is_some()
@@ -546,12 +538,6 @@ impl TerminalGrid {
                 }
             }
         }
-    }
-
-    /// Create an empty row with default cells.
-    #[inline]
-    fn create_empty_row(&self) -> Vec<Cell> {
-        vec![Cell::default(); self.cols as usize]
     }
 
     /// Set scroll region (1-indexed).
@@ -1880,7 +1866,7 @@ mod tests {
         grid.restore_cursor();
 
         assert_eq!(grid.cursor_position(), (4, 19));
-        assert!(grid.current_attrs.bold());
+        assert!(grid.current_attrs.contains(CellAttrs::BOLD));
     }
 
     // === Attributes ===
@@ -1893,7 +1879,7 @@ mod tests {
         grid.put_char('X');
 
         let row = grid.row(0).unwrap();
-        assert!(row[0].attrs.bold());
+        assert!(row[0].attrs.contains(CellAttrs::BOLD));
         assert_eq!(row[0].fg, Color::Indexed(1));
     }
 
@@ -1905,8 +1891,8 @@ mod tests {
         grid.set_fg(Color::Indexed(5));
         grid.reset_attrs();
 
-        assert!(!grid.current_attrs.bold());
-        assert!(!grid.current_attrs.italic());
+        assert!(!grid.current_attrs.contains(CellAttrs::BOLD));
+        assert!(!grid.current_attrs.contains(CellAttrs::ITALIC));
         assert_eq!(grid.current_fg, Color::Named(NamedColor::Foreground));
     }
 

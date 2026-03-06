@@ -70,17 +70,6 @@ impl Container {
         Ok(())
     }
 
-    /// Returns `true` if the container is currently running.
-    pub async fn is_running(&self) -> bool {
-        self.docker
-            .inspect_container(&self.name, None)
-            .await
-            .ok()
-            .and_then(|info| info.state)
-            .and_then(|state| state.running)
-            .unwrap_or(false)
-    }
-
     /// Stops and removes the container to clean up resources after use.
     ///
     /// Stop is best-effort: even if the stop call fails (e.g., container

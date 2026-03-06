@@ -59,8 +59,8 @@ impl TextSelection {
     }
 
     /// Check if a cell at (row, col) is within the selection.
+    #[cfg(test)]
     #[must_use]
-    #[allow(dead_code)]
     pub fn contains(&self, row: usize, col: usize) -> bool {
         let (start, end) = self.normalized();
 

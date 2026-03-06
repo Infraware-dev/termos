@@ -36,13 +36,13 @@ impl Drop for PtyReader {
     }
 }
 
-#[allow(dead_code)]
 impl PtyReader {
     /// Creates a `PtyReader` with an externally managed stop flag.
     ///
     /// Use this when reading is handled by an external task (e.g., a tokio
     /// task draining an async stream) rather than by the internal blocking
     /// reader thread spawned by [`PtyReader::new`].
+    #[cfg(any(test, feature = "pty-test_container"))]
     pub fn with_stop_flag(stop_flag: Arc<AtomicBool>) -> Self {
         Self { stop_flag }
     }
@@ -102,6 +102,7 @@ impl PtyReader {
     }
 
     /// Check if the reader thread is still running.
+    #[cfg(test)]
     pub fn is_alive(&self) -> bool {
         // Acquire ordering: consistent with the reader thread's load
         !self.stop_flag.load(Ordering::Acquire)
@@ -122,21 +123,12 @@ impl fmt::Debug for PtyWriter {
     }
 }
 
-#[allow(dead_code)]
 impl PtyWriter {
     /// Create a new PTY writer.
     pub fn new(writer: Box<dyn Write + Send>) -> Self {
         Self {
             inner: Arc::new(std::sync::Mutex::new(writer)),
         }
-    }
-
-    /// Write data to the PTY.
-    ///
-    /// This writes the entire buffer to the PTY.
-    /// Returns the number of bytes written.
-    pub async fn write(&self, data: &[u8]) -> Result<usize> {
-        self.write_sync(data)
     }
 
     /// Synchronous write - works in both async and sync contexts.
@@ -156,38 +148,10 @@ impl PtyWriter {
         Ok(data.len())
     }
 
-    /// Write a string to the PTY.
-    ///
-    /// Convenience method for writing UTF-8 strings.
+    /// Write a string to the PTY (async convenience wrapper).
+    #[cfg(test)]
     pub async fn write_str(&self, s: &str) -> Result<usize> {
-        self.write(s.as_bytes()).await
-    }
-
-    /// Send a single byte (useful for control characters).
-    ///
-    /// # Common control characters:
-    /// - `0x03` (Ctrl+C) - SIGINT
-    /// - `0x04` (Ctrl+D) - EOF
-    /// - `0x1A` (Ctrl+Z) - SIGTSTP (suspend)
-    /// - `0x1B` - Escape
-    pub async fn send_byte(&self, byte: u8) -> Result<()> {
-        self.write(&[byte]).await?;
-        Ok(())
-    }
-
-    /// Send Ctrl+C (SIGINT) to the PTY.
-    pub async fn send_interrupt(&self) -> Result<()> {
-        self.send_byte(0x03).await
-    }
-
-    /// Send Ctrl+D (EOF) to the PTY.
-    pub async fn send_eof(&self) -> Result<()> {
-        self.send_byte(0x04).await
-    }
-
-    /// Send Ctrl+Z (SIGTSTP - suspend) to the PTY.
-    pub async fn send_suspend(&self) -> Result<()> {
-        self.send_byte(0x1A).await
+        self.write_sync(s.as_bytes())
     }
 }
 
@@ -285,34 +249,6 @@ mod tests {
         let writer = PtyWriter::new(Box::new(cursor));
         let n = writer.write_sync(b"sync write").unwrap();
         assert_eq!(n, 10);
-    }
-
-    #[tokio::test]
-    async fn test_pty_writer_send_byte() {
-        let cursor = Cursor::new(Vec::new());
-        let writer = PtyWriter::new(Box::new(cursor));
-        writer.send_byte(0x03).await.unwrap(); // Ctrl+C
-    }
-
-    #[tokio::test]
-    async fn test_pty_writer_send_interrupt() {
-        let cursor = Cursor::new(Vec::new());
-        let writer = PtyWriter::new(Box::new(cursor));
-        writer.send_interrupt().await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn test_pty_writer_send_eof() {
-        let cursor = Cursor::new(Vec::new());
-        let writer = PtyWriter::new(Box::new(cursor));
-        writer.send_eof().await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn test_pty_writer_send_suspend() {
-        let cursor = Cursor::new(Vec::new());
-        let writer = PtyWriter::new(Box::new(cursor));
-        writer.send_suspend().await.unwrap();
     }
 
     #[tokio::test]
