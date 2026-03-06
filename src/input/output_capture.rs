@@ -51,7 +51,6 @@ impl Default for OutputCapture {
     }
 }
 
-#[allow(dead_code)] // Command execution workflow methods - used by HITL orchestrator
 impl OutputCapture {
     /// Create a new output capture instance.
     #[must_use]
@@ -94,29 +93,15 @@ impl OutputCapture {
         self.skip_command_echo = true;
     }
 
-    /// Stop capturing and reset state.
-    pub fn stop(&mut self) {
-        tracing::debug!("OutputCapture: Stopping capture");
-        self.capturing = false;
-        self.current_command = None;
-        self.lines_received = 0;
-    }
-
     /// Check if capture is currently active.
     #[must_use]
     pub fn is_capturing(&self) -> bool {
         self.capturing
     }
 
-    /// Check if there is any captured output.
-    #[must_use]
-    pub fn has_output(&self) -> bool {
-        !self.buffer.is_empty()
-    }
-
     /// Get the command being executed.
+    #[cfg(test)]
     #[must_use]
-    #[allow(dead_code)]
     pub fn current_command(&self) -> Option<&str> {
         self.current_command.as_deref()
     }
@@ -250,12 +235,6 @@ impl OutputCapture {
 
         lines.join("\n")
     }
-
-    /// Get the current buffer content (for debugging).
-    #[cfg(test)]
-    pub fn buffer(&self) -> &str {
-        &self.buffer
-    }
 }
 
 #[cfg(test)]
@@ -331,17 +310,6 @@ mod tests {
 
         let output = capture.get_clean_output();
         assert_eq!(output, "Linux hostname 5.15.0");
-    }
-
-    #[test]
-    fn test_stop() {
-        let mut capture = OutputCapture::new();
-        capture.start("ls");
-        assert!(capture.is_capturing());
-
-        capture.stop();
-        assert!(!capture.is_capturing());
-        assert!(capture.current_command().is_none());
     }
 
     #[test]

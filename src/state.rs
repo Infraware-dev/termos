@@ -18,7 +18,6 @@ use crate::agent::{AgentStatus, Interrupt};
 /// The state machine enforces valid transitions between modes.
 /// Invalid transitions return an error.
 #[derive(Debug, Clone, PartialEq, Default)]
-#[allow(dead_code)] // Variants used when LLM integration is active
 pub enum AppMode {
     /// Normal operation - waiting for user input
     #[default]
@@ -99,7 +98,6 @@ impl AgentState {
     }
 }
 
-#[allow(dead_code)] // State machine API used when LLM integration is active
 impl AppMode {
     /// Get the name of the current state (for logging).
     #[must_use]
@@ -114,20 +112,7 @@ impl AppMode {
     }
 
     /// Check if a transition to the target state is valid.
-    ///
-    /// Valid transitions:
-    /// - Normal → WaitingLLM (user query)
-    /// - WaitingLLM → Normal (LLM completed)
-    /// - WaitingLLM → AwaitingApproval (LLM requests approval)
-    /// - WaitingLLM → AwaitingAnswer (LLM asks question)
-    /// - AwaitingApproval → Normal (user rejected)
-    /// - AwaitingApproval → ExecutingCommand (user approved, command sent to PTY)
-    /// - AwaitingApproval → WaitingLLM (legacy: resume after approval)
-    /// - AwaitingAnswer → Normal (user answered)
-    /// - AwaitingAnswer → WaitingLLM (resume with answer)
-    /// - ExecutingCommand → WaitingLLM (command finished, output sent to backend)
-    /// - ExecutingCommand → Normal (user cancelled)
-    /// - Any → Normal (cancel)
+    #[cfg(test)]
     #[must_use]
     pub fn can_transition_to(&self, target: &Self) -> bool {
         match (self, target) {

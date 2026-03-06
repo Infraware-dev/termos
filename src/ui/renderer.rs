@@ -4,39 +4,6 @@
 
 use egui::{Color32, FontId, Painter, Pos2, Rect, Stroke, Vec2};
 
-/// Configuration for terminal rendering.
-#[derive(Debug, Clone)]
-#[allow(dead_code)]
-pub struct RenderConfig {
-    /// Character width in pixels
-    pub char_width: f32,
-    /// Character height in pixels
-    pub char_height: f32,
-    /// Background color
-    pub background: Color32,
-    /// Cursor color
-    pub cursor_color: Color32,
-}
-
-#[allow(dead_code)]
-impl RenderConfig {
-    /// Create a new render configuration.
-    #[must_use]
-    pub fn new(
-        char_width: f32,
-        char_height: f32,
-        background: Color32,
-        cursor_color: Color32,
-    ) -> Self {
-        Self {
-            char_width,
-            char_height,
-            background,
-            cursor_color,
-        }
-    }
-}
-
 /// Render a batch of background rectangles.
 pub fn render_backgrounds(
     painter: &Painter,
@@ -52,26 +19,6 @@ pub fn render_backgrounds(
                 Vec2::new(*width, char_height),
             ),
             0.0,
-            *color,
-        );
-    }
-}
-
-/// Render a batch of text runs (legacy - uses owned Strings).
-#[allow(dead_code)]
-pub fn render_text_runs(
-    painter: &Painter,
-    rect: Rect,
-    y: f32,
-    font_id: &FontId,
-    text_runs: &[(f32, String, Color32)],
-) {
-    for (start_x, text, color) in text_runs {
-        painter.text(
-            Pos2::new(rect.left() + start_x, y),
-            egui::Align2::LEFT_TOP,
-            text,
-            font_id.clone(),
             *color,
         );
     }
@@ -238,16 +185,4 @@ pub fn render_scrollbar(
         ],
         stroke,
     );
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_render_config_creation() {
-        let config = RenderConfig::new(8.4, 16.0, Color32::BLACK, Color32::WHITE);
-        assert_eq!(config.char_width, 8.4);
-        assert_eq!(config.char_height, 16.0);
-    }
 }

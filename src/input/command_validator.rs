@@ -25,8 +25,8 @@ pub enum ValidationResult {
 
 impl ValidationResult {
     /// Check if the command is allowed (Safe or Warning).
+    #[cfg(test)]
     #[must_use]
-    #[allow(dead_code)] // Public API - used in tests and future validation flows
     pub fn is_allowed(&self) -> bool {
         matches!(self, Self::Safe | Self::Warning { .. })
     }

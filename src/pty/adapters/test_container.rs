@@ -239,20 +239,4 @@ impl PtySession for TestContainerPtySession {
             .write_all(&[0x03])
             .context("Failed to send Ctrl+C to container")
     }
-
-    async fn is_running(&self) -> bool {
-        match self.container.as_ref() {
-            Some(container) => container.is_running().await,
-            None => false,
-        }
-    }
-
-    async fn kill(&self) -> Result<()> {
-        self.container
-            .as_ref()
-            .context("Container already stopped")?
-            .stop()
-            .await
-            .context("Failed to stop container")
-    }
 }

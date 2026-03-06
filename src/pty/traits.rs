@@ -48,12 +48,6 @@ pub trait PtySession: Send + Sync + std::fmt::Debug {
 
     /// Send an interrupt signal (SIGINT / Ctrl+C equivalent).
     fn send_sigint(&self) -> Result<()>;
-
-    /// Check if the remote process is still alive.
-    async fn is_running(&self) -> bool;
-
-    /// Kill the session.
-    async fn kill(&self) -> Result<()>;
 }
 
 #[cfg(test)]

@@ -57,11 +57,6 @@ impl PtyManager {
         &self.label
     }
 
-    /// Current terminal size.
-    pub fn size(&self) -> PtySize {
-        self.current_size
-    }
-
     /// Take a reader for PTY output that sends to the provided channel.
     ///
     /// Note: Can only be called once (takes ownership).
@@ -99,16 +94,6 @@ impl PtyManager {
             tracing::debug!("PTY resized to {cols}x{rows}");
         }
         Ok(())
-    }
-
-    /// Check if the session is still running.
-    pub async fn is_running(&self) -> bool {
-        self.session.is_running().await
-    }
-
-    /// Kill the session.
-    pub async fn kill(&self) -> Result<()> {
-        self.session.kill().await
     }
 
     /// Send SIGINT to the session (non-blocking).

@@ -9,9 +9,7 @@ use std::sync::mpsc::SyncSender;
 
 use anyhow::{Context, Result};
 use async_trait::async_trait;
-use portable_pty::{
-    Child, CommandBuilder, MasterPty, PtyPair, PtySize, PtySystem, native_pty_system,
-};
+use portable_pty::{CommandBuilder, MasterPty, PtyPair, PtySize, PtySystem, native_pty_system};
 use tokio::sync::Mutex;
 
 use crate::pty::io::{PtyReader, PtyWriter};
@@ -27,8 +25,6 @@ const SHELL_PRIORITY: &[&str] = &["zsh", "bash", "sh"];
 pub struct LocalPtySession {
     /// Master PTY for I/O operations
     master: Arc<Mutex<Box<dyn MasterPty + Send>>>,
-    /// Child process handle
-    child: Arc<Mutex<Box<dyn Child + Send + Sync>>>,
     /// Reader (taken once via `take_reader`)
     reader: Option<PtyReader>,
     /// Writer (taken once via `take_writer`)
@@ -45,11 +41,10 @@ impl std::fmt::Debug for LocalPtySession {
 }
 
 impl LocalPtySession {
-    /// Create a `LocalPtySession` from a PTY pair and child process.
-    fn new(pair: PtyPair, child: Box<dyn Child + Send + Sync>) -> Self {
+    /// Create a `LocalPtySession` from a PTY pair.
+    fn new(pair: PtyPair) -> Self {
         Self {
             master: Arc::new(Mutex::new(pair.master)),
-            child: Arc::new(Mutex::new(child)),
             reader: None,
             writer: None,
         }
@@ -67,12 +62,6 @@ impl LocalPtySession {
         tracing::info!("Spawning local PTY with shell: {shell}");
         let session = spawn_command(&shell, &["-i"], size)?;
         Ok((session, shell))
-    }
-
-    /// Spawn a specific command in a local PTY.
-    #[allow(dead_code)] // Public API for future consumers; used in tests
-    pub fn spawn_command<S: AsRef<OsStr>>(cmd: &str, args: &[S], size: PtySize) -> Result<Self> {
-        spawn_command(cmd, args, size)
     }
 }
 
@@ -143,16 +132,6 @@ impl PtySession for LocalPtySession {
             Ok(())
         }
     }
-
-    async fn is_running(&self) -> bool {
-        let mut child = self.child.lock().await;
-        child.try_wait().ok().flatten().is_none()
-    }
-
-    async fn kill(&self) -> Result<()> {
-        let mut child = self.child.lock().await;
-        child.kill().context("Failed to kill child process")
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -199,8 +178,8 @@ fn spawn_command<S: AsRef<OsStr>>(cmd: &str, args: &[S], size: PtySize) -> Resul
     // NOTE: Do NOT set PS1/PROMPT here — it interferes with sub-shells (sudo su).
     // The custom prompt is set by initialize_shell() after startup instead.
 
-    let child = pair.slave.spawn_command(builder)?;
-    Ok(LocalPtySession::new(pair, child))
+    let _child = pair.slave.spawn_command(builder)?;
+    Ok(LocalPtySession::new(pair))
 }
 
 #[cfg(test)]
@@ -208,50 +187,56 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn test_pty_echo_command() {
+    async fn test_pty_spawn_shell_and_read() {
         // Skip if not running in a real terminal
         if std::env::var("CI").is_ok() {
             return;
         }
 
-        let mut session =
-            LocalPtySession::spawn_command("echo", &["hello PTY"], crate::pty::DEFAULT_PTY_SIZE)
-                .expect("Failed to spawn PTY");
+        let (mut session, shell) = LocalPtySession::spawn_shell(crate::pty::DEFAULT_PTY_SIZE)
+            .expect("Failed to spawn shell");
+
+        assert!(!shell.is_empty());
 
         // Create sync channel for PTY output
         let (tx, rx) = std::sync::mpsc::sync_channel(4);
         let _reader = session.take_reader(tx).await.expect("Failed to get reader");
 
-        // Read output — wait for data from background thread
+        let writer = session.take_writer().await.expect("Failed to get writer");
+
+        // Send a command and read output
+        writer
+            .write_str("echo hello PTY\n")
+            .await
+            .expect("Failed to write");
+
+        // Wait for output
         let mut all_output = Vec::new();
         let start = std::time::Instant::now();
         while start.elapsed() < std::time::Duration::from_secs(2) {
             match rx.recv_timeout(std::time::Duration::from_millis(100)) {
                 Ok(bytes) if !bytes.is_empty() => {
                     all_output.extend_from_slice(&bytes);
-                }
-                _ => {}
-            }
-
-            if !session.is_running().await {
-                // Process exited, drain remaining output
-                while let Ok(bytes) = rx.try_recv() {
-                    if bytes.is_empty() {
+                    let output = String::from_utf8_lossy(&all_output);
+                    if output.contains("hello PTY") {
                         break;
                     }
-                    all_output.extend_from_slice(&bytes);
                 }
-                break;
+                _ => {}
             }
         }
 
         let output = String::from_utf8_lossy(&all_output);
-        println!("PTY output: {:?}", output);
         assert!(
             output.contains("hello PTY"),
-            "Expected 'hello PTY' in output: {:?}",
-            output
+            "Expected 'hello PTY' in output: {output:?}",
         );
+
+        // Clean up
+        writer
+            .write_str("exit\n")
+            .await
+            .expect("Failed to write exit");
     }
 
     /// Test SIGINT with interactive shell — the realistic scenario used by the app
@@ -262,9 +247,8 @@ mod tests {
             return;
         }
 
-        let mut session =
-            LocalPtySession::spawn_command("bash", &["-i"], crate::pty::DEFAULT_PTY_SIZE)
-                .expect("Failed to spawn PTY");
+        let (mut session, _) = LocalPtySession::spawn_shell(crate::pty::DEFAULT_PTY_SIZE)
+            .expect("Failed to spawn shell");
 
         let writer = session.take_writer().await.expect("Failed to get writer");
 
@@ -272,34 +256,16 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(300));
 
         // Send command to run infinite output
-        println!("Sending 'yes' command to shell...");
         writer.write_str("yes\n").await.expect("Failed to write");
 
         // Let yes run for a bit
         std::thread::sleep(std::time::Duration::from_millis(300));
 
-        // Verify still running
-        assert!(session.is_running().await, "Shell should still be running");
-
-        // Send SIGINT
-        println!("Sending SIGINT...");
+        // Send SIGINT — should not panic or fail
         session.send_sigint().expect("Failed to send SIGINT");
 
-        // Wait a bit
+        // Wait a bit then clean up
         std::thread::sleep(std::time::Duration::from_millis(300));
-
-        // Shell should still be running (only yes was killed)
-        let is_running = session.is_running().await;
-        println!("After SIGINT, shell is_running: {}", is_running);
-
-        // yes should have been killed, but interactive bash is still running
-        // In interactive mode, bash catches SIGINT for the child and returns to prompt
-        assert!(
-            is_running,
-            "Interactive bash should still be running after child is killed"
-        );
-
-        // Clean up — exit the shell
         writer
             .write_str("exit\n")
             .await
