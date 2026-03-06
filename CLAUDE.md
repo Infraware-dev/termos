@@ -29,6 +29,9 @@ LOG_LEVEL=debug cargo run            # With debug logging
 ENGINE_TYPE=mock cargo run           # MockEngine (for testing)
 ENGINE_TYPE=rig ANTHROPIC_API_KEY=sk-... cargo run  # RigEngine (default)
 
+# Run with Docker PTY backend (sandboxed Debian container)
+cargo run --features pty-test_container -- --use-pty-test-container
+
 # Testing
 cargo test                           # All tests
 cargo test -- test_name              # Single test by name
@@ -66,12 +69,15 @@ cargo llvm-cov --all-features --summary-only  # Quick summary
 │   │       ├── mock/          # MockEngine (testing)
 │   │       └── rig/           # RigEngine (Anthropic Claude, default)
 │   ├── terminal/              # VTE parser, grid, cell attributes
-│   ├── pty/                   # PTY session, async I/O, DI traits
+│   ├── args.rs                # CLI arguments (clap)
+│   ├── pty/                   # PTY session trait, adapters, async I/O
 │   ├── llm/                   # Markdown→ANSI renderer (syntect highlighting)
 │   ├── input/                 # Keyboard mapping, text selection, command classification
 │   ├── orchestrators/         # hitl.rs utility (parse_approval)
 │   └── ui/                    # egui helpers, theme, scrollbar
-└── docs/                      # Design documents and technical debt analysis
+└── docs/                      # User documentation and legacy design docs
+    ├── pty-backends.md        # PTY backend system documentation
+    └── legacy/                # Historical design docs and plans
 ```
 
 ## Architecture
@@ -87,7 +93,9 @@ cargo llvm-cov --all-features --summary-only  # Quick summary
 │        │            │ │ Engine │ │ Engine  │ │  │
 │   ┌────▼────┐       │ └────────┘ └────┬────┘ │  │
 │   │   PTY   │       └────────────────┼──────┘  │
-│   │ Session │                        │          │
+│   │ Manager │                        │          │
+│   │(dyn Pty │                        │          │
+│   │ Session)│                        │          │
 │   └────┬────┘                        │          │
 │        │                             │          │
 │   ┌────▼────┐                 ┌──────▼──────┐   │
@@ -96,9 +104,10 @@ cargo llvm-cov --all-features --summary-only  # Quick summary
 │   └────┬────┘                 └─────────────┘   │
 │        │                                        │
 │   ┌────▼────┐                                   │
-│   │Terminal │                                   │
-│   │  Grid   │                                   │
-│   └─────────┘                                   │
+│   │Terminal │     PTY Adapters:                  │
+│   │  Grid   │     ├─ LocalPtySession (default)   │
+│   └─────────┘     └─ TestContainerPtySession*    │
+│                     (*feature: pty-test_container)│
 └─────────────────────────────────────────────────┘
 ```
 
@@ -143,7 +152,7 @@ handler pattern:
 **Other directories:**
 
 - `terminal/` - VTE parser (`handler.rs`), grid (`grid.rs`), cell attributes (`cell.rs`)
-- `pty/` - PTY session, async I/O, DI traits
+- `pty/` - PTY session trait, adapters (local, Docker), async I/O
 - `llm/` - Markdown to ANSI renderer (syntect highlighting)
 - `input/` - Keyboard mapping, text selection, command classification, prompt detection
 - `orchestrators/` - Only `hitl.rs` utility function (`parse_approval()`)
@@ -194,6 +203,7 @@ with the output or completes the interaction.
 | Modify clipboard behavior | `src/app/clipboard.rs`                                        |
 | Change theme colors       | `src/ui/theme.rs`                                             |
 | Change config constants   | `src/config.rs`                                               |
+| Add PTY backend adapter   | `src/pty/adapters/`                                           |
 | Add engine adapter        | `src/engine/adapters/`                                        |
 | Modify shared types       | `src/engine/shared/`                                          |
 
@@ -233,6 +243,9 @@ RIG_TIMEOUT_SECS="120"              # Request timeout
 # Memory (RigEngine)
 MEMORY_PATH="./.infraware/memory.json"  # Session memory JSON path
 MEMORY_LIMIT="200"                      # Max session memory entries
+
+# PTY Backend
+USE_PTY_TEST_CONTAINER="true"        # Use Docker container PTY (requires pty-test_container feature)
 
 # Application
 LOG_LEVEL="debug"                    # debug, info, warn, error
@@ -277,8 +290,21 @@ Key dependencies in `Cargo.toml`:
 - Error: `anyhow`, `thiserror`
 - Logging: `tracing`, `tracing-subscriber`
 - AI (behind `rig` feature): `rig-core`, `chrono`, `schemars`
+- Docker PTY (behind `pty-test_container` feature): `bollard`
+- CLI: `clap`
 
 ## Adding New Components
+
+### New PTY Backend Adapter
+
+1. Create `src/pty/adapters/your_backend.rs` (or directory `src/pty/adapters/your_backend/`)
+2. Implement the `PtySession` trait (see `src/pty/traits.rs`)
+3. Add a variant to `PtyProvider` in `src/pty/manager.rs`
+4. Add construction logic in `PtyManager::new()`
+5. Wire CLI flag in `src/args.rs` and `src/main.rs`
+6. Gate behind a feature flag if it adds optional dependencies
+
+See [docs/pty-backends.md](docs/pty-backends.md) for full details.
 
 ### New Engine Adapter
 
