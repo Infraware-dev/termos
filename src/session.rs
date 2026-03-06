@@ -16,7 +16,7 @@ use tokio::sync::Mutex as TokioMutex;
 
 use crate::config::{pty as pty_config, rendering, size};
 use crate::input::{OutputCapture, PromptDetector, TextSelection};
-use crate::pty::{PtyManager, PtyReader, PtyWrite, PtyWriter};
+use crate::pty::{DEFAULT_PTY_SIZE, PtyManager, PtyProvider, PtyReader, PtyWrite, PtyWriter};
 use crate::state::{AgentState, AppMode};
 use crate::terminal::TerminalHandler;
 
@@ -119,13 +119,13 @@ impl TerminalSession {
     /// # Arguments
     /// * `id` - Unique session identifier
     /// * `runtime_handle` - Handle to tokio runtime for async PTY initialization
-    pub fn new(id: SessionId, runtime_handle: &Handle) -> Self {
+    pub fn new(id: SessionId, runtime_handle: &Handle, pty_provider: PtyProvider) -> Self {
         let (rows, cols) = (size::DEFAULT_ROWS, size::DEFAULT_COLS);
 
         // Initialize PTY
         let (pty_writer, pty_output_rx, pty_reader, pty_manager, shell) =
             runtime_handle.block_on(async {
-                match PtyManager::local() {
+                match PtyManager::new(pty_provider, DEFAULT_PTY_SIZE).await {
                     Ok(mut manager) => {
                         let shell = manager.label().to_string();
                         tracing::info!("Session {id}: PTY initialized with shell: {shell}");

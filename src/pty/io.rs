@@ -38,6 +38,15 @@ impl Drop for PtyReader {
 
 #[allow(dead_code)]
 impl PtyReader {
+    /// Creates a `PtyReader` with an externally managed stop flag.
+    ///
+    /// Use this when reading is handled by an external task (e.g., a tokio
+    /// task draining an async stream) rather than by the internal blocking
+    /// reader thread spawned by [`PtyReader::new`].
+    pub fn with_stop_flag(stop_flag: Arc<AtomicBool>) -> Self {
+        Self { stop_flag }
+    }
+
     /// Create a new PTY reader that sends data to the provided channel.
     ///
     /// Spawns a background thread that reads from the PTY and sends data

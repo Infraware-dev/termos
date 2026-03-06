@@ -36,7 +36,7 @@ impl SessionManager {
     /// Creates a new terminal session and returns its ID.
     pub fn create(state: &mut AppState, runtime: &tokio::runtime::Handle) -> SessionId {
         let id = state.allocate_session_id();
-        let session = TerminalSession::new(id, runtime);
+        let session = TerminalSession::new(id, runtime, state.pty_provider);
         state.sessions.insert(id, session);
         tracing::info!("Created new session {}", id);
         id
@@ -209,6 +209,7 @@ mod tests {
             next_session_id: 0,
             current_input_buffer: String::new(),
             current_command_buffer: String::new(),
+            pty_provider: crate::pty::PtyProvider::Local,
             should_quit: false,
         }
     }

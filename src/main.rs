@@ -9,6 +9,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 mod agent;
 mod app;
+mod args;
 mod config;
 mod input;
 mod markdown;
@@ -22,7 +23,11 @@ mod ui;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use app::InfrawareApp;
+use clap::Parser;
 use eframe::egui::{IconData, ViewportBuilder};
+
+use crate::app::AppOptions;
+use crate::args::Args;
 
 /// Load the application icon from embedded PNG.
 fn load_icon() -> Option<IconData> {
@@ -45,13 +50,12 @@ fn main() -> eframe::Result<()> {
     // Load secrets from .env.secrets file (if present)
     dotenvy::from_filename(".env.secrets").ok();
 
+    // load cli arguments (also sets up logging based on args)
+    let args = Args::parse();
+
     // Initialize logging with sensible defaults
     // Priority: RUST_LOG > LOG_LEVEL > default (info)
-    let filter = std::env::var("RUST_LOG").unwrap_or_else(|_| {
-        std::env::var("LOG_LEVEL")
-            .map(|l| format!("infraware_terminal={}", l))
-            .unwrap_or_else(|_| "infraware_terminal=info".to_string())
-    });
+    let filter = format!("infraware_terminal={}", args.log_level);
 
     tracing_subscriber::fmt()
         .with_env_filter(filter)
@@ -82,10 +86,24 @@ fn main() -> eframe::Result<()> {
         ..Default::default()
     };
 
+    let app_options = app_options(&args);
     // Run the application
     eframe::run_native(
         "Infraware Terminal",
         options,
-        Box::new(|cc| Ok(Box::new(InfrawareApp::new(cc)))),
+        Box::new(|cc| Ok(Box::new(InfrawareApp::new(cc, app_options)))),
     )
+}
+
+fn app_options(args: &Args) -> AppOptions {
+    #[cfg(feature = "pty-test_container")]
+    let pty_provider = if args.use_pty_test_container {
+        pty::PtyProvider::TestContainer
+    } else {
+        pty::PtyProvider::Local
+    };
+    #[cfg(not(feature = "pty-test_container"))]
+    let pty_provider = pty::PtyProvider::Local;
+
+    AppOptions { pty_provider }
 }

@@ -46,10 +46,16 @@ use tokio::runtime::Runtime;
 
 use crate::config::{rendering, timing};
 use crate::input::{KeyboardHandler, TextSelection};
+use crate::pty::PtyProvider;
 use crate::session::{SessionId, TerminalSession};
 use crate::state::AppMode;
 use crate::ui::scrollbar::ScrollAction;
 use crate::ui::{Scrollbar, Theme};
+
+pub struct AppOptions {
+    /// Pty provider
+    pub pty_provider: PtyProvider,
+}
 
 /// Events coming from background tasks (LLM, etc.)
 #[derive(Debug)]
@@ -219,7 +225,7 @@ impl std::fmt::Debug for InfrawareApp {
 
 impl InfrawareApp {
     /// Creates a new application instance.
-    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>, options: AppOptions) -> Self {
         let runtime = Runtime::new().expect("Failed to create tokio runtime");
         let theme = Theme::dark();
 
@@ -228,7 +234,8 @@ impl InfrawareApp {
 
         // Create initial session
         let initial_session_id: SessionId = 0;
-        let initial_session = TerminalSession::new(initial_session_id, runtime.handle());
+        let initial_session =
+            TerminalSession::new(initial_session_id, runtime.handle(), options.pty_provider);
 
         let mut sessions = HashMap::new();
         sessions.insert(initial_session_id, initial_session);
@@ -246,7 +253,7 @@ impl InfrawareApp {
         session_tile_ids.insert(initial_session_id, initial_tile_id);
 
         Self {
-            state: AppState::new(sessions, initial_session_id),
+            state: AppState::new(sessions, initial_session_id, options.pty_provider),
             theme,
             runtime,
             theme_applied: false,
