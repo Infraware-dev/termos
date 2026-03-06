@@ -28,9 +28,16 @@ type OutputStream = Pin<Box<dyn Stream<Item = Result<LogOutput, bollard::errors:
 ///
 /// Bridges bollard's async I/O streams to the sync [`PtyReader`]/[`PtyWriter`]
 /// types expected by [`PtySession`] using Unix socket pairs and tokio tasks.
+///
+/// On drop, the container is stopped and removed asynchronously.
 pub struct TestContainerPtySession {
     /// The container instance (used for resize, inspect, stop).
-    container: Container,
+    /// Wrapped in `Option` so `Drop` can take ownership for async cleanup.
+    container: Option<Container>,
+    /// Tokio runtime handle captured at construction time.
+    /// Stored explicitly because `Drop` may run outside a tokio context
+    /// (e.g., when eframe drops the app struct).
+    runtime_handle: tokio::runtime::Handle,
     /// Async output stream, consumed once by [`PtySession::take_reader`].
     /// Wrapped in `Mutex` to satisfy the `Sync` bound on [`PtySession`].
     output: std::sync::Mutex<Option<OutputStream>>,
@@ -40,10 +47,33 @@ pub struct TestContainerPtySession {
     sigint_handle: Arc<std::sync::Mutex<std::os::unix::net::UnixStream>>,
 }
 
+impl Drop for TestContainerPtySession {
+    fn drop(&mut self) {
+        let Some(container) = self.container.take() else {
+            return;
+        };
+        let handle = self.runtime_handle.clone();
+        // Run cleanup on a dedicated thread so `block_on` doesn't panic
+        // if we happen to be inside an async context. The join ensures
+        // cleanup finishes before the runtime (which drops after us) is
+        // torn down — without it, hyper's IO driver may be gone by the
+        // time `remove_container` fires.
+        let join_handle = std::thread::spawn(move || {
+            if let Err(e) = handle.block_on(container.stop()) {
+                tracing::error!("Failed to stop container on drop: {e}");
+            }
+        });
+        if let Err(e) = join_handle.join() {
+            tracing::error!("Container cleanup thread panicked: {e:?}");
+        }
+    }
+}
+
 impl std::fmt::Debug for TestContainerPtySession {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let has_output = self.output.lock().map(|o| o.is_some()).unwrap_or(false);
         f.debug_struct("TestContainerPtySession")
+            .field("has_container", &self.container.is_some())
             .field("has_output", &has_output)
             .field("has_writer", &self.writer_handle.is_some())
             .finish_non_exhaustive()
@@ -72,8 +102,13 @@ impl TestContainerPtySession {
 
         spawn_writer_bridge(unix_read, handles.input)?;
 
+        // Capture the runtime handle now (we're guaranteed to be inside a
+        // tokio context during construction) so `Drop` can use it later.
+        let runtime_handle = tokio::runtime::Handle::current();
+
         Ok(Self {
-            container,
+            container: Some(container),
+            runtime_handle,
             output: std::sync::Mutex::new(Some(handles.output)),
             writer_handle: Some(unix_write),
             sigint_handle: Arc::new(std::sync::Mutex::new(sigint_writer)),
@@ -187,6 +222,8 @@ impl PtySession for TestContainerPtySession {
 
     async fn resize(&self, size: PtySize) -> Result<()> {
         self.container
+            .as_ref()
+            .context("Container already stopped")?
             .resize(size.cols, size.rows)
             .await
             .context("Failed to resize container TTY")
@@ -204,11 +241,16 @@ impl PtySession for TestContainerPtySession {
     }
 
     async fn is_running(&self) -> bool {
-        self.container.is_running().await
+        match self.container.as_ref() {
+            Some(container) => container.is_running().await,
+            None => false,
+        }
     }
 
     async fn kill(&self) -> Result<()> {
         self.container
+            .as_ref()
+            .context("Container already stopped")?
             .stop()
             .await
             .context("Failed to stop container")

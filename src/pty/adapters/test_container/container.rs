@@ -82,10 +82,18 @@ impl Container {
     }
 
     /// Stops and removes the container to clean up resources after use.
+    ///
+    /// Stop is best-effort: even if the stop call fails (e.g., container
+    /// already exited or a transient network error), removal is always
+    /// attempted with `force(true)` which tells Docker to kill and remove
+    /// in one shot.
     pub async fn stop(&self) -> anyhow::Result<()> {
         tracing::debug!("Stopping container {}", self.name);
-        self.docker.stop_container(&self.name, None).await?;
-        tracing::debug!("Stopped container {}", self.name);
+        if let Err(e) = self.docker.stop_container(&self.name, None).await {
+            tracing::debug!("Stop request for container {} returned error (will still attempt removal): {e}", self.name);
+        } else {
+            tracing::debug!("Stopped container {}", self.name);
+        }
 
         let opts = RemoveContainerOptionsBuilder::default().force(true).build();
         tracing::debug!("Removing container {} with options: {:?}", self.name, opts);
