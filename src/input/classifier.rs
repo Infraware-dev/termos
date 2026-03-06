@@ -63,6 +63,13 @@ static PATTERNS: Lazy<Patterns> = Lazy::new(|| Patterns {
     .expect("Failed to compile shell_operators patterns"),
 });
 
+/// Returns `true` when `input` contains a `?` that is NOT part of the
+/// shell exit-code variable `$?`.
+fn has_real_question_mark(input: &str) -> bool {
+    let stripped = input.replace("$?", "");
+    stripped.contains('?')
+}
+
 /// Simple input classifier
 ///
 /// Uses heuristics to determine if input is a command or natural language.
@@ -102,46 +109,66 @@ impl InputClassifier {
         InputType::Command(trimmed.to_string())
     }
 
-    /// Check if input is likely natural language
+    /// Check if input is likely natural language.
+    ///
+    /// Uses layered heuristics: explicit question marks are the strongest NL
+    /// signal and override command detection. When the first word is a known
+    /// command, weaker signals (articles, phrase length) are ignored so that
+    /// inputs like `cat a file` or `sudo apt install a package` stay
+    /// classified as commands.
     fn is_natural_language(&self, input: &str) -> bool {
-        // 1. Contains question marks → natural language
-        if PATTERNS.natural_language.is_match(input) {
-            // But not if it also has shell operators (e.g., "grep foo?")
-            if !PATTERNS.shell_operators.is_match(input) {
-                return true;
-            }
+        let words: Vec<&str> = input.split_whitespace().collect();
+        let first_word = words.first().copied().unwrap_or("");
+        let starts_with_command = self.looks_like_command(first_word);
+
+        // 1. Explicit question marks → strong NL signal, overrides command detection.
+        //    Ignore `$?` (shell exit-code variable) — it is not a real question mark.
+        if (has_real_question_mark(input) || input.contains('¿'))
+            && !PATTERNS.shell_operators.is_match(input)
+        {
+            return true;
         }
 
-        // 2. Explicit command syntax → not natural language
+        // 2. If the first word is a known command, classify as command.
+        //    Articles, question words and phrase length are weak signals that
+        //    must not override an unambiguous command prefix.
+        if starts_with_command {
+            return false;
+        }
+
+        // 3. NL patterns (question words, request phrases, articles) → NL
+        //    Only reached when the first word is NOT a known command.
+        if PATTERNS.natural_language.is_match(input)
+            && !PATTERNS.shell_operators.is_match(input)
+        {
+            return true;
+        }
+
+        // 4. Explicit command syntax → not NL
         if PATTERNS.command_syntax.is_match(input) {
             return false;
         }
 
-        // 3. Contains shell operators → command
+        // 5. Contains shell operators → command
         if PATTERNS.shell_operators.is_match(input) {
             return false;
         }
 
-        // 4. Contains non-ASCII characters → likely non-English natural language
+        // 6. Contains non-ASCII characters → likely non-English NL
         // (e.g., "chi sono io" in Italian, "什么是" in Chinese)
         if !input.is_ascii() {
             return true;
         }
 
-        // 5. Long phrase without shell operators → likely natural language
-        let words: Vec<&str> = input.split_whitespace().collect();
+        // 7. Long phrase (>5 words) without shell operators → likely NL
         if words.len() > 5 {
             return true;
         }
 
-        // 6. Medium phrase (3-5 words) without known command at start
-        if words.len() >= 3
-            && let Some(first_word) = words.first()
-        {
-            // If first word is not a likely command name, treat as NL
-            if !self.looks_like_command(first_word) {
-                return true;
-            }
+        // 8. Medium phrase (3-5 words) → likely NL
+        //    (known-command-first inputs already returned at step 2)
+        if words.len() >= 3 {
+            return true;
         }
 
         false
@@ -155,131 +182,192 @@ impl InputClassifier {
             return true;
         }
 
-        // Common commands and tools
+        // Known commands and tools (shell builtins, coreutils, package
+        // managers, container tooling, networking, etc.).  Kept sorted
+        // alphabetically for easy maintenance.  M-DOCUMENTED-MAGIC: this
+        // list biases the classifier toward "command" for 3+ word inputs
+        // that start with a recognized executable name.
         const COMMON_COMMANDS: &[&str] = &[
-            "ls",
-            "cd",
-            "rm",
-            "cp",
-            "mv",
-            "cat",
-            "grep",
-            "find",
-            "echo",
-            "pwd",
-            "mkdir",
-            "touch",
-            "chmod",
-            "chown",
-            "tar",
-            "gzip",
-            "gunzip",
-            "zip",
-            "unzip",
-            "ssh",
-            "scp",
-            "rsync",
-            "git",
-            "docker",
-            "kubectl",
-            "npm",
-            "yarn",
-            "pip",
-            "python",
-            "python3",
-            "node",
-            "cargo",
-            "make",
-            "cmake",
-            "gcc",
-            "clang",
-            "rustc",
-            "go",
-            "java",
-            "javac",
-            "curl",
-            "wget",
-            "ps",
-            "top",
-            "htop",
-            "kill",
-            "killall",
-            "systemctl",
-            "journalctl",
-            "sudo",
-            "su",
+            "adduser",
+            "alias",
+            "apk",
             "apt",
             "apt-get",
-            "yum",
-            "dnf",
-            "pacman",
+            "ar",
+            "awk",
+            "base64",
+            "bat",
+            "bc",
             "brew",
-            "snap",
+            "cal",
+            "cargo",
+            "cat",
+            "cd",
+            "chmod",
+            "chown",
+            "chsh",
+            "clang",
+            "clear",
+            "cmake",
+            "code",
+            "cp",
+            "crontab",
+            "curl",
+            "cut",
+            "date",
+            "dd",
+            "deluser",
+            "df",
+            "diff",
+            "dmesg",
+            "dnf",
+            "docker",
+            "dpkg",
+            "du",
+            "echo",
+            "emacs",
+            "env",
+            "exa",
+            "exit",
+            "export",
+            "expr",
+            "false",
+            "fd",
+            "file",
+            "find",
             "flatpak",
+            "free",
+            "fuser",
+            "fzf",
+            "gcc",
+            "git",
+            "go",
+            "grep",
+            "groupadd",
+            "groupdel",
+            "gunzip",
+            "gzip",
+            "head",
+            "help",
+            "history",
+            "hostname",
+            "hostnamectl",
+            "htop",
+            "htpasswd",
+            "ifconfig",
+            "info",
+            "insmod",
+            "ip",
+            "iptables",
+            "java",
+            "javac",
+            "journalctl",
+            "jq",
+            "kill",
+            "killall",
+            "kubectl",
+            "ldd",
+            "less",
+            "ln",
+            "locale",
+            "loginctl",
+            "ls",
+            "lsblk",
+            "lsmod",
+            "lsof",
+            "make",
+            "man",
+            "md5sum",
+            "mkdir",
+            "modprobe",
+            "more",
+            "mount",
+            "mv",
+            "nano",
+            "netstat",
+            "nft",
+            "nice",
+            "nm",
+            "nmap",
+            "node",
+            "nohup",
+            "npm",
+            "openssl",
+            "pacman",
+            "passwd",
+            "patch",
+            "pgrep",
+            "pip",
+            "pkill",
+            "podman",
+            "printenv",
+            "printf",
+            "ps",
+            "pwd",
+            "python",
+            "python3",
+            "readelf",
+            "renice",
+            "rg",
+            "rm",
+            "rmmod",
+            "route",
+            "rpm",
+            "rsync",
+            "rustc",
+            "scp",
+            "screen",
+            "sed",
+            "seq",
+            "service",
+            "sha256sum",
+            "sleep",
+            "snap",
+            "sort",
+            "source",
+            "ss",
+            "ssh",
+            "stat",
+            "strace",
+            "strings",
+            "strip",
+            "su",
+            "subl",
+            "sudo",
+            "sysctl",
+            "systemctl",
+            "tail",
+            "tar",
+            "tee",
+            "test",
+            "timedatectl",
+            "tmux",
+            "top",
+            "touch",
+            "tr",
+            "true",
+            "umount",
+            "uname",
+            "uniq",
+            "unzip",
+            "update-alternatives",
+            "useradd",
+            "userdel",
+            "vi",
+            "vim",
+            "watch",
+            "wc",
+            "wget",
             "which",
             "whereis",
-            "man",
-            "info",
-            "help",
-            "clear",
-            "exit",
-            "history",
-            "alias",
-            "export",
-            "source",
-            "env",
-            "head",
-            "tail",
-            "less",
-            "more",
-            "sort",
-            "uniq",
-            "wc",
-            "cut",
-            "awk",
-            "sed",
-            "xargs",
-            "diff",
-            "patch",
-            "file",
-            "stat",
-            "df",
-            "du",
-            "free",
-            "uname",
-            "hostname",
+            "who",
             "whoami",
-            "date",
-            "cal",
-            "bc",
-            "expr",
-            "test",
-            "true",
-            "false",
+            "xargs",
+            "yarn",
             "yes",
-            "no",
-            "sleep",
-            "watch",
-            "screen",
-            "tmux",
-            "vim",
-            "vi",
-            "nano",
-            "emacs",
-            "code",
-            "subl",
-            "bat",
-            "exa",
-            "fd",
-            "rg",
-            "fzf",
-            "jq",
             "yq",
-            "htpasswd",
-            "openssl",
-            "base64",
-            "md5sum",
-            "sha256sum",
+            "zip",
+            "zypper",
         ];
 
         COMMON_COMMANDS.contains(&word.to_lowercase().as_str())
@@ -427,6 +515,107 @@ mod tests {
         // Actually "chi sono io" is all ASCII, but it's 3 words and "chi" is not a command
         assert!(matches!(
             classifier.classify("chi sono io"),
+            InputType::NaturalLanguage(_)
+        ));
+    }
+
+    #[test]
+    fn test_which_command_not_classified_as_nl() {
+        let classifier = InputClassifier::new();
+        // "which" is both a question word AND a Unix command.
+        // When used as first word it must be classified as Command.
+        assert!(matches!(
+            classifier.classify("which python"),
+            InputType::Command(_)
+        ));
+        assert!(matches!(
+            classifier.classify("which node"),
+            InputType::Command(_)
+        ));
+    }
+
+    #[test]
+    fn test_who_command_not_classified_as_nl() {
+        let classifier = InputClassifier::new();
+        assert!(matches!(
+            classifier.classify("who am i"),
+            InputType::Command(_)
+        ));
+    }
+
+    #[test]
+    fn test_command_with_article_not_classified_as_nl() {
+        let classifier = InputClassifier::new();
+        // Commands containing articles ("a", "an", "the") must stay commands
+        assert!(matches!(
+            classifier.classify("cat a file.txt"),
+            InputType::Command(_)
+        ));
+        assert!(matches!(
+            classifier.classify("touch a new_file"),
+            InputType::Command(_)
+        ));
+        assert!(matches!(
+            classifier.classify("sudo apt install a package"),
+            InputType::Command(_)
+        ));
+        assert!(matches!(
+            classifier.classify("mkdir the directory"),
+            InputType::Command(_)
+        ));
+    }
+
+    #[test]
+    fn test_container_commands() {
+        let classifier = InputClassifier::new();
+        // Commands commonly used inside Docker/container environments
+        assert!(matches!(
+            classifier.classify("service nginx restart"),
+            InputType::Command(_)
+        ));
+        assert!(matches!(
+            classifier.classify("dpkg --list"),
+            InputType::Command(_)
+        ));
+        assert!(matches!(
+            classifier.classify("ip addr show"),
+            InputType::Command(_)
+        ));
+        assert!(matches!(
+            classifier.classify("useradd -m newuser"),
+            InputType::Command(_)
+        ));
+        assert!(matches!(
+            classifier.classify("apk add curl"),
+            InputType::Command(_)
+        ));
+    }
+
+    #[test]
+    fn test_question_mark_overrides_command_prefix() {
+        let classifier = InputClassifier::new();
+        // Even if the first word is a command, a question mark is a strong NL signal
+        assert!(matches!(
+            classifier.classify("git what branch am I on?"),
+            InputType::NaturalLanguage(_)
+        ));
+    }
+
+    #[test]
+    fn test_dollar_question_mark_not_classified_as_nl() {
+        let classifier = InputClassifier::new();
+        // $? is the shell exit-code variable, not a real question mark
+        assert!(matches!(
+            classifier.classify("echo $?"),
+            InputType::Command(_)
+        ));
+        assert!(matches!(
+            classifier.classify("test $? -eq 0"),
+            InputType::Command(_)
+        ));
+        // But a real question mark after a command should still trigger NL
+        assert!(matches!(
+            classifier.classify("echo what is this?"),
             InputType::NaturalLanguage(_)
         ));
     }
