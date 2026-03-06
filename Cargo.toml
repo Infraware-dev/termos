@@ -10,7 +10,9 @@ arboard = "3"
 async-stream = "0.3"
 async-trait = "0.1"
 bitflags = "2"
+bollard = { version = "0.20", optional = true, default-features = false, features = ["pipe"] }
 chrono = { version = "0.4", optional = true, features = ["serde"] }
+clap = { version = "4", default-features = false, features = ["derive", "env", "help", "std"] }
 ctrlc = "3"
 dotenvy = "0.15"
 eframe = { version = "0.33", default-features = false, features = [
@@ -58,6 +60,7 @@ tempfile = "3"
 
 [features]
 default = ["rig"]
+pty-test_container = ["dep:bollard"]
 rig = ["dep:chrono", "dep:rig-core", "dep:schemars"]
 
 [lints.rust]

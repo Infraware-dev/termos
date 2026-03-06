@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 
+use crate::pty::PtyProvider;
 use crate::session::{SessionId, TerminalSession};
 
 /// Core application state holding sessions and control flags.
@@ -16,6 +17,9 @@ use crate::session::{SessionId, TerminalSession};
 pub struct AppState {
     /// All terminal sessions, keyed by session ID
     pub sessions: HashMap<SessionId, TerminalSession>,
+
+    /// Pty provider for new sessions (e.g. local, test container)
+    pub pty_provider: PtyProvider,
 
     /// Currently focused session ID
     pub active_session_id: SessionId,
@@ -38,6 +42,7 @@ impl AppState {
     pub fn new(
         sessions: HashMap<SessionId, TerminalSession>,
         active_session_id: SessionId,
+        pty_provider: PtyProvider,
     ) -> Self {
         let next_session_id = sessions.keys().max().map(|&id| id + 1).unwrap_or(0);
 
@@ -45,6 +50,7 @@ impl AppState {
             sessions,
             active_session_id,
             next_session_id,
+            pty_provider,
             current_input_buffer: String::new(),
             current_command_buffer: String::new(),
             should_quit: false,
@@ -81,6 +87,7 @@ mod tests {
             next_session_id: 1,
             current_input_buffer: String::new(),
             current_command_buffer: String::new(),
+            pty_provider: PtyProvider::Local,
             should_quit: false,
         }
     }

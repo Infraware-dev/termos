@@ -8,10 +8,17 @@ use std::sync::Arc;
 use anyhow::Result;
 use portable_pty::PtySize;
 
-use super::DEFAULT_PTY_SIZE;
 use super::adapters::LocalPtySession;
 use super::io::{PtyReader, PtyWriter};
 use super::traits::PtySession;
+
+/// Enum of supported PTY session providers. Used for selecting the session type at runtime.
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub enum PtyProvider {
+    Local,
+    #[cfg(feature = "pty-test_container")]
+    TestContainer,
+}
 
 /// Manager for a PTY session. Wraps any [`PtySession`] implementation.
 #[derive(Debug)]
@@ -21,30 +28,25 @@ pub struct PtyManager {
     label: String,
 }
 
-#[expect(
-    dead_code,
-    reason = "Public API — methods used by TerminalSession and tests"
-)]
 impl PtyManager {
     /// Create a `PtyManager` from any [`PtySession`] implementation.
-    pub fn new(session: Box<dyn PtySession>, label: impl Into<String>, size: PtySize) -> Self {
-        Self {
-            session,
-            current_size: size,
-            label: label.into(),
-        }
-    }
+    pub async fn new(provider: PtyProvider, size: PtySize) -> Result<Self> {
+        let (session, shell_name) = match provider {
+            PtyProvider::Local => {
+                let (session, shell_name) = LocalPtySession::spawn_shell(size)?;
 
-    /// Convenience constructor: spawn a local interactive shell with default size.
-    pub fn local() -> Result<Self> {
-        Self::local_with_size(DEFAULT_PTY_SIZE)
-    }
+                (Box::new(session) as Box<dyn PtySession>, shell_name)
+            }
+            #[cfg(feature = "pty-test_container")]
+            PtyProvider::TestContainer => (
+                Box::new(super::adapters::TestContainerPtySession::new().await?)
+                    as Box<dyn PtySession>,
+                "test-container-shell".to_string(),
+            ),
+        };
 
-    /// Convenience constructor: spawn a local interactive shell with custom size.
-    pub fn local_with_size(size: PtySize) -> Result<Self> {
-        let (session, shell_name) = LocalPtySession::spawn_shell(size)?;
         Ok(Self {
-            session: Box::new(session),
+            session,
             current_size: size,
             label: shell_name,
         })

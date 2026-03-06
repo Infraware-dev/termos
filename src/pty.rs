@@ -6,7 +6,7 @@ mod manager;
 mod traits;
 
 pub use io::{PtyReader, PtyWriter};
-pub use manager::PtyManager;
+pub use manager::{PtyManager, PtyProvider};
 use portable_pty::PtySize;
 #[expect(
     unused_imports,
