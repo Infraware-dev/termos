@@ -251,4 +251,4 @@ MOCK_WORKFLOW_FILE=~/Downloads/workflow.json ENGINE_TYPE=mock cargo run
 
 ## License
 
-MIT
+Apache 2.0
