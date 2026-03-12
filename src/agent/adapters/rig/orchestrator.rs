@@ -22,6 +22,9 @@ use super::tools::{
     ShellCommandTool, StartIncidentArgs, StartIncidentInvestigationTool,
 };
 use crate::agent::adapters::rig::memory::session::{MemoryStore, SaveMemoryTool};
+use crate::agent::adapters::rig::memory::session_context::{
+    SaveSessionContextTool, SessionContextStore,
+};
 use crate::agent::error::AgentError;
 use crate::agent::shared::{AgentEvent, Message, MessageEvent, MessageRole, RunInput};
 use crate::agent::traits::EventStream;
@@ -120,18 +123,25 @@ pub fn create_agent(
     config: &RigAgentConfig,
     memory_store: &Arc<RwLock<MemoryStore>>,
     memory: &MemoryStore,
+    session_context: &SessionContextStore,
+    session_context_store: &Arc<RwLock<SessionContextStore>>,
 ) -> RigAgent {
+    let session_preamble = session_context.build_preamble();
     let memory_preamble = memory.build_preamble();
 
     client
         .agent(&config.model)
         .preamble(&config.system_prompt)
+        .append_preamble(&session_preamble)
         .append_preamble(&memory_preamble)
         .max_tokens(config.max_tokens as u64)
         .temperature(f64::from(config.temperature))
         .tool(ShellCommandTool::new())
         .tool(AskUserTool::new())
         .tool(SaveMemoryTool::new(Arc::clone(memory_store)))
+        .tool(SaveSessionContextTool::new(Arc::clone(
+            session_context_store,
+        )))
         .tool(StartIncidentInvestigationTool)
         .build()
 }
@@ -232,6 +242,7 @@ async fn run_agent_turn(
     client: &anthropic::Client,
     config: &RigAgentConfig,
     memory_store: &Arc<RwLock<MemoryStore>>,
+    session_context_store: &Arc<RwLock<SessionContextStore>>,
     history: &[Message],
     continuation: &str,
 ) -> AgentTurnOutcome {
@@ -240,7 +251,15 @@ async fn run_agent_turn(
 
     let agent = {
         let memory = memory_store.read().await;
-        create_agent(client, config, memory_store, &memory)
+        let session_ctx = session_context_store.read().await;
+        create_agent(
+            client,
+            config,
+            memory_store,
+            &memory,
+            &session_ctx,
+            session_context_store,
+        )
     };
     let mut chat_history = to_chat_history(history);
 
@@ -277,6 +296,7 @@ fn handle_agent_continuation(
     client: Arc<anthropic::Client>,
     config: Arc<RigAgentConfig>,
     memory_store: Arc<RwLock<MemoryStore>>,
+    session_context_store: Arc<RwLock<SessionContextStore>>,
     state: Arc<StateStore>,
     thread_id: crate::agent::shared::ThreadId,
     run_id: String,
@@ -284,7 +304,7 @@ fn handle_agent_continuation(
     continuation: String,
 ) -> EventStream {
     Box::pin(stream! {
-        match run_agent_turn(&client, &config, &memory_store, &history, &continuation).await {
+        match run_agent_turn(&client, &config, &memory_store, &session_context_store, &history, &continuation).await {
             AgentTurnOutcome::ToolIntercepted { interrupt, event } => {
                 let _ = state.store_interrupt(&thread_id, *interrupt).await;
                 yield Ok(event);
@@ -328,6 +348,12 @@ pub fn create_run_stream(
         // Get conversation history
         let history = state.get_messages(&thread_id).await.unwrap_or_default();
 
+        // Get session context for this thread
+        let session_context_store = state.get_session_context(&thread_id).await
+            .unwrap_or_else(|| Arc::new(RwLock::new(
+                SessionContextStore::new(super::memory::session_context::DEFAULT_SESSION_CONTEXT_LIMIT),
+            )));
+
         // Add new input messages to history
         let _ = state.add_messages(&thread_id, input.messages.clone()).await;
 
@@ -352,7 +378,8 @@ pub fn create_run_stream(
         // Create the agent with native tools
         let agent = {
             let memory = memory_store.read().await;
-            create_agent(&client, &config, &memory_store, &memory)
+            let session_ctx = session_context_store.read().await;
+            create_agent(&client, &config, &memory_store, &memory, &session_ctx, &session_context_store)
         };
         let chat_history = to_chat_history(&history);
 
@@ -426,6 +453,11 @@ pub fn create_resume_stream(
     Box::pin(stream! {
         yield Ok(AgentEvent::metadata(&run_id));
 
+        let session_context_store = state.get_session_context(&thread_id).await
+            .unwrap_or_else(|| Arc::new(RwLock::new(
+                SessionContextStore::new(super::memory::session_context::DEFAULT_SESSION_CONTEXT_LIMIT),
+            )));
+
         let Some(pending) = state.take_interrupt(&thread_id).await else {
             yield Err(AgentError::run_not_resumable(thread_id.as_str()));
             return;
@@ -479,8 +511,8 @@ pub fn create_resume_stream(
 
                 for await event in handle_agent_continuation(
                     Arc::clone(&client), Arc::clone(&config), Arc::clone(&memory_store),
-                    Arc::clone(&state), thread_id.clone(), run_id.clone(),
-                    history, continuation,
+                    Arc::clone(&session_context_store), Arc::clone(&state), thread_id.clone(),
+                    run_id.clone(), history, continuation,
                 ) {
                     yield event;
                 }
@@ -500,8 +532,8 @@ pub fn create_resume_stream(
 
                 for await event in handle_agent_continuation(
                     Arc::clone(&client), Arc::clone(&config), Arc::clone(&memory_store),
-                    Arc::clone(&state), thread_id.clone(), run_id.clone(),
-                    history, continuation,
+                    Arc::clone(&session_context_store), Arc::clone(&state), thread_id.clone(),
+                    run_id.clone(), history, continuation,
                 ) {
                     yield event;
                 }
