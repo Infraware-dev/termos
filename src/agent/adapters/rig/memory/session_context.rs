@@ -94,6 +94,7 @@ impl SessionContextStore {
         if self.entries.len() >= self.limit {
             self.entries.pop_front();
         }
+        tracing::debug!("Inserting context memory for {category:?}: {fact}");
         self.entries.push_back(SessionContextEntry {
             fact,
             category,

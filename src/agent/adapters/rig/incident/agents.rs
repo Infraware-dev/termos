@@ -6,6 +6,8 @@
 //! - `build_analyst`      — pure LLM root-cause analysis (no tools)
 //! - `build_reporter`     — post-mortem Markdown writer (SaveReportTool)
 
+use std::sync::Arc;
+
 use rig::client::CompletionClient as _;
 use rig::completion::ToolDefinition;
 use rig::providers::anthropic;
@@ -15,6 +17,9 @@ use serde::{Deserialize, Serialize};
 
 use super::context::IncidentContext;
 use crate::agent::adapters::rig::config::RigAgentConfig;
+use crate::agent::adapters::rig::memory::persistent::SaveMemoryTool;
+use crate::agent::adapters::rig::memory::session_context::SaveSessionContextTool;
+use crate::agent::adapters::rig::memory::{MemoryContext, Preambles};
 use crate::agent::adapters::rig::orchestrator::RigAgent;
 use crate::agent::adapters::rig::tools::{AskUserTool, DiagnosticCommandTool};
 
@@ -129,12 +134,16 @@ impl Tool for SaveReportTool {
 
 /// Build the `InvestigatorAgent`.
 ///
-/// Equipped with `DiagnosticCommandTool` (HITL on every command) and
-/// `AskUserTool` for clarifying questions.
+/// Equipped with `DiagnosticCommandTool` (HITL on every command),
+/// `AskUserTool` for clarifying questions, and memory save tools.
+/// Memory preambles are injected so the agent knows session context
+/// and persistent facts discovered in prior conversations.
 pub fn build_investigator(
     client: &anthropic::Client,
     config: &RigAgentConfig,
     context: &IncidentContext,
+    memory_ctx: &MemoryContext,
+    preambles: &Preambles,
 ) -> RigAgent {
     let system_prompt = format!(
         "{}\n\n## Active Incident\n\n{}",
@@ -145,21 +154,29 @@ pub fn build_investigator(
     client
         .agent(&config.model)
         .preamble(&system_prompt)
+        .append_preamble(&preambles.session)
+        .append_preamble(&preambles.memory)
         .max_tokens(config.max_tokens as u64)
         .temperature(f64::from(config.temperature))
         .tool(DiagnosticCommandTool)
         .tool(AskUserTool::new())
+        .tool(SaveMemoryTool::new(Arc::clone(&memory_ctx.memory_store)))
+        .tool(SaveSessionContextTool::new(Arc::clone(
+            &memory_ctx.session_context_store,
+        )))
         .build()
 }
 
 /// Build the `AnalystAgent`.
 ///
 /// No tools — pure LLM reasoning over the collected evidence.
+/// Memory preambles are injected as read-only context.
 /// Produces a structured `AnalysisReport` JSON in its response.
 pub fn build_analyst(
     client: &anthropic::Client,
     config: &RigAgentConfig,
     context: &IncidentContext,
+    preambles: &Preambles,
 ) -> RigAgent {
     let system_prompt = format!(
         "{}\n\n## Evidence Collected\n\n{}",
@@ -170,6 +187,8 @@ pub fn build_analyst(
     client
         .agent(&config.model)
         .preamble(&system_prompt)
+        .append_preamble(&preambles.session)
+        .append_preamble(&preambles.memory)
         .max_tokens(config.max_tokens as u64)
         .temperature(f64::from(config.temperature))
         .build()
@@ -178,11 +197,13 @@ pub fn build_analyst(
 /// Build the `ReporterAgent`.
 ///
 /// Equipped with `SaveReportTool` to persist the Markdown post-mortem.
+/// Memory preambles are injected as read-only context.
 pub fn build_reporter(
     client: &anthropic::Client,
     config: &RigAgentConfig,
     context: &IncidentContext,
     analysis_json: &str,
+    preambles: &Preambles,
 ) -> RigAgent {
     let system_prompt = format!(
         "{}\n\n## Incident Context\n\n{}\n\n## Analysis\n\n{}",
@@ -194,6 +215,8 @@ pub fn build_reporter(
     client
         .agent(&config.model)
         .preamble(&system_prompt)
+        .append_preamble(&preambles.session)
+        .append_preamble(&preambles.memory)
         .max_tokens(config.max_tokens as u64)
         .temperature(f64::from(config.temperature))
         .tool(SaveReportTool)

@@ -21,6 +21,7 @@ use super::tools::{
     AskUserArgs, AskUserTool, DiagnosticCommandTool, HitlMarker, ShellCommandArgs,
     ShellCommandTool, StartIncidentArgs, StartIncidentInvestigationTool,
 };
+use crate::agent::adapters::rig::memory::MemoryContext;
 use crate::agent::adapters::rig::memory::persistent::{MemoryStore, SaveMemoryTool};
 use crate::agent::adapters::rig::memory::session_context::{
     SaveSessionContextTool, SessionContextStore,
@@ -114,33 +115,30 @@ impl PromptHook<anthropic::completion::CompletionModel> for HitlHook {
     }
 }
 
-/// Create a rig-core agent with native tools registered
+/// Create a rig-core agent with native tools registered.
 ///
 /// Tools are registered using `.tool()` which enables rig-rs's function calling.
 /// The LLM will see the tool schemas and can call them directly.
+///
+/// Memory preambles and save tools are injected via [`MemoryContext`].
 pub fn create_agent(
     client: &anthropic::Client,
     config: &RigAgentConfig,
-    memory_store: &Arc<RwLock<MemoryStore>>,
-    memory: &MemoryStore,
-    session_context: &SessionContextStore,
-    session_context_store: &Arc<RwLock<SessionContextStore>>,
+    memory_ctx: &MemoryContext,
+    preambles: &super::memory::Preambles,
 ) -> RigAgent {
-    let session_preamble = session_context.build_preamble();
-    let memory_preamble = memory.build_preamble();
-
     client
         .agent(&config.model)
         .preamble(&config.system_prompt)
-        .append_preamble(&session_preamble)
-        .append_preamble(&memory_preamble)
+        .append_preamble(&preambles.session)
+        .append_preamble(&preambles.memory)
         .max_tokens(config.max_tokens as u64)
         .temperature(f64::from(config.temperature))
         .tool(ShellCommandTool::new())
         .tool(AskUserTool::new())
-        .tool(SaveMemoryTool::new(Arc::clone(memory_store)))
+        .tool(SaveMemoryTool::new(Arc::clone(&memory_ctx.memory_store)))
         .tool(SaveSessionContextTool::new(Arc::clone(
-            session_context_store,
+            &memory_ctx.session_context_store,
         )))
         .tool(StartIncidentInvestigationTool)
         .build()
@@ -241,26 +239,15 @@ enum AgentTurnOutcome {
 async fn run_agent_turn(
     client: &anthropic::Client,
     config: &RigAgentConfig,
-    memory_store: &Arc<RwLock<MemoryStore>>,
-    session_context_store: &Arc<RwLock<SessionContextStore>>,
+    memory_ctx: &MemoryContext,
     history: &[Message],
     continuation: &str,
 ) -> AgentTurnOutcome {
     let (tx, mut rx) = mpsc::unbounded_channel();
     let hook = HitlHook { tool_call_tx: tx };
 
-    let agent = {
-        let memory = memory_store.read().await;
-        let session_ctx = session_context_store.read().await;
-        create_agent(
-            client,
-            config,
-            memory_store,
-            &memory,
-            &session_ctx,
-            session_context_store,
-        )
-    };
+    let preambles = memory_ctx.build_preambles().await;
+    let agent = create_agent(client, config, memory_ctx, &preambles);
     let mut chat_history = to_chat_history(history);
 
     let result = agent
@@ -290,13 +277,12 @@ async fn run_agent_turn(
 /// Stores any new tool interrupt, or emits the assistant response (skipping empty) and ends.
 #[expect(
     clippy::too_many_arguments,
-    reason = "All fields required to drive agent + state side-effects"
+    reason = "All fields required to drive agent + state + memory side-effects"
 )]
 fn handle_agent_continuation(
     client: Arc<anthropic::Client>,
     config: Arc<RigAgentConfig>,
-    memory_store: Arc<RwLock<MemoryStore>>,
-    session_context_store: Arc<RwLock<SessionContextStore>>,
+    memory_ctx: MemoryContext,
     state: Arc<StateStore>,
     thread_id: crate::agent::shared::ThreadId,
     run_id: String,
@@ -304,7 +290,7 @@ fn handle_agent_continuation(
     continuation: String,
 ) -> EventStream {
     Box::pin(stream! {
-        match run_agent_turn(&client, &config, &memory_store, &session_context_store, &history, &continuation).await {
+        match run_agent_turn(&client, &config, &memory_ctx, &history, &continuation).await {
             AgentTurnOutcome::ToolIntercepted { interrupt, event } => {
                 let _ = state.store_interrupt(&thread_id, *interrupt).await;
                 yield Ok(event);
@@ -348,11 +334,15 @@ pub fn create_run_stream(
         // Get conversation history
         let history = state.get_messages(&thread_id).await.unwrap_or_default();
 
-        // Get session context for this thread
+        // Build memory context for this thread
         let session_context_store = state.get_session_context(&thread_id).await
             .unwrap_or_else(|| Arc::new(RwLock::new(
                 SessionContextStore::new(super::memory::session_context::DEFAULT_SESSION_CONTEXT_LIMIT),
             )));
+        let memory_ctx = MemoryContext::new(
+            Arc::clone(&memory_store),
+            session_context_store,
+        );
 
         // Add new input messages to history
         let _ = state.add_messages(&thread_id, input.messages.clone()).await;
@@ -375,12 +365,9 @@ pub fn create_run_stream(
         let (tx, mut rx) = mpsc::unbounded_channel();
         let hook = HitlHook { tool_call_tx: tx };
 
-        // Create the agent with native tools
-        let agent = {
-            let memory = memory_store.read().await;
-            let session_ctx = session_context_store.read().await;
-            create_agent(&client, &config, &memory_store, &memory, &session_ctx, &session_context_store)
-        };
+        // Create the agent with native tools and memory preambles
+        let preambles = memory_ctx.build_preambles().await;
+        let agent = create_agent(&client, &config, &memory_ctx, &preambles);
         let chat_history = to_chat_history(&history);
 
         tracing::info!(
@@ -453,10 +440,15 @@ pub fn create_resume_stream(
     Box::pin(stream! {
         yield Ok(AgentEvent::metadata(&run_id));
 
+        // Build memory context for this thread
         let session_context_store = state.get_session_context(&thread_id).await
             .unwrap_or_else(|| Arc::new(RwLock::new(
                 SessionContextStore::new(super::memory::session_context::DEFAULT_SESSION_CONTEXT_LIMIT),
             )));
+        let memory_ctx = MemoryContext::new(
+            Arc::clone(&memory_store),
+            session_context_store,
+        );
 
         let Some(pending) = state.take_interrupt(&thread_id).await else {
             yield Err(AgentError::run_not_resumable(thread_id.as_str()));
@@ -510,8 +502,8 @@ pub fn create_resume_stream(
                 let _ = state.add_messages(&thread_id, vec![Message::user(&continuation)]).await;
 
                 for await event in handle_agent_continuation(
-                    Arc::clone(&client), Arc::clone(&config), Arc::clone(&memory_store),
-                    Arc::clone(&session_context_store), Arc::clone(&state), thread_id.clone(),
+                    Arc::clone(&client), Arc::clone(&config), memory_ctx.clone(),
+                    Arc::clone(&state), thread_id.clone(),
                     run_id.clone(), history, continuation,
                 ) {
                     yield event;
@@ -531,8 +523,8 @@ pub fn create_resume_stream(
                 tracing::debug!(thread_id = %thread_id, run_id = %run_id, "Resuming rig agent with answer");
 
                 for await event in handle_agent_continuation(
-                    Arc::clone(&client), Arc::clone(&config), Arc::clone(&memory_store),
-                    Arc::clone(&session_context_store), Arc::clone(&state), thread_id.clone(),
+                    Arc::clone(&client), Arc::clone(&config), memory_ctx.clone(),
+                    Arc::clone(&state), thread_id.clone(),
                     run_id.clone(), history, continuation,
                 ) {
                     yield event;
@@ -559,6 +551,7 @@ pub fn create_resume_stream(
                     thread_id.clone(),
                     incident_description.clone(),
                     run_id.clone(),
+                    memory_ctx.clone(),
                 );
 
                 while let Some(event) = investigation_stream.next().await {
@@ -581,6 +574,7 @@ pub fn create_resume_stream(
                     context.clone(),
                     run_id.clone(),
                     output.clone(),
+                    memory_ctx.clone(),
                 );
 
                 while let Some(event) = stream.next().await {

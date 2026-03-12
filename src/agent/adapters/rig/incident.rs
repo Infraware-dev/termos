@@ -21,6 +21,7 @@ use rig::providers::anthropic;
 use tokio::sync::mpsc;
 
 use super::config::RigAgentConfig;
+use super::memory::MemoryContext;
 use super::orchestrator::{HitlHook, InterceptedToolCall};
 use super::state::{PendingInterrupt, StateStore};
 use super::tools::{DiagnosticCommandArgs, HitlMarker, format_hitl_message};
@@ -29,7 +30,7 @@ use crate::agent::shared::{AgentEvent, IncidentPhase, MessageEvent};
 use crate::agent::traits::EventStream;
 
 /// Safety guard to avoid endless HITL loops during investigation.
-const MAX_INVESTIGATION_COMMANDS: usize = 6;
+const MAX_INVESTIGATION_COMMANDS: usize = 50;
 
 // ---------------------------------------------------------------------------
 // Public entry points
@@ -46,6 +47,7 @@ pub fn start_investigation(
     thread_id: crate::agent::shared::ThreadId,
     incident_description: String,
     run_id: String,
+    memory_ctx: MemoryContext,
 ) -> EventStream {
     Box::pin(stream! {
         // Emit phase banner
@@ -70,6 +72,7 @@ pub fn start_investigation(
             context,
             prompt,
             run_id.clone(),
+            memory_ctx.clone(),
         );
 
         for await event in events {
@@ -99,6 +102,7 @@ pub fn resume_investigation_command(
     mut context: IncidentContext,
     run_id: String,
     timeout_secs: u64,
+    memory_ctx: MemoryContext,
 ) -> EventStream {
     Box::pin(stream! {
         // Execute the approved diagnostic command
@@ -150,6 +154,7 @@ pub fn resume_investigation_command(
             context,
             prompt,
             run_id.clone(),
+            memory_ctx.clone(),
         );
 
         for await event in events {
@@ -180,6 +185,7 @@ pub fn resume_investigation_with_output(
     mut context: IncidentContext,
     run_id: String,
     output: String,
+    memory_ctx: MemoryContext,
 ) -> EventStream {
     Box::pin(stream! {
         // Normalize empty output — Anthropic API rejects messages with empty content
@@ -227,6 +233,7 @@ pub fn resume_investigation_with_output(
             context,
             prompt,
             run_id.clone(),
+            memory_ctx.clone(),
         );
 
         for await event in events {
@@ -245,6 +252,10 @@ pub fn resume_investigation_with_output(
 /// an `IncidentCommand` interrupt, then returns.
 /// If the agent returns a text response (no tool call), chains to
 /// Phase 2 (Analysis) and Phase 3 (Reporting).
+#[expect(
+    clippy::too_many_arguments,
+    reason = "All fields required to drive investigator agent + state + memory"
+)]
 fn run_investigation_step(
     client: Arc<anthropic::Client>,
     config: Arc<RigAgentConfig>,
@@ -253,12 +264,14 @@ fn run_investigation_step(
     context: IncidentContext,
     prompt: String,
     run_id: String,
+    memory_ctx: MemoryContext,
 ) -> EventStream {
     Box::pin(stream! {
         let (tx, mut rx) = mpsc::unbounded_channel::<InterceptedToolCall>();
         let hook = HitlHook { tool_call_tx: tx };
 
-        let agent = agents::build_investigator(&client, &config, &context);
+        let preambles = memory_ctx.build_preambles().await;
+        let agent = agents::build_investigator(&client, &config, &context, &memory_ctx, &preambles);
 
         tracing::info!(
             thread_id = %thread_id,
@@ -304,6 +317,7 @@ fn run_investigation_step(
                         context,
                         forced_findings,
                         run_id.clone(),
+                        memory_ctx.clone(),
                     ) {
                         yield event;
                     }
@@ -329,6 +343,7 @@ fn run_investigation_step(
                         context,
                         forced_findings,
                         run_id.clone(),
+                        memory_ctx.clone(),
                     ) {
                         yield event;
                     }
@@ -378,6 +393,7 @@ fn run_investigation_step(
                     context,
                     findings,
                     run_id.clone(),
+                    memory_ctx.clone(),
                 ) {
                     yield event;
                 }
@@ -397,10 +413,13 @@ fn run_analysis_and_report(
     context: IncidentContext,
     investigation_findings: String,
     run_id: String,
+    memory_ctx: MemoryContext,
 ) -> EventStream {
     Box::pin(stream! {
         // Phase 2 — Analysis
         yield Ok(AgentEvent::phase(IncidentPhase::Analyzing));
+
+        let preambles = memory_ctx.build_preambles().await;
 
         let analyst_prompt = format!(
             "Analyse the following incident evidence and provide a structured analysis.\n\n\
@@ -410,7 +429,7 @@ fn run_analysis_and_report(
             investigation_findings
         );
 
-        let analyst = agents::build_analyst(&client, &config, &context);
+        let analyst = agents::build_analyst(&client, &config, &context, &preambles);
         let analysis_result = analyst.prompt(&analyst_prompt).await;
 
         let analysis_text = match analysis_result {
@@ -430,7 +449,7 @@ fn run_analysis_and_report(
         let (tx, mut rx) = mpsc::unbounded_channel::<InterceptedToolCall>();
         let hook = HitlHook { tool_call_tx: tx };
 
-        let reporter = agents::build_reporter(&client, &config, &context, &analysis_text);
+        let reporter = agents::build_reporter(&client, &config, &context, &analysis_text, &preambles);
         let reporter_prompt = "Write the post-mortem report and save it using save_incident_report.";
 
         let report_result = reporter
