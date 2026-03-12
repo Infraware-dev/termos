@@ -111,6 +111,10 @@ impl SessionContextStore {
 
         let mut preamble = SESSION_CONTEXT_SYSTEM_PROMPT.to_string();
         preamble.push_str("\n\n## Current Session Context\n\n");
+        preamble.push_str(
+            "The following facts were discovered during this session. \
+             Use them to avoid re-running commands unnecessarily.\n\n",
+        );
         for entry in &self.entries {
             preamble.push_str(&format!("- [{}] {}\n", entry.category, entry.fact));
         }
