@@ -459,7 +459,9 @@ mod tests {
         capture.lines_received = 2;
 
         // The exact case from the bug report — DEC private mode before prompt
-        capture.buffer = "output\n\x1b[?2004h\x1b[38;2;198;208;214m|~| root@7b8900c12e7c:/# \x1b[0m\x1b[K".to_string();
+        capture.buffer =
+            "output\n\x1b[?2004h\x1b[38;2;198;208;214m|~| root@7b8900c12e7c:/# \x1b[0m\x1b[K"
+                .to_string();
         assert!(
             capture.check_prompt_at_tail(),
             "Should detect prompt with DEC private mode prefix"

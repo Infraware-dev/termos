@@ -257,11 +257,14 @@ pub fn resume_investigation_question(
     thread_id: crate::agent::shared::ThreadId,
     question: String,
     answer: String,
-    context: IncidentContext,
+    mut context: IncidentContext,
     run_id: String,
     memory_ctx: MemoryContext,
 ) -> EventStream {
     Box::pin(stream! {
+        // Record the Q&A exchange so subsequent turns retain it
+        context.add_question_answer(&question, &answer);
+
         let prompt = format!(
             "You are continuing an incident investigation.\n\n\
              Evidence collected so far:\n{}\n\n\

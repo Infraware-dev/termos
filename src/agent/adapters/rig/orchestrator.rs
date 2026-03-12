@@ -611,8 +611,8 @@ pub fn create_resume_stream(
                     command, output.trim()
                 );
 
-                let history = state.get_messages(&thread_id).await.unwrap_or_default();
                 let _ = state.add_messages(&thread_id, vec![Message::user(&continuation)]).await;
+                let history = state.get_messages(&thread_id).await.unwrap_or_default();
 
                 for await event in handle_agent_continuation(
                     Arc::clone(&client), Arc::clone(&config), memory_ctx.clone(),
@@ -639,8 +639,13 @@ pub fn create_resume_stream(
                      Please continue based on this response.",
                 );
 
+                // Store the question as assistant message and the answer as user message
+                // BEFORE fetching history, so the agent sees the full Q&A exchange
+                let _ = state.add_messages(&thread_id, vec![
+                    Message::assistant(format!("Question for user: {question}")),
+                    Message::user(&continuation),
+                ]).await;
                 let history = state.get_messages(&thread_id).await.unwrap_or_default();
-                let _ = state.add_messages(&thread_id, vec![Message::user(&continuation)]).await;
 
                 tracing::debug!(thread_id = %thread_id, run_id = %run_id, "Resuming rig agent with answer");
 

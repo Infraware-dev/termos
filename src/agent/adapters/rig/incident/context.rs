@@ -104,6 +104,15 @@ pub struct AnalysisReport {
     pub fix_plan: Vec<String>,
 }
 
+/// A question asked by the investigator and the operator's answer.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QuestionAnswer {
+    /// The question asked by the investigator agent
+    pub question: String,
+    /// The operator's answer
+    pub answer: String,
+}
+
 /// Shared context passed between the three incident pipeline agents.
 ///
 /// `InvestigatorAgent` populates it; `AnalystAgent` and `ReporterAgent`
@@ -118,6 +127,9 @@ pub struct IncidentContext {
     pub commands_executed: Vec<CommandResult>,
     /// Significant findings promoted from command results
     pub findings: Vec<Finding>,
+    /// Questions asked to the operator and their answers (in order)
+    #[serde(default)]
+    pub questions_answered: Vec<QuestionAnswer>,
 }
 
 impl IncidentContext {
@@ -128,6 +140,7 @@ impl IncidentContext {
             started_at: Utc::now(),
             commands_executed: Vec::new(),
             findings: Vec::new(),
+            questions_answered: Vec::new(),
         }
     }
 
@@ -139,6 +152,14 @@ impl IncidentContext {
     /// Record a significant finding.
     pub fn add_finding(&mut self, finding: Finding) {
         self.findings.push(finding);
+    }
+
+    /// Record a question-answer exchange with the operator.
+    pub fn add_question_answer(&mut self, question: impl Into<String>, answer: impl Into<String>) {
+        self.questions_answered.push(QuestionAnswer {
+            question: question.into(),
+            answer: answer.into(),
+        });
     }
 
     /// Serialize the context to pretty JSON for injection into agent prompts.
@@ -191,6 +212,27 @@ mod tests {
                 .significance,
             FindingSignificance::High
         );
+    }
+
+    #[test]
+    fn test_add_question_answer() {
+        let mut ctx = IncidentContext::new("test incident");
+        ctx.add_question_answer("What infrastructure?", "Docker container");
+        ctx.add_question_answer("What backend?", "php-fpm");
+        assert_eq!(ctx.questions_answered.len(), 2);
+        assert_eq!(ctx.questions_answered[0].question, "What infrastructure?");
+        assert_eq!(ctx.questions_answered[0].answer, "Docker container");
+        assert_eq!(ctx.questions_answered[1].question, "What backend?");
+        assert_eq!(ctx.questions_answered[1].answer, "php-fpm");
+    }
+
+    #[test]
+    fn test_questions_answered_in_prompt_json() {
+        let mut ctx = IncidentContext::new("502 errors");
+        ctx.add_question_answer("What infrastructure?", "Docker container");
+        let json = ctx.to_prompt_json();
+        assert!(json.contains("What infrastructure?"));
+        assert!(json.contains("Docker container"));
     }
 
     #[test]
