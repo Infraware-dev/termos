@@ -427,7 +427,7 @@ mod tests {
         assert!(ctx.is_some());
 
         let ctx = ctx.unwrap();
-        let guard = ctx.read().await;
+        let mut guard = ctx.write().await;
         assert_eq!(guard.build_preamble(), ""); // empty on creation
     }
 

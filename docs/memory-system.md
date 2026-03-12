@@ -138,7 +138,7 @@ The agent does **not** save:
 
 Both memory systems are injected into the agent at creation time via `create_agent()` in the orchestrator:
 
-1. **Preamble injection:** `session_context.build_preamble()` and `memory.build_preamble()` are appended to the system prompt. The agent sees all stored facts before responding.
+1. **Preamble injection:** `memory.build_preamble()` is appended first, then `session_context.build_preamble()`. Session context is placed last because content closer to the end of the system prompt receives more LLM attention, giving ephemeral session facts higher effective priority.
 
 2. **Tool registration:** `SaveMemoryTool` and `SaveSessionContextTool` are registered alongside the other agent tools (shell, ask_user, etc.). The LLM can call them at any point during a conversation turn.
 
@@ -148,8 +148,8 @@ Both memory systems are injected into the agent at creation time via `create_age
 
 ```
 create_agent()
-  ├── session_context.build_preamble()  →  appended to system prompt
-  ├── memory.build_preamble()           →  appended to system prompt
+  ├── memory.build_preamble()           →  appended to system prompt (first)
+  ├── session_context.build_preamble()  →  appended to system prompt (last, higher priority)
   ├── .tool(SaveMemoryTool)             →  global MemoryStore (Arc<RwLock>)
   └── .tool(SaveSessionContextTool)     →  per-thread SessionContextStore (Arc<RwLock>)
 ```

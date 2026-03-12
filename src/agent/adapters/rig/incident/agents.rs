@@ -154,8 +154,8 @@ pub fn build_investigator(
     client
         .agent(&config.model)
         .preamble(&system_prompt)
-        .append_preamble(&preambles.session)
         .append_preamble(&preambles.memory)
+        .append_preamble(&preambles.session)
         .max_tokens(config.max_tokens as u64)
         .temperature(f64::from(config.temperature))
         .tool(DiagnosticCommandTool)
@@ -187,8 +187,8 @@ pub fn build_analyst(
     client
         .agent(&config.model)
         .preamble(&system_prompt)
-        .append_preamble(&preambles.session)
         .append_preamble(&preambles.memory)
+        .append_preamble(&preambles.session)
         .max_tokens(config.max_tokens as u64)
         .temperature(f64::from(config.temperature))
         .build()
@@ -215,8 +215,8 @@ pub fn build_reporter(
     client
         .agent(&config.model)
         .preamble(&system_prompt)
-        .append_preamble(&preambles.session)
         .append_preamble(&preambles.memory)
+        .append_preamble(&preambles.session)
         .max_tokens(config.max_tokens as u64)
         .temperature(f64::from(config.temperature))
         .tool(SaveReportTool)

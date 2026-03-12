@@ -19,6 +19,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::RwLock;
 
+use super::sanitize_fact;
+
 /// Categorizes a persisted memory entry.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -202,20 +204,6 @@ impl SaveMemoryTool {
     }
 }
 
-/// Sanitizes user-supplied fact text before persistence.
-///
-/// Collapses consecutive whitespace and newlines into a single space, trims
-/// leading/trailing whitespace, and strips leading dashes to prevent markdown
-/// list injection.
-fn sanitize_fact(raw: &str) -> String {
-    raw.split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .trim_start_matches('-')
-        .trim()
-        .to_string()
-}
-
 impl Tool for SaveMemoryTool {
     const NAME: &'static str = "save_memory";
 
@@ -332,28 +320,6 @@ mod tests {
     use super::*;
 
     const LIMIT: usize = 200;
-
-    // -- sanitize_fact -------------------------------------------------------
-
-    #[test]
-    fn sanitize_fact_collapses_whitespace() {
-        assert_eq!(sanitize_fact("  hello   world  "), "hello world");
-    }
-
-    #[test]
-    fn sanitize_fact_collapses_newlines() {
-        assert_eq!(sanitize_fact("hello\n\nworld"), "hello world");
-    }
-
-    #[test]
-    fn sanitize_fact_strips_leading_dash() {
-        assert_eq!(sanitize_fact("- remember this"), "remember this");
-    }
-
-    #[test]
-    fn sanitize_fact_returns_empty_for_blank_input() {
-        assert_eq!(sanitize_fact("   "), "");
-    }
 
     // -- MemoryStore ---------------------------------------------------------
 

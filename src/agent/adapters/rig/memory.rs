@@ -10,16 +10,36 @@ use tokio::sync::RwLock;
 use self::persistent::MemoryStore;
 use self::session_context::SessionContextStore;
 
+/// Sanitizes user-supplied fact text before storage.
+///
+/// Collapses consecutive whitespace and newlines into a single space, trims
+/// leading/trailing whitespace, and strips leading dashes to prevent markdown
+/// list injection.
+pub(crate) fn sanitize_fact(raw: &str) -> String {
+    raw.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim_start_matches('-')
+        .trim()
+        .to_string()
+}
+
 /// Pre-rendered system prompt fragments from the memory stores.
 ///
 /// Returned by [`MemoryContext::build_preambles`] so callers can inject
 /// these strings into agent preambles without holding read locks.
+///
+/// Injection order matters: `memory` is appended first, then `session`.
+/// Content closer to the **end** of the system prompt receives more LLM
+/// attention, so session-scoped facts (which override persistent memory)
+/// are placed last.
 #[derive(Debug, Clone)]
 pub struct Preambles {
-    /// Session-scoped context facts (ephemeral, per-thread).
-    pub session: String,
-    /// Persistent cross-session memory.
+    /// Persistent cross-session memory (injected first).
     pub memory: String,
+    /// Session-scoped context facts — ephemeral, per-thread (injected last
+    /// for higher priority).
+    pub session: String,
 }
 
 /// Bundles every memory-related dependency that an agent builder needs.
@@ -48,15 +68,17 @@ impl MemoryContext {
 
     /// Reads both stores and renders the system-prompt preamble fragments.
     ///
-    /// Acquires read locks on both stores, so the caller does **not** need
-    /// to hold any locks beforehand.
+    /// Acquires locks on both stores, so the caller does **not** need to
+    /// hold any locks beforehand. The session context store uses a write
+    /// lock because [`SessionContextStore::build_preamble`] may update its
+    /// internal cache.
     pub async fn build_preambles(&self) -> Preambles {
         let memory = self.memory_store.read().await;
-        let session = self.session_context_store.read().await;
+        let mut session = self.session_context_store.write().await;
 
         Preambles {
-            session: session.build_preamble(),
             memory: memory.build_preamble(),
+            session: session.build_preamble(),
         }
     }
 }
@@ -65,6 +87,30 @@ impl MemoryContext {
 mod tests {
     use super::*;
     use crate::agent::adapters::rig::memory::session_context::DEFAULT_SESSION_CONTEXT_LIMIT;
+
+    // -- sanitize_fact -------------------------------------------------------
+
+    #[test]
+    fn sanitize_fact_collapses_whitespace() {
+        assert_eq!(sanitize_fact("  hello   world  "), "hello world");
+    }
+
+    #[test]
+    fn sanitize_fact_collapses_newlines() {
+        assert_eq!(sanitize_fact("hello\n\nworld"), "hello world");
+    }
+
+    #[test]
+    fn sanitize_fact_strips_leading_dash() {
+        assert_eq!(sanitize_fact("- remember this"), "remember this");
+    }
+
+    #[test]
+    fn sanitize_fact_returns_empty_for_blank() {
+        assert_eq!(sanitize_fact("   "), "");
+    }
+
+    // -- MemoryContext -------------------------------------------------------
 
     #[tokio::test]
     async fn build_preambles_empty_stores() {

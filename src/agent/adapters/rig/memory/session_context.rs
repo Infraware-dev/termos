@@ -18,6 +18,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::RwLock;
 
+use super::sanitize_fact;
+
 /// Maximum number of session context entries kept by default.
 pub const DEFAULT_SESSION_CONTEXT_LIMIT: usize = 50;
 
@@ -63,13 +65,17 @@ pub struct SessionContextEntry {
 /// In-memory store for session-scoped context entries.
 ///
 /// Entries are kept in insertion order and evicted FIFO when the store reaches
-/// its configured [`limit`](SessionContextStore::new).
+/// its configured [`limit`](SessionContextStore::new). The rendered preamble
+/// is cached and invalidated on every mutation so that repeated
+/// [`build_preamble`](Self::build_preamble) calls are allocation-free.
 #[derive(Debug)]
 pub struct SessionContextStore {
     /// The context entries.
     entries: VecDeque<SessionContextEntry>,
     /// Maximum entries to keep in the store.
     limit: usize,
+    /// Cached preamble string, invalidated on every mutation.
+    cached_preamble: Option<String>,
 }
 
 impl SessionContextStore {
@@ -78,6 +84,7 @@ impl SessionContextStore {
         Self {
             entries: VecDeque::new(),
             limit,
+            cached_preamble: None,
         }
     }
 
@@ -100,12 +107,25 @@ impl SessionContextStore {
             category,
             created_at: Utc::now(),
         });
+        self.cached_preamble = None;
     }
 
-    /// Builds the session context portion of the system prompt.
+    /// Returns the session context portion of the system prompt.
     ///
+    /// The result is cached and only rebuilt after a call to [`add`](Self::add).
     /// Returns an empty string when the store contains no entries.
-    pub fn build_preamble(&self) -> String {
+    pub fn build_preamble(&mut self) -> String {
+        if let Some(ref cached) = self.cached_preamble {
+            return cached.clone();
+        }
+
+        let preamble = self.render_preamble();
+        self.cached_preamble = Some(preamble.clone());
+        preamble
+    }
+
+    /// Renders the preamble from scratch.
+    fn render_preamble(&self) -> String {
         if self.entries.is_empty() {
             return String::new();
         }
@@ -121,20 +141,6 @@ impl SessionContextStore {
         }
         preamble
     }
-}
-
-/// Sanitizes user-supplied fact text before storage.
-///
-/// Collapses consecutive whitespace and newlines into a single space, trims
-/// leading/trailing whitespace, and strips leading dashes to prevent markdown
-/// list injection.
-fn sanitize_fact(raw: &str) -> String {
-    raw.split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .trim_start_matches('-')
-        .trim()
-        .to_string()
 }
 
 /// Base system prompt instructing the LLM about session context usage.
@@ -266,23 +272,6 @@ impl Tool for SaveSessionContextTool {
 mod tests {
     use super::*;
 
-    // -- sanitize_fact -------------------------------------------------------
-
-    #[test]
-    fn sanitize_fact_collapses_whitespace() {
-        assert_eq!(sanitize_fact("  hello   world  "), "hello world");
-    }
-
-    #[test]
-    fn sanitize_fact_strips_leading_dash() {
-        assert_eq!(sanitize_fact("- remember this"), "remember this");
-    }
-
-    #[test]
-    fn sanitize_fact_returns_empty_for_blank() {
-        assert_eq!(sanitize_fact("   "), "");
-    }
-
     // -- SessionContextCategory Display --------------------------------------
 
     #[test]
@@ -351,7 +340,7 @@ mod tests {
 
     #[test]
     fn build_preamble_empty_store() {
-        let store = SessionContextStore::new(10);
+        let mut store = SessionContextStore::new(10);
         assert_eq!(store.build_preamble(), "");
     }
 

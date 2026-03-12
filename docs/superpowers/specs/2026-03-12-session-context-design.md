@@ -85,12 +85,14 @@ The tool is NOT intercepted by `HitlHook` — it executes silently like `save_me
 
 ## Preamble Injection Order
 
-Session context has higher priority than persistent memory, so it is injected closer to the system prompt:
+Session context has higher priority than persistent memory. Content closer to the
+**end** of the system prompt receives more LLM attention, so session context is
+injected **after** persistent memory:
 
 ```
 1. config.system_prompt           (base DevOps assistant prompt)
-2. session_context.build_preamble() (current session facts — higher priority)
-3. memory.build_preamble()          (persistent cross-session facts)
+2. memory.build_preamble()          (persistent cross-session facts)
+3. session_context.build_preamble() (current session facts — higher priority, injected last)
 ```
 
 The `build_preamble()` output format:
@@ -126,32 +128,27 @@ struct ThreadState {
 
 ### create_agent()
 
-Gains a `session_context` parameter (read guard of `SessionContextStore`) and a `session_context_store`
-parameter (`Arc<RwLock<SessionContextStore>>` for the tool). Injects session context preamble before memory preamble:
+Takes a `MemoryContext` and pre-rendered `Preambles`. Memory preamble is injected first,
+session context last (closer to end = higher LLM attention):
 
 ```rust
 pub fn create_agent(
     client: &anthropic::Client,
     config: &RigAgentConfig,
-    memory_store: &Arc<RwLock<MemoryStore>>,
-    memory: &MemoryStore,
-    session_context: &SessionContextStore,
-    session_context_store: &Arc<RwLock<SessionContextStore>>,
+    memory_ctx: &MemoryContext,
+    preambles: &Preambles,
 ) -> RigAgent {
-    let session_preamble = session_context.build_preamble();
-    let memory_preamble = memory.build_preamble();
-
     client
         .agent(&config.model)
         .preamble(&config.system_prompt)
-        .append_preamble(&session_preamble)    // session-specific first
-        .append_preamble(&memory_preamble)      // persistent second
+        .append_preamble(&preambles.memory)     // persistent first
+        .append_preamble(&preambles.session)    // session-specific last (higher priority)
         .max_tokens(config.max_tokens as u64)
         .temperature(f64::from(config.temperature))
         .tool(ShellCommandTool::new())
         .tool(AskUserTool::new())
-        .tool(SaveMemoryTool::new(Arc::clone(memory_store)))
-        .tool(SaveSessionContextTool::new(Arc::clone(session_context_store)))
+        .tool(SaveMemoryTool::new(Arc::clone(&memory_ctx.memory_store)))
+        .tool(SaveSessionContextTool::new(Arc::clone(&memory_ctx.session_context_store)))
         .tool(StartIncidentInvestigationTool)
         .build()
 }
@@ -202,5 +199,5 @@ Gains a `session_context_store: Arc<RwLock<SessionContextStore>>` parameter, pas
 | Population | Tool-only (LLM decides) | Simpler than hybrid auto-extraction, consistent with `SaveMemoryTool` pattern |
 | Eviction | FIFO, 50 entries | Simple, sufficient for session scope |
 | Limit configurability | Hardcoded | Internal optimization, not user-facing |
-| Preamble order | Session context before memory | Session-specific facts have higher priority |
+| Preamble order | Session context after memory (last) | Content closer to end of system prompt gets more LLM attention |
 | HITL interception | Not intercepted | Silent background operation, same as `save_memory` |

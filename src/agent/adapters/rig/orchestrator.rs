@@ -130,8 +130,8 @@ pub fn create_agent(
     client
         .agent(&config.model)
         .preamble(&config.system_prompt)
-        .append_preamble(&preambles.session)
         .append_preamble(&preambles.memory)
+        .append_preamble(&preambles.session)
         .max_tokens(config.max_tokens as u64)
         .temperature(f64::from(config.temperature))
         .tool(ShellCommandTool::new())
