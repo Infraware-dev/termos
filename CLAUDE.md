@@ -392,8 +392,6 @@ The RigEngine uses **rig-rs** to build a native Rust agent with Anthropic Claude
 
 ## Memory System (RigEngine Feature)
 
-### Session Memory (Complete, Active)
-
 Persistent facts/preferences the LLM learns about the user across sessions.
 
 - **Storage**: JSON at `MEMORY_PATH` (default: `./.infraware/memory.json`)
@@ -404,15 +402,6 @@ Persistent facts/preferences the LLM learns about the user across sessions.
   - `src/engine/adapters/rig/memory/session.rs` - MemoryStore, MemoryEntry, SaveMemoryTool
   - `src/engine/adapters/rig/orchestrator.rs` - preamble injection, tool registration
   - `src/engine/adapters/rig/config.rs` - MemoryConfig with env var loading
-
-### Interaction Memory (Framework Complete, Not Yet Wired)
-
-Learns from past executed commands and NL queries via text similarity search.
-
-- **Storage**: JSONL append-only at `~/.local/share/infraware/memory/interactions.jsonl`
-- **Architecture**: Strategy pattern - `JsonlStorage` (Phase 1 text search) + `NoopEmbedding` (placeholder) + `RegexIntentGenerator` (heuristic intent)
-- **Status**: Module code complete and tested; pre-retrieval/capture hooks not yet called from engine streams
-- **Files**: `src/engine/adapters/rig/memory/` - `mod.rs`, `models.rs`, `traits.rs`, `storage/`, `intent/`
 
 ## CI Pipeline
 
