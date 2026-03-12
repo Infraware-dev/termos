@@ -312,16 +312,9 @@ impl TerminalSession {
                         self.needs_repaint = true;
 
                         // Feed output to capture when executing a command (HITL flow)
-                        // OutputCapture.append() returns true when prompt is detected (command done)
                         if is_executing && self.output_capture.is_capturing() {
                             let text = String::from_utf8_lossy(&bytes);
-                            if self.output_capture.append(&text) {
-                                command_completed = true;
-                                tracing::debug!(
-                                    "Session {}: Command completion detected via prompt",
-                                    self.id
-                                );
-                            }
+                            self.output_capture.append(&text);
                         }
                     }
                     Err(mpsc::TryRecvError::Empty) => break,
@@ -332,6 +325,19 @@ impl TerminalSession {
                     }
                 }
             }
+        }
+
+        // Check debounced prompt detection (prompt must persist with no new
+        // non-prompt output for the debounce window before we report completion)
+        if is_executing
+            && self.output_capture.is_capturing()
+            && self.output_capture.is_command_complete()
+        {
+            command_completed = true;
+            tracing::debug!(
+                "Session {}: Command completion detected via prompt (debounced)",
+                self.id
+            );
         }
 
         (bytes_processed > 0, command_completed)
