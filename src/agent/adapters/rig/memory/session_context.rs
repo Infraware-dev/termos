@@ -8,15 +8,21 @@
 
 use std::collections::VecDeque;
 use std::fmt;
+use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
+use rig::completion::ToolDefinition;
+use rig::tool::Tool;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use serde_json::json;
+use tokio::sync::RwLock;
 
 /// Maximum number of session context entries kept by default.
 pub const DEFAULT_SESSION_CONTEXT_LIMIT: usize = 50;
 
 /// Categorizes a session context entry.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum SessionContextCategory {
     /// Host information (e.g. OS, kernel version, architecture).
@@ -131,6 +137,122 @@ pub const SESSION_CONTEXT_SYSTEM_PROMPT: &str = "You have access to a `save_sess
                                                  that stores facts discovered during this session. \
                                                  Use it to avoid re-running commands unnecessarily.";
 
+/// Arguments the LLM supplies when invoking `save_session_context`.
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct SaveSessionContextArgs {
+    /// A clear, self-contained statement of the discovered fact.
+    pub fact: String,
+    /// Classification of the session context entry.
+    pub category: SessionContextCategory,
+}
+
+/// Result returned to the LLM after a save attempt.
+#[derive(Debug, Serialize)]
+pub struct SaveSessionContextResult {
+    /// Whether the context entry was saved successfully.
+    pub saved: bool,
+    /// Human-readable status message.
+    pub message: String,
+}
+
+/// Error returned by [`SaveSessionContextTool::call`].
+#[derive(Debug, thiserror::Error)]
+pub enum SessionContextToolError {
+    /// The store reference was not initialized.
+    #[error("session context tool not initialized")]
+    NotInitialized,
+}
+
+/// Rig [`Tool`] that lets the LLM persist session-scoped context facts.
+///
+/// On each invocation the tool sanitizes the fact text and stores it in the
+/// in-memory [`SessionContextStore`]. Unlike [`super::session::SaveMemoryTool`],
+/// these entries do **not** persist across sessions.
+#[derive(Serialize, Deserialize)]
+pub struct SaveSessionContextTool {
+    #[serde(skip)]
+    store: Option<Arc<RwLock<SessionContextStore>>>,
+}
+
+impl SaveSessionContextTool {
+    /// Creates a new tool wired to the shared `store`.
+    pub fn new(store: Arc<RwLock<SessionContextStore>>) -> Self {
+        Self { store: Some(store) }
+    }
+}
+
+impl Tool for SaveSessionContextTool {
+    const NAME: &'static str = "save_session_context";
+
+    type Error = SessionContextToolError;
+    type Args = SaveSessionContextArgs;
+    type Output = SaveSessionContextResult;
+
+    async fn definition(&self, _prompt: String) -> ToolDefinition {
+        serde_json::from_value(json!({
+            "name": "save_session_context",
+            "description": concat!(
+                "Saves a fact discovered during the current session so you can ",
+                "avoid re-running the same diagnostic or exploratory command.\n\n",
+                "### WHEN TO USE\n",
+                "- After running a command that reveals host info (OS, kernel, arch)\n",
+                "- After discovering environment details (shell, locale, PATH)\n",
+                "- After checking service state (\"nginx is running on port 80\")\n",
+                "- After exploring the filesystem or project structure\n\n",
+                "### NEVER USE FOR\n",
+                "- Long-lived user preferences (use `save_memory` instead)\n",
+                "- Transient command output that changes frequently\n",
+                "- Information already present in the session context"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "fact": {
+                        "type": "string",
+                        "description": "A clear, self-contained statement of the discovered fact."
+                    },
+                    "category": {
+                        "type": "string",
+                        "enum": [
+                            "host_info",
+                            "environment",
+                            "working_directory",
+                            "service_state",
+                            "discovery"
+                        ],
+                        "description": "Category of the session context entry."
+                    }
+                },
+                "required": ["fact", "category"]
+            }
+        }))
+        .expect("valid save_session_context tool definition")
+    }
+
+    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        let fact = sanitize_fact(&args.fact);
+
+        if fact.is_empty() {
+            return Ok(SaveSessionContextResult {
+                saved: false,
+                message: "Empty fact provided — nothing saved.".into(),
+            });
+        }
+
+        let store = self
+            .store
+            .as_ref()
+            .ok_or(SessionContextToolError::NotInitialized)?;
+
+        store.write().await.add(fact.clone(), args.category);
+
+        Ok(SaveSessionContextResult {
+            saved: true,
+            message: format!("Session context saved: {fact}"),
+        })
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -241,5 +363,56 @@ mod tests {
         assert!(preamble.contains("Current Session Context"));
         assert!(preamble.contains("[host_info] Linux x86_64"));
         assert!(preamble.contains("[working_directory] /home/user"));
+    }
+
+    // -- SaveSessionContextTool ----------------------------------------------
+
+    #[tokio::test]
+    async fn tool_saves_context() {
+        let store = Arc::new(RwLock::new(SessionContextStore::new(10)));
+        let tool = SaveSessionContextTool::new(Arc::clone(&store));
+
+        let result = tool
+            .call(SaveSessionContextArgs {
+                fact: "Linux x86_64".into(),
+                category: SessionContextCategory::HostInfo,
+            })
+            .await
+            .unwrap();
+
+        assert!(result.saved);
+        assert!(result.message.contains("Linux x86_64"));
+
+        let guard = store.read().await;
+        assert_eq!(guard.entries.len(), 1);
+        assert_eq!(guard.entries[0].fact, "Linux x86_64");
+    }
+
+    #[tokio::test]
+    async fn tool_rejects_empty_fact() {
+        let store = Arc::new(RwLock::new(SessionContextStore::new(10)));
+        let tool = SaveSessionContextTool::new(Arc::clone(&store));
+
+        let result = tool
+            .call(SaveSessionContextArgs {
+                fact: "   ".into(),
+                category: SessionContextCategory::Discovery,
+            })
+            .await
+            .unwrap();
+
+        assert!(!result.saved);
+
+        let guard = store.read().await;
+        assert!(guard.entries.is_empty());
+    }
+
+    #[tokio::test]
+    async fn tool_definition_has_correct_name() {
+        let store = Arc::new(RwLock::new(SessionContextStore::new(10)));
+        let tool = SaveSessionContextTool::new(store);
+
+        let def = tool.definition(String::new()).await;
+        assert_eq!(def.name, "save_session_context");
     }
 }
