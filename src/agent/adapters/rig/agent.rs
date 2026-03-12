@@ -9,7 +9,7 @@ use tokio::sync::RwLock;
 use super::config::RigAgentConfig;
 use super::orchestrator::{create_resume_stream, create_run_stream};
 use super::state::StateStore;
-use crate::agent::adapters::rig::memory::session::MemoryStore;
+use crate::agent::adapters::rig::memory::persistent::MemoryStore;
 use crate::agent::error::AgentError;
 use crate::agent::shared::{RunInput, ThreadId};
 use crate::agent::traits::{Agent, EventStream};

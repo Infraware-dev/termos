@@ -21,7 +21,7 @@ use super::tools::{
     AskUserArgs, AskUserTool, DiagnosticCommandTool, HitlMarker, ShellCommandArgs,
     ShellCommandTool, StartIncidentArgs, StartIncidentInvestigationTool,
 };
-use crate::agent::adapters::rig::memory::session::{MemoryStore, SaveMemoryTool};
+use crate::agent::adapters::rig::memory::persistent::{MemoryStore, SaveMemoryTool};
 use crate::agent::adapters::rig::memory::session_context::{
     SaveSessionContextTool, SessionContextStore,
 };

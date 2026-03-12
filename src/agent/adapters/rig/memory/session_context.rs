@@ -1,6 +1,6 @@
 //! Session-scoped context memory for the Rig LLM engine.
 //!
-//! Unlike persistent [`super::session::MemoryStore`] memories, session context
+//! Unlike persistent [`super::persistent::MemoryStore`] memories, session context
 //! entries are ephemeral and live only for the duration of a single terminal
 //! session. The LLM uses [`SaveSessionContextTool`] to cache facts discovered
 //! during command execution (e.g. OS type, running services) so it can avoid
@@ -170,7 +170,7 @@ pub enum SessionContextToolError {
 /// Rig [`Tool`] that lets the LLM persist session-scoped context facts.
 ///
 /// On each invocation the tool sanitizes the fact text and stores it in the
-/// in-memory [`SessionContextStore`]. Unlike [`super::session::SaveMemoryTool`],
+/// in-memory [`SessionContextStore`]. Unlike [`super::persistent::SaveMemoryTool`],
 /// these entries do **not** persist across sessions.
 #[derive(Serialize, Deserialize)]
 pub struct SaveSessionContextTool {

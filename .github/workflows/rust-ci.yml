@@ -116,5 +116,8 @@ jobs:
       - name: Build
         run: cargo build --verbose
 
+      - name: Build (all features)
+        run: cargo build --all-features --verbose
+
       - name: Run tests
-        run: cargo test --verbose
+        run: cargo test --all-features --verbose
