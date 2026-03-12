@@ -36,6 +36,15 @@ fn strip_ansi(s: &str) -> String {
 /// positives.
 const DEFAULT_PROMPT_DEBOUNCE: Duration = Duration::from_millis(150);
 
+/// Minimum grace period after capture starts before prompt detection is armed.
+///
+/// When a command is written to the PTY, the shell may immediately echo back
+/// control sequences (e.g., bracketed paste mode toggle) and redraw the prompt
+/// line before the command has even started executing. Without this grace
+/// period, the output capture mistakes that shell housekeeping for a
+/// post-completion prompt and terminates the capture prematurely.
+const DEFAULT_START_GRACE_PERIOD: Duration = Duration::from_millis(500);
+
 /// Captures PTY output during command execution.
 ///
 /// When a command is approved by the user, `OutputCapture` starts capturing
@@ -62,6 +71,10 @@ pub struct OutputCapture {
     /// Debounce window: prompt must persist this long with no new data before
     /// we report command completion.
     prompt_debounce: Duration,
+    /// Timestamp when capture started (command was sent to PTY).
+    started_at: Option<Instant>,
+    /// Grace period after start before prompt detection is armed.
+    start_grace_period: Duration,
 }
 
 impl Default for OutputCapture {
@@ -107,6 +120,8 @@ impl OutputCapture {
             skip_command_echo: true,
             prompt_detected_at: None,
             prompt_debounce: DEFAULT_PROMPT_DEBOUNCE,
+            started_at: None,
+            start_grace_period: DEFAULT_START_GRACE_PERIOD,
         }
     }
 
@@ -118,6 +133,7 @@ impl OutputCapture {
     pub fn with_debounce(debounce: Duration) -> Self {
         let mut capture = Self::new();
         capture.prompt_debounce = debounce;
+        capture.start_grace_period = Duration::ZERO;
         capture
     }
 
@@ -132,6 +148,7 @@ impl OutputCapture {
         self.lines_received = 0;
         self.skip_command_echo = true;
         self.prompt_detected_at = None;
+        self.started_at = Some(Instant::now());
     }
 
     /// Check if capture is currently active.
@@ -208,8 +225,17 @@ impl OutputCapture {
     /// 2. The debounce window has elapsed with no new non-prompt output
     #[must_use]
     pub fn is_command_complete(&self) -> bool {
-        self.prompt_detected_at
-            .is_some_and(|t| t.elapsed() >= self.prompt_debounce)
+        // Grace period: the shell may echo control sequences and redraw
+        // the prompt line before the command has started executing. Don't
+        // report completion until enough time has elapsed from start.
+        let grace_elapsed = self
+            .started_at
+            .is_some_and(|t| t.elapsed() >= self.start_grace_period);
+
+        grace_elapsed
+            && self
+                .prompt_detected_at
+                .is_some_and(|t| t.elapsed() >= self.prompt_debounce)
     }
 
     /// Check whether the last line of the buffer matches a shell prompt pattern.
@@ -269,6 +295,7 @@ impl OutputCapture {
         self.current_command = None;
         self.lines_received = 0;
         self.prompt_detected_at = None;
+        self.started_at = None;
         output
     }
 
@@ -482,6 +509,31 @@ mod tests {
         let output = capture.get_clean_output();
         // Should only contain "Linux", with echo and prompt stripped
         assert_eq!(output, "Linux");
+    }
+
+    #[test]
+    fn test_grace_period_prevents_early_completion() {
+        // Use zero debounce but a long grace period
+        let mut capture = OutputCapture::with_debounce(Duration::ZERO);
+        capture.start_grace_period = Duration::from_secs(10);
+        // Re-start to record `started_at` with the new grace period
+        capture.start("cat /var/www/html/index.php");
+
+        // Simulate the shell echoing back control sequences and prompt
+        // immediately after the command is sent (before command executes)
+        capture.append("cat /var/www/html/index.php\n");
+        capture.append("\x1b[?2004h\x1b[38;2;198;208;214m|~| root@host:/# \x1b[0m\x1b[K");
+
+        // Prompt IS detected in the buffer (debounce tracking works)
+        assert!(
+            capture.prompt_detected_at.is_some(),
+            "Prompt should still be detected in the buffer"
+        );
+        // But is_command_complete returns false because grace period hasn't elapsed
+        assert!(
+            !capture.is_command_complete(),
+            "Completion should be blocked by grace period"
+        );
     }
 
     #[test]
