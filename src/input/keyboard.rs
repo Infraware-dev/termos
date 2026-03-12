@@ -262,7 +262,7 @@ impl KeyboardHandler {
                 } = event
                 {
                     // Log key events for debugging
-                    tracing::debug!(
+                    tracing::trace!(
                         "Key event: {:?} pressed={} ctrl={} alt={} shift={}",
                         key,
                         pressed,

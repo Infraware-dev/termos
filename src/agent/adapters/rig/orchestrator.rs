@@ -251,10 +251,11 @@ fn classify_user_response_from_text_matching(options: &[&str], user_answer: &str
     }
 
     // Numeric index: "1" → first option, "2" → second option
-    if let Ok(idx) = trimmed.parse::<usize>() {
-        if idx >= 1 && idx <= options.len() {
-            return Some(idx == 1);
-        }
+    if let Ok(idx) = trimmed.parse::<usize>()
+        && idx >= 1
+        && idx <= options.len()
+    {
+        return Some(idx == 1);
     }
 
     // Exact option text match (case-insensitive)
@@ -707,6 +708,25 @@ pub fn create_resume_stream(
                 }
             }
 
+            // Operator answered an investigator scoping/clarification question
+            (ResumeResponse::Answer { text }, ResumeContext::IncidentQuestion { question, context, .. }) => {
+                let mut stream = incident::resume_investigation_question(
+                    Arc::clone(&client),
+                    Arc::clone(&config),
+                    Arc::clone(&state),
+                    thread_id.clone(),
+                    question.clone(),
+                    text.clone(),
+                    context.clone(),
+                    run_id.clone(),
+                    memory_ctx.clone(),
+                );
+
+                while let Some(event) = stream.next().await {
+                    yield event;
+                }
+            }
+
             (ResumeResponse::Rejected, ResumeContext::IncidentCommand { command, .. }) => {
                 let msg = format!("Diagnostic command `{}` rejected. Investigation stopped.", command);
                 yield Ok(AgentEvent::Message(MessageEvent::assistant(&msg)));
@@ -795,11 +815,17 @@ mod tests {
     #[test]
     fn test_text_classify_exact_option_text() {
         assert_eq!(
-            classify_user_response_from_text_matching(INVESTIGATION_OPTIONS, "Yes, start investigation"),
+            classify_user_response_from_text_matching(
+                INVESTIGATION_OPTIONS,
+                "Yes, start investigation"
+            ),
             Some(true)
         );
         assert_eq!(
-            classify_user_response_from_text_matching(INVESTIGATION_OPTIONS, "yes, start investigation"),
+            classify_user_response_from_text_matching(
+                INVESTIGATION_OPTIONS,
+                "yes, start investigation"
+            ),
             Some(true)
         );
         assert_eq!(

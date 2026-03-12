@@ -24,7 +24,7 @@ use super::config::RigAgentConfig;
 use super::memory::MemoryContext;
 use super::orchestrator::{HitlHook, InterceptedToolCall};
 use super::state::{PendingInterrupt, StateStore};
-use super::tools::{DiagnosticCommandArgs, HitlMarker, format_hitl_message};
+use super::tools::{AskUserArgs, DiagnosticCommandArgs, HitlMarker, format_hitl_message};
 use crate::agent::error::AgentError;
 use crate::agent::shared::{AgentEvent, IncidentPhase, MessageEvent};
 use crate::agent::traits::EventStream;
@@ -242,6 +242,58 @@ pub fn resume_investigation_with_output(
     })
 }
 
+/// Resume the investigation after the operator answered a scoping/clarification question.
+///
+/// Called by `create_resume_stream` when the operator answers an
+/// `IncidentQuestion` interrupt.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "All fields restored from stored interrupt context"
+)]
+pub fn resume_investigation_question(
+    client: Arc<anthropic::Client>,
+    config: Arc<RigAgentConfig>,
+    state: Arc<StateStore>,
+    thread_id: crate::agent::shared::ThreadId,
+    question: String,
+    answer: String,
+    context: IncidentContext,
+    run_id: String,
+    memory_ctx: MemoryContext,
+) -> EventStream {
+    Box::pin(stream! {
+        let prompt = format!(
+            "You are continuing an incident investigation.\n\n\
+             Evidence collected so far:\n{}\n\n\
+             You asked the operator: \"{}\"\n\
+             The operator answered: \"{}\"\n\n\
+             Continue the investigation. Use this information to guide your next steps. \
+             If you need more information from the operator, use ask_user. \
+             If you need to run a diagnostic command, use execute_diagnostic_command. \
+             If you have sufficient evidence to determine the root cause, respond with \
+             your findings as text (do NOT call any tool).",
+            context.to_prompt_json(),
+            question,
+            answer
+        );
+
+        let events = run_investigation_step(
+            Arc::clone(&client),
+            Arc::clone(&config),
+            Arc::clone(&state),
+            thread_id.clone(),
+            context,
+            prompt,
+            run_id.clone(),
+            memory_ctx.clone(),
+        );
+
+        for await event in events {
+            yield event;
+        }
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
@@ -285,92 +337,115 @@ fn run_investigation_step(
             .with_hook(hook)
             .await;
 
-        // Check if a diagnostic command was intercepted
+        // Check if a tool call was intercepted
         if let Ok(intercepted) = rx.try_recv() {
-            if intercepted.tool_name == "execute_diagnostic_command"
-                && let Ok(args) = serde_json::from_str::<DiagnosticCommandArgs>(&intercepted.args)
-            {
-                let normalized_cmd = args.command.trim().to_ascii_lowercase();
-                let duplicate_count = context
-                    .commands_executed
-                    .iter()
-                    .filter(|r| r.command.trim().to_ascii_lowercase() == normalized_cmd)
-                    .count();
+            match intercepted.tool_name.as_str() {
+                "execute_diagnostic_command" => {
+                    if let Ok(args) = serde_json::from_str::<DiagnosticCommandArgs>(&intercepted.args) {
+                        let normalized_cmd = args.command.trim().to_ascii_lowercase();
+                        let duplicate_count = context
+                            .commands_executed
+                            .iter()
+                            .filter(|r| r.command.trim().to_ascii_lowercase() == normalized_cmd)
+                            .count();
 
-                if duplicate_count > 0 {
-                    tracing::warn!(
-                        run_id = %run_id,
-                        command = %args.command,
-                        duplicate_count,
-                        "Investigator requested a duplicate diagnostic command; forcing analysis phase"
-                    );
+                        if duplicate_count > 0 {
+                            tracing::warn!(
+                                run_id = %run_id,
+                                command = %args.command,
+                                duplicate_count,
+                                "Investigator requested a duplicate diagnostic command; forcing analysis phase"
+                            );
 
-                    let forced_findings = format!(
-                        "Loop guard activated: command `{}` was already executed {} time(s). \
-                         Proceeding with available evidence to avoid redundant diagnostics.",
-                        args.command, duplicate_count
-                    );
-                    yield Ok(AgentEvent::Message(MessageEvent::assistant(&forced_findings)));
-                    for await event in run_analysis_and_report(
-                        Arc::clone(&client),
-                        Arc::clone(&config),
-                        context,
-                        forced_findings,
-                        run_id.clone(),
-                        memory_ctx.clone(),
-                    ) {
-                        yield event;
+                            let forced_findings = format!(
+                                "Loop guard activated: command `{}` was already executed {} time(s). \
+                                 Proceeding with available evidence to avoid redundant diagnostics.",
+                                args.command, duplicate_count
+                            );
+                            yield Ok(AgentEvent::Message(MessageEvent::assistant(&forced_findings)));
+                            for await event in run_analysis_and_report(
+                                Arc::clone(&client),
+                                Arc::clone(&config),
+                                context,
+                                forced_findings,
+                                run_id.clone(),
+                                memory_ctx.clone(),
+                            ) {
+                                yield event;
+                            }
+                            return;
+                        }
+
+                        if context.commands_executed.len() >= MAX_INVESTIGATION_COMMANDS {
+                            tracing::warn!(
+                                run_id = %run_id,
+                                max_steps = MAX_INVESTIGATION_COMMANDS,
+                                "Investigation reached max diagnostic commands; forcing analysis phase"
+                            );
+
+                            let forced_findings = format!(
+                                "Step limit reached ({} diagnostic commands approved). \
+                                 Proceeding to analysis with collected evidence.",
+                                MAX_INVESTIGATION_COMMANDS
+                            );
+                            yield Ok(AgentEvent::Message(MessageEvent::assistant(&forced_findings)));
+                            for await event in run_analysis_and_report(
+                                Arc::clone(&client),
+                                Arc::clone(&config),
+                                context,
+                                forced_findings,
+                                run_id.clone(),
+                                memory_ctx.clone(),
+                            ) {
+                                yield event;
+                            }
+                            return;
+                        }
+
+                        let hitl_message = format_hitl_message(&args);
+                        let pending = PendingInterrupt::incident_command(
+                            args.command.clone(),
+                            args.motivation.clone(),
+                            args.needs_continuation,
+                            args.risk_level,
+                            args.expected_diagnostic_value.clone(),
+                            context,
+                            intercepted.tool_call_id,
+                            serde_json::from_str(&intercepted.args).ok(),
+                        );
+                        let _ = state.store_interrupt(&thread_id, pending).await;
+
+                        yield Ok(AgentEvent::updates_with_interrupt(
+                            HitlMarker::CommandApproval {
+                                command: args.command,
+                                message: hitl_message,
+                                needs_continuation: args.needs_continuation,
+                            }.into()
+                        ));
+                        return;
                     }
-                    return;
                 }
+                "ask_user" => {
+                    if let Ok(args) = serde_json::from_str::<AskUserArgs>(&intercepted.args) {
+                        let pending = PendingInterrupt::incident_question(
+                            args.question.clone(),
+                            args.options.clone(),
+                            context,
+                            intercepted.tool_call_id,
+                            serde_json::from_str(&intercepted.args).ok(),
+                        );
+                        let _ = state.store_interrupt(&thread_id, pending).await;
 
-                if context.commands_executed.len() >= MAX_INVESTIGATION_COMMANDS {
-                    tracing::warn!(
-                        run_id = %run_id,
-                        max_steps = MAX_INVESTIGATION_COMMANDS,
-                        "Investigation reached max diagnostic commands; forcing analysis phase"
-                    );
-
-                    let forced_findings = format!(
-                        "Step limit reached ({} diagnostic commands approved). \
-                         Proceeding to analysis with collected evidence.",
-                        MAX_INVESTIGATION_COMMANDS
-                    );
-                    yield Ok(AgentEvent::Message(MessageEvent::assistant(&forced_findings)));
-                    for await event in run_analysis_and_report(
-                        Arc::clone(&client),
-                        Arc::clone(&config),
-                        context,
-                        forced_findings,
-                        run_id.clone(),
-                        memory_ctx.clone(),
-                    ) {
-                        yield event;
+                        yield Ok(AgentEvent::updates_with_interrupt(
+                            HitlMarker::Question {
+                                question: args.question,
+                                options: args.options,
+                            }.into()
+                        ));
+                        return;
                     }
-                    return;
                 }
-
-                let hitl_message = format_hitl_message(&args);
-                let pending = PendingInterrupt::incident_command(
-                    args.command.clone(),
-                    args.motivation.clone(),
-                    args.needs_continuation,
-                    args.risk_level,
-                    args.expected_diagnostic_value.clone(),
-                    context,
-                    intercepted.tool_call_id,
-                    serde_json::from_str(&intercepted.args).ok(),
-                );
-                let _ = state.store_interrupt(&thread_id, pending).await;
-
-                yield Ok(AgentEvent::updates_with_interrupt(
-                    HitlMarker::CommandApproval {
-                        command: args.command,
-                        message: hitl_message,
-                        needs_continuation: args.needs_continuation,
-                    }.into()
-                ));
-                return;
+                _ => {}
             }
             // Unknown tool or parse error — fall through to handle agent text response
             tracing::warn!(tool = %intercepted.tool_name, "Unexpected tool intercepted in investigation");
@@ -467,8 +542,16 @@ fn run_analysis_and_report(
         match report_result {
             Ok(response) => {
                 tracing::info!(run_id = %run_id, "ReporterAgent finished");
-                if !response.trim().is_empty() {
-                    yield Ok(AgentEvent::Message(MessageEvent::assistant(&response)));
+                // The reporter's text response typically echoes the SaveReportTool
+                // result ("Post-mortem saved to …") which rig-rs already saw.
+                // Emitting it would duplicate the confirmation, so we extract only
+                // the file path and emit a single clean message.
+                let path_line = response
+                    .lines()
+                    .find(|l| l.contains(".infraware/incidents/"));
+                if let Some(line) = path_line {
+                    let msg = line.trim();
+                    yield Ok(AgentEvent::Message(MessageEvent::assistant(msg)));
                 }
                 yield Ok(AgentEvent::phase(IncidentPhase::Completed));
                 yield Ok(AgentEvent::end());

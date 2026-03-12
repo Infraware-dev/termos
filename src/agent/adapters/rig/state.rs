@@ -199,6 +199,25 @@ impl PendingInterrupt {
         }
     }
 
+    /// Create an incident question interrupt (operator answers investigator question)
+    pub fn incident_question(
+        question: String,
+        options: Option<Vec<String>>,
+        context: IncidentContext,
+        tool_call_id: Option<String>,
+        tool_args: Option<serde_json::Value>,
+    ) -> Self {
+        Self {
+            resume_context: ResumeContext::IncidentQuestion {
+                question,
+                options,
+                context,
+            },
+            tool_call_id,
+            tool_args,
+        }
+    }
+
     /// Create an incident command interrupt (operator approves diagnostic command)
     #[expect(
         clippy::too_many_arguments,
@@ -263,6 +282,15 @@ pub enum ResumeContext {
         risk_level: RiskLevel,
         /// What diagnostic value was expected from this command
         expected_diagnostic_value: String,
+        /// Accumulated investigation context so far
+        context: IncidentContext,
+    },
+    /// Incident investigation in progress — waiting for the operator to answer a question
+    IncidentQuestion {
+        /// The question that was asked
+        question: String,
+        /// Predefined answer choices the user was shown (if any)
+        options: Option<Vec<String>>,
         /// Accumulated investigation context so far
         context: IncidentContext,
     },
