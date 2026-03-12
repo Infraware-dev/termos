@@ -1,11 +1,13 @@
 //! State management for the Rig engine adapter
 
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use tokio::sync::RwLock;
 
 use super::incident::context::{IncidentContext, RiskLevel};
+use super::memory::session_context::{DEFAULT_SESSION_CONTEXT_LIMIT, SessionContextStore};
 use crate::agent::shared::{Message, ThreadId};
 
 /// Maximum number of messages retained per thread before oldest are evicted.
@@ -43,6 +45,9 @@ impl StateStore {
         let state = ThreadState {
             messages: Vec::new(),
             active_run: None,
+            session_context: Arc::new(RwLock::new(SessionContextStore::new(
+                DEFAULT_SESSION_CONTEXT_LIMIT,
+            ))),
         };
 
         self.threads.write().await.insert(thread_id.clone(), state);
@@ -107,6 +112,18 @@ impl StateStore {
     pub async fn thread_count(&self) -> usize {
         self.threads.read().await.len()
     }
+
+    /// Get the session context store for a thread.
+    pub async fn get_session_context(
+        &self,
+        thread_id: &ThreadId,
+    ) -> Option<Arc<RwLock<SessionContextStore>>> {
+        self.threads
+            .read()
+            .await
+            .get(&thread_id.0)
+            .map(|s| Arc::clone(&s.session_context))
+    }
 }
 
 /// State for a single conversation thread
@@ -116,6 +133,8 @@ struct ThreadState {
     messages: Vec<Message>,
     /// Currently active run (if any)
     active_run: Option<RunState>,
+    /// Per-thread session context for ephemeral facts
+    session_context: Arc<RwLock<SessionContextStore>>,
 }
 
 /// State for an active run
@@ -397,6 +416,26 @@ mod tests {
         };
         let debug_str = format!("{:?}", ctx);
         assert!(debug_str.contains("CommandApproval"));
+    }
+
+    #[tokio::test]
+    async fn test_get_session_context() {
+        let store = StateStore::new();
+        let thread_id = store.create_thread().await;
+
+        let ctx = store.get_session_context(&thread_id).await;
+        assert!(ctx.is_some());
+
+        let ctx = ctx.unwrap();
+        let guard = ctx.read().await;
+        assert_eq!(guard.build_preamble(), ""); // empty on creation
+    }
+
+    #[tokio::test]
+    async fn test_get_session_context_nonexistent() {
+        let store = StateStore::new();
+        let fake_id = ThreadId::new("nonexistent");
+        assert!(store.get_session_context(&fake_id).await.is_none());
     }
 
     #[test]
