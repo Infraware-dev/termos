@@ -14,6 +14,7 @@ use rig::providers::anthropic;
 use rig::tool::Tool;
 use schemars::{JsonSchema, schema_for};
 use serde::{Deserialize, Serialize};
+use tokio::sync::RwLock;
 
 use super::context::IncidentContext;
 use crate::agent::adapters::rig::config::RigAgentConfig;
@@ -37,7 +38,7 @@ pub struct SaveReportArgs {
 }
 
 /// Result returned after the report is written.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct SaveReportResult {
     /// Whether the file was saved successfully.
     pub saved: bool,
@@ -47,6 +48,10 @@ pub struct SaveReportResult {
     pub message: String,
 }
 
+/// Shared slot where `SaveReportTool` deposits its result so the pipeline can
+/// read the file path without parsing the LLM's text response.
+pub type SaveReportSlot = Arc<RwLock<Option<SaveReportResult>>>;
+
 /// Error type for the report-save tool.
 #[derive(Debug, thiserror::Error)]
 pub enum SaveReportError {
@@ -55,8 +60,21 @@ pub enum SaveReportError {
 }
 
 /// Rig Tool that writes the post-mortem Markdown to `.infraware/incidents/`.
-#[derive(Debug, Clone, Default)]
-pub struct SaveReportTool;
+///
+/// After writing, deposits the result into the shared [`SaveReportSlot`] so
+/// the pipeline code can read the saved file path without parsing LLM text.
+#[derive(Debug, Clone)]
+pub struct SaveReportTool {
+    /// Shared slot for depositing the result
+    result_slot: SaveReportSlot,
+}
+
+impl SaveReportTool {
+    /// Create a new `SaveReportTool` with the given result slot.
+    pub fn new(result_slot: SaveReportSlot) -> Self {
+        Self { result_slot }
+    }
+}
 
 impl Tool for SaveReportTool {
     const NAME: &'static str = "save_incident_report";
@@ -83,14 +101,11 @@ impl Tool for SaveReportTool {
         }
     }
 
-    #[expect(
-        clippy::manual_async_fn,
-        reason = "rig-rs Tool trait requires impl Future return type"
-    )]
     fn call(
         &self,
         args: Self::Args,
     ) -> impl Future<Output = Result<Self::Output, Self::Error>> + Send {
+        let result_slot = Arc::clone(&self.result_slot);
         async move {
             use tokio::fs;
 
@@ -119,11 +134,13 @@ impl Tool for SaveReportTool {
                 .await
                 .map_err(|e| SaveReportError::Io(e.to_string()))?;
 
-            Ok(SaveReportResult {
+            let result = SaveReportResult {
                 saved: true,
                 path: path.clone(),
                 message: format!("Post-mortem saved to {path}"),
-            })
+            };
+            *result_slot.write().await = Some(result.clone());
+            Ok(result)
         }
     }
 }
@@ -142,7 +159,7 @@ pub struct SavePlanArgs {
 }
 
 /// Result returned after the plan is written.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct SavePlanResult {
     /// Whether the file was saved successfully.
     pub saved: bool,
@@ -152,6 +169,10 @@ pub struct SavePlanResult {
     pub message: String,
 }
 
+/// Shared slot where `SavePlanTool` deposits its result so the pipeline can
+/// read the file path without parsing the LLM's text response.
+pub type SavePlanSlot = Arc<RwLock<Option<SavePlanResult>>>;
+
 /// Error type for the plan-save tool.
 #[derive(Debug, thiserror::Error)]
 pub enum SavePlanError {
@@ -160,8 +181,21 @@ pub enum SavePlanError {
 }
 
 /// Rig Tool that writes the remediation plan Markdown to `.infraware/plans/`.
-#[derive(Debug, Clone, Default)]
-pub struct SavePlanTool;
+///
+/// After writing, deposits the result into the shared [`SavePlanSlot`] so
+/// the pipeline code can read the saved file path without parsing LLM text.
+#[derive(Debug, Clone)]
+pub struct SavePlanTool {
+    /// Shared slot for depositing the result
+    result_slot: SavePlanSlot,
+}
+
+impl SavePlanTool {
+    /// Create a new `SavePlanTool` with the given result slot.
+    pub fn new(result_slot: SavePlanSlot) -> Self {
+        Self { result_slot }
+    }
+}
 
 impl Tool for SavePlanTool {
     const NAME: &'static str = "save_remediation_plan";
@@ -188,14 +222,11 @@ impl Tool for SavePlanTool {
         }
     }
 
-    #[expect(
-        clippy::manual_async_fn,
-        reason = "rig-rs Tool trait requires impl Future return type"
-    )]
     fn call(
         &self,
         args: Self::Args,
     ) -> impl Future<Output = Result<Self::Output, Self::Error>> + Send {
+        let result_slot = Arc::clone(&self.result_slot);
         async move {
             use tokio::fs;
 
@@ -224,11 +255,13 @@ impl Tool for SavePlanTool {
                 .await
                 .map_err(|e| SavePlanError::Io(e.to_string()))?;
 
-            Ok(SavePlanResult {
+            let result = SavePlanResult {
                 saved: true,
                 path: path.clone(),
                 message: format!("Remediation plan saved to {path}"),
-            })
+            };
+            *result_slot.write().await = Some(result.clone());
+            Ok(result)
         }
     }
 }
@@ -303,13 +336,17 @@ pub fn build_analyst(
 ///
 /// Equipped with `SaveReportTool` to persist the Markdown post-mortem.
 /// Memory preambles are injected as read-only context.
+///
+/// Returns the agent and a shared slot that the `SaveReportTool` deposits its
+/// result into after writing the file. The caller reads the slot to get the
+/// report path instead of parsing LLM text.
 pub fn build_reporter(
     client: &anthropic::Client,
     config: &RigAgentConfig,
     context: &IncidentContext,
     analysis_json: &str,
     preambles: &Preambles,
-) -> RigAgent {
+) -> (RigAgent, SaveReportSlot) {
     let system_prompt = format!(
         "{}\n\n## Incident Context\n\n{}\n\n## Analysis\n\n{}",
         REPORTER_PROMPT,
@@ -317,21 +354,29 @@ pub fn build_reporter(
         analysis_json
     );
 
-    client
+    let report_slot: SaveReportSlot = Arc::new(RwLock::new(None));
+
+    let agent = client
         .agent(&config.model)
         .preamble(&system_prompt)
         .append_preamble(&preambles.memory)
         .append_preamble(&preambles.session)
         .max_tokens(config.max_tokens as u64)
         .temperature(f64::from(config.temperature))
-        .tool(SaveReportTool)
-        .build()
+        .tool(SaveReportTool::new(Arc::clone(&report_slot)))
+        .build();
+
+    (agent, report_slot)
 }
 
 /// Build the `PlannerAgent`.
 ///
 /// Equipped with `AskUserTool` for clarifying questions and `SavePlanTool`
 /// to persist the remediation plan. Memory tools are also included.
+///
+/// Returns the agent and a shared slot that the `SavePlanTool` deposits its
+/// result into after writing the file. The caller reads the slot to get the
+/// plan path instead of parsing LLM text.
 pub fn build_planner(
     client: &anthropic::Client,
     config: &RigAgentConfig,
@@ -339,7 +384,7 @@ pub fn build_planner(
     analysis_text: &str,
     memory_ctx: &MemoryContext,
     preambles: &Preambles,
-) -> RigAgent {
+) -> (RigAgent, SavePlanSlot) {
     let system_prompt = format!(
         "{}\n\n## Incident Context\n\n{}\n\n## Analysis\n\n{}",
         PLANNER_PROMPT,
@@ -347,7 +392,9 @@ pub fn build_planner(
         analysis_text
     );
 
-    client
+    let plan_slot: SavePlanSlot = Arc::new(RwLock::new(None));
+
+    let agent = client
         .agent(&config.model)
         .preamble(&system_prompt)
         .append_preamble(&preambles.memory)
@@ -355,12 +402,14 @@ pub fn build_planner(
         .max_tokens(config.max_tokens as u64)
         .temperature(f64::from(config.temperature))
         .tool(AskUserTool::new())
-        .tool(SavePlanTool)
+        .tool(SavePlanTool::new(Arc::clone(&plan_slot)))
         .tool(SaveMemoryTool::new(Arc::clone(&memory_ctx.memory_store)))
         .tool(SaveSessionContextTool::new(Arc::clone(
             &memory_ctx.session_context_store,
         )))
-        .build()
+        .build();
+
+    (agent, plan_slot)
 }
 
 /// Build the `ExecutorAgent`.
@@ -659,7 +708,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_save_report_tool_definition() {
-        let tool = SaveReportTool;
+        let tool = SaveReportTool::new(Arc::new(RwLock::new(None)));
         let def = tool.definition(String::new()).await;
         assert_eq!(def.name, "save_incident_report");
         assert!(def.parameters.is_object());
@@ -669,7 +718,7 @@ mod tests {
     async fn test_save_report_writes_file() {
         use std::fs;
 
-        let tool = SaveReportTool;
+        let tool = SaveReportTool::new(Arc::new(RwLock::new(None)));
         let args = SaveReportArgs {
             slug: "test-incident".to_string(),
             content: "# Test Report\n\nThis is a test.".to_string(),
@@ -686,7 +735,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_save_report_rejects_empty_slug() {
-        let tool = SaveReportTool;
+        let tool = SaveReportTool::new(Arc::new(RwLock::new(None)));
         let args = SaveReportArgs {
             slug: "../../..".to_string(),
             content: "# Report".to_string(),
@@ -703,7 +752,7 @@ mod tests {
     async fn test_save_report_sanitizes_slug() {
         use std::fs;
 
-        let tool = SaveReportTool;
+        let tool = SaveReportTool::new(Arc::new(RwLock::new(None)));
         let args = SaveReportArgs {
             slug: "../../my-incident/../../hack".to_string(),
             content: "# Report".to_string(),
@@ -779,7 +828,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_save_plan_tool_definition() {
-        let tool = SavePlanTool;
+        let tool = SavePlanTool::new(Arc::new(RwLock::new(None)));
         let def = tool.definition(String::new()).await;
         assert_eq!(def.name, "save_remediation_plan");
         assert!(def.parameters.is_object());
@@ -789,7 +838,7 @@ mod tests {
     async fn test_save_plan_writes_file() {
         use std::fs;
 
-        let tool = SavePlanTool;
+        let tool = SavePlanTool::new(Arc::new(RwLock::new(None)));
         let args = SavePlanArgs {
             slug: "test-plan".to_string(),
             content: "# Remediation Plan\n\n1. Fix config".to_string(),
@@ -807,7 +856,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_save_plan_rejects_empty_slug() {
-        let tool = SavePlanTool;
+        let tool = SavePlanTool::new(Arc::new(RwLock::new(None)));
         let args = SavePlanArgs {
             slug: "../../..".to_string(),
             content: "# Plan".to_string(),
@@ -824,7 +873,7 @@ mod tests {
     async fn test_save_plan_sanitizes_slug() {
         use std::fs;
 
-        let tool = SavePlanTool;
+        let tool = SavePlanTool::new(Arc::new(RwLock::new(None)));
         let args = SavePlanArgs {
             slug: "../../my-plan/../../hack".to_string(),
             content: "# Plan".to_string(),

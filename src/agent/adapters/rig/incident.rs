@@ -862,7 +862,7 @@ fn run_analysis_and_report(
         let (tx, mut rx) = mpsc::unbounded_channel::<InterceptedToolCall>();
         let hook = HitlHook { tool_call_tx: tx };
 
-        let reporter = agents::build_reporter(&client, &config, &context, &analysis_text, &preambles);
+        let (reporter, report_slot) = agents::build_reporter(&client, &config, &context, &analysis_text, &preambles);
         let reporter_prompt = "Write the post-mortem report and save it using save_incident_report.";
 
         let report_result = reporter
@@ -878,20 +878,20 @@ fn run_analysis_and_report(
         }
 
         match report_result {
-            Ok(response) => {
+            Ok(_response) => {
                 tracing::info!(run_id = %run_id, "ReporterAgent finished");
 
-                // Extract report path from response
-                let report_path = response
-                    .lines()
-                    .find(|l| l.contains(".infraware/incidents/"))
-                    .map(|l| l.trim().to_string())
+                // Read report path from the shared slot (deposited by SaveReportTool)
+                let report_path = report_slot
+                    .read()
+                    .await
+                    .as_ref()
+                    .map(|r| r.path.clone())
                     .unwrap_or_default();
 
                 if !report_path.is_empty() {
-                    yield Ok(AgentEvent::Message(MessageEvent::assistant(
-                        report_path.trim(),
-                    )));
+                    let msg = format!("Post-mortem saved to {report_path}");
+                    yield Ok(AgentEvent::Message(MessageEvent::assistant(&msg)));
                 }
 
                 // Instead of completing, ask if the user wants to create a plan
@@ -953,7 +953,7 @@ pub(super) fn run_planning_step(
         let hook = HitlHook { tool_call_tx: tx };
 
         let preambles = memory_ctx.build_preambles().await;
-        let agent = agents::build_planner(
+        let (agent, plan_slot) = agents::build_planner(
             &client, &config, &context, &analysis_text, &memory_ctx, &preambles,
         );
 
@@ -1006,23 +1006,19 @@ pub(super) fn run_planning_step(
 
         // No tool intercepted — plan should have been saved
         match result {
-            Ok(response) => {
+            Ok(_response) => {
                 tracing::info!(run_id = %run_id, "PlannerAgent finished");
 
-                // Extract plan path from response
-                let plan_path = response
-                    .lines()
-                    .find(|l| l.contains(".infraware/plans/"))
-                    .map(|l| {
-                        l.trim()
-                            .trim_start_matches("Remediation plan saved to ")
-                            .trim()
-                            .to_string()
-                    })
+                // Read plan path from the shared slot (deposited by SavePlanTool)
+                let plan_path = plan_slot
+                    .read()
+                    .await
+                    .as_ref()
+                    .map(|r| r.path.clone())
                     .unwrap_or_default();
 
                 if plan_path.is_empty() {
-                    tracing::error!(run_id = %run_id, "PlannerAgent did not return plan path");
+                    tracing::error!(run_id = %run_id, "SavePlanTool was not called — plan not saved");
                     yield Err(AgentError::Other(anyhow::anyhow!(
                         "Planner did not save the plan"
                     )));
