@@ -1,13 +1,22 @@
 //! Multi-agent incident investigation pipeline.
 //!
-//! Sequences three specialised rig-rs agents:
+//! Sequences five specialised rig-rs agents:
 //! 1. `InvestigatorAgent` — collects evidence via CLI (HITL on every command)
 //! 2. `AnalystAgent`      — pure LLM reasoning, produces an analysis JSON
 //! 3. `ReporterAgent`     — writes the post-mortem Markdown to disk
+//! 4. `PlannerAgent`      — creates a remediation plan (HITL for scoping questions)
+//! 5. `ExecutorAgent`     — executes the plan step by step (HITL on every command)
 //!
 //! Entry points (called from `orchestrator.rs`):
 //! - [`start_investigation`]          — start Phase 1 after operator confirms the incident
 //! - [`resume_investigation_command`] — resume Phase 1 after each approved command
+//! - [`start_planning`]               — start Phase 4 after operator confirms plan creation
+//! - [`resume_planning_question`]     — resume Phase 4 after operator answers planner question
+//! - [`start_plan_review`]            — show plan and ask for changes
+//! - [`start_execution`]              — start Phase 5 after operator confirms execution
+//! - [`resume_execution_command`]     — resume Phase 5 after each approved command
+//! - [`resume_execution_with_output`] — resume Phase 5 with PTY-captured output
+//! - [`resume_execution_question`]    — resume Phase 5 after operator answers executor question
 
 pub mod agents;
 pub mod context;
@@ -31,6 +40,9 @@ use crate::agent::traits::EventStream;
 
 /// Safety guard to avoid endless HITL loops during investigation.
 const MAX_INVESTIGATION_COMMANDS: usize = 50;
+
+/// Safety guard to avoid endless plan revision loops.
+const MAX_PLAN_REVISIONS: usize = 10;
 
 // ---------------------------------------------------------------------------
 // Public entry points
@@ -297,6 +309,314 @@ pub fn resume_investigation_question(
     })
 }
 
+/// Start the planning phase (Phase 4: Planning).
+///
+/// Called by `create_resume_stream` when the operator confirms plan creation
+/// at the `IncidentPlanConfirmation` gate.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "All fields required to drive planner agent + state + memory"
+)]
+pub fn start_planning(
+    client: Arc<anthropic::Client>,
+    config: Arc<RigAgentConfig>,
+    state: Arc<StateStore>,
+    thread_id: crate::agent::shared::ThreadId,
+    context: IncidentContext,
+    analysis_text: String,
+    run_id: String,
+    memory_ctx: MemoryContext,
+) -> EventStream {
+    Box::pin(stream! {
+        yield Ok(AgentEvent::phase(IncidentPhase::Planning));
+
+        let prompt = "Create a detailed remediation plan based on the incident analysis. \
+                      Start by asking the operator any clarifying questions you need, \
+                      then write and save the plan.";
+
+        let events = run_planning_step(
+            Arc::clone(&client),
+            Arc::clone(&config),
+            Arc::clone(&state),
+            thread_id.clone(),
+            context,
+            analysis_text,
+            prompt.to_string(),
+            0, // revision_round
+            run_id.clone(),
+            memory_ctx.clone(),
+        );
+
+        for await event in events {
+            yield event;
+        }
+    })
+}
+
+/// Resume planning after the operator answered a planner question.
+///
+/// Called by `create_resume_stream` when the operator answers an
+/// `IncidentPlannerQuestion` interrupt.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "All fields restored from stored interrupt context"
+)]
+pub fn resume_planning_question(
+    client: Arc<anthropic::Client>,
+    config: Arc<RigAgentConfig>,
+    state: Arc<StateStore>,
+    thread_id: crate::agent::shared::ThreadId,
+    question: String,
+    answer: String,
+    context: IncidentContext,
+    analysis_text: String,
+    revision_round: usize,
+    run_id: String,
+    memory_ctx: MemoryContext,
+) -> EventStream {
+    Box::pin(stream! {
+        let prompt = format!(
+            "You asked the operator: \"{}\"\n\
+             The operator answered: \"{}\"\n\n\
+             Continue creating the remediation plan based on this information. \
+             If you need more clarification, use ask_user. \
+             When the plan is ready, save it using save_remediation_plan.",
+            question, answer
+        );
+
+        let events = run_planning_step(
+            Arc::clone(&client),
+            Arc::clone(&config),
+            Arc::clone(&state),
+            thread_id.clone(),
+            context,
+            analysis_text,
+            prompt,
+            revision_round,
+            run_id.clone(),
+            memory_ctx.clone(),
+        );
+
+        for await event in events {
+            yield event;
+        }
+    })
+}
+
+/// Start the execution phase (Phase 5: Executing).
+///
+/// Called by `create_resume_stream` when the operator confirms plan execution
+/// at the `IncidentExecutionConfirmation` gate.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "All fields required to drive executor agent + state + memory"
+)]
+pub fn start_execution(
+    client: Arc<anthropic::Client>,
+    config: Arc<RigAgentConfig>,
+    state: Arc<StateStore>,
+    thread_id: crate::agent::shared::ThreadId,
+    plan_content: String,
+    plan_path: String,
+    run_id: String,
+    memory_ctx: MemoryContext,
+) -> EventStream {
+    Box::pin(stream! {
+        yield Ok(AgentEvent::phase(IncidentPhase::Executing));
+
+        let prompt = "Execute the remediation plan step by step. Start with step 1.";
+
+        let events = run_execution_step(
+            Arc::clone(&client),
+            Arc::clone(&config),
+            Arc::clone(&state),
+            thread_id.clone(),
+            plan_content,
+            plan_path,
+            prompt.to_string(),
+            run_id.clone(),
+            memory_ctx.clone(),
+        );
+
+        for await event in events {
+            yield event;
+        }
+    })
+}
+
+/// Resume execution after a remediation command was approved and executed.
+///
+/// Called by `create_resume_stream` when the operator approves an
+/// `IncidentPlanCommand` interrupt.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "All fields restored from stored interrupt context"
+)]
+pub fn resume_execution_command(
+    client: Arc<anthropic::Client>,
+    config: Arc<RigAgentConfig>,
+    state: Arc<StateStore>,
+    thread_id: crate::agent::shared::ThreadId,
+    command: String,
+    motivation: String,
+    needs_continuation: bool,
+    plan_content: String,
+    plan_path: String,
+    run_id: String,
+    timeout_secs: u64,
+    memory_ctx: MemoryContext,
+) -> EventStream {
+    Box::pin(stream! {
+        let raw = super::shell::spawn_command(&command, timeout_secs).await;
+        let output = if raw.trim().is_empty() {
+            "(no output — command produced no stdout/stderr)".to_string()
+        } else {
+            raw
+        };
+
+        let output_block = format!("```\n$ {}\n{}\n```", command, output.trim());
+        yield Ok(AgentEvent::Message(MessageEvent::assistant(&output_block)));
+
+        if !needs_continuation {
+            yield Ok(AgentEvent::end());
+            return;
+        }
+
+        let prompt = format!(
+            "You are executing a remediation plan.\n\n\
+             The command `{}` (motivation: {}) produced this output:\n{}\n\n\
+             Assess whether this step succeeded. If it did, continue to the next step. \
+             If it failed, use ask_user to ask the operator what to do.",
+            command, motivation, output.trim()
+        );
+
+        let events = run_execution_step(
+            Arc::clone(&client),
+            Arc::clone(&config),
+            Arc::clone(&state),
+            thread_id.clone(),
+            plan_content,
+            plan_path,
+            prompt,
+            run_id.clone(),
+            memory_ctx.clone(),
+        );
+
+        for await event in events {
+            yield event;
+        }
+    })
+}
+
+/// Resume execution with pre-provided command output from the terminal PTY.
+///
+/// Identical to `resume_execution_command` but skips `spawn_command`.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "All fields restored from stored interrupt context"
+)]
+pub fn resume_execution_with_output(
+    client: Arc<anthropic::Client>,
+    config: Arc<RigAgentConfig>,
+    state: Arc<StateStore>,
+    thread_id: crate::agent::shared::ThreadId,
+    command: String,
+    motivation: String,
+    needs_continuation: bool,
+    plan_content: String,
+    plan_path: String,
+    run_id: String,
+    output: String,
+    memory_ctx: MemoryContext,
+) -> EventStream {
+    Box::pin(stream! {
+        let output = if output.trim().is_empty() {
+            "(no output — command produced no stdout/stderr)".to_string()
+        } else {
+            output
+        };
+
+        let output_block = format!("```\n$ {}\n{}\n```", command, output.trim());
+        yield Ok(AgentEvent::Message(MessageEvent::assistant(&output_block)));
+
+        if !needs_continuation {
+            yield Ok(AgentEvent::end());
+            return;
+        }
+
+        let prompt = format!(
+            "You are executing a remediation plan.\n\n\
+             The command `{}` (motivation: {}) produced this output:\n{}\n\n\
+             Assess whether this step succeeded. If it did, continue to the next step. \
+             If it failed, use ask_user to ask the operator what to do.",
+            command, motivation, output.trim()
+        );
+
+        let events = run_execution_step(
+            Arc::clone(&client),
+            Arc::clone(&config),
+            Arc::clone(&state),
+            thread_id.clone(),
+            plan_content,
+            plan_path,
+            prompt,
+            run_id.clone(),
+            memory_ctx.clone(),
+        );
+
+        for await event in events {
+            yield event;
+        }
+    })
+}
+
+/// Resume execution after the operator answered a question (e.g., rollback/skip/abort).
+///
+/// Called by `create_resume_stream` when the operator answers an
+/// `IncidentExecutorQuestion` interrupt.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "All fields restored from stored interrupt context"
+)]
+pub fn resume_execution_question(
+    client: Arc<anthropic::Client>,
+    config: Arc<RigAgentConfig>,
+    state: Arc<StateStore>,
+    thread_id: crate::agent::shared::ThreadId,
+    question: String,
+    answer: String,
+    plan_content: String,
+    plan_path: String,
+    run_id: String,
+    memory_ctx: MemoryContext,
+) -> EventStream {
+    Box::pin(stream! {
+        let prompt = format!(
+            "You are executing a remediation plan.\n\n\
+             You asked the operator: \"{}\"\n\
+             The operator answered: \"{}\"\n\n\
+             Continue executing the plan based on this response.",
+            question, answer
+        );
+
+        let events = run_execution_step(
+            Arc::clone(&client),
+            Arc::clone(&config),
+            Arc::clone(&state),
+            thread_id.clone(),
+            plan_content,
+            plan_path,
+            prompt,
+            run_id.clone(),
+            memory_ctx.clone(),
+        );
+
+        for await event in events {
+            yield event;
+        }
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
@@ -369,6 +689,8 @@ fn run_investigation_step(
                             for await event in run_analysis_and_report(
                                 Arc::clone(&client),
                                 Arc::clone(&config),
+                                Arc::clone(&state),
+                                thread_id.clone(),
                                 context,
                                 forced_findings,
                                 run_id.clone(),
@@ -395,6 +717,8 @@ fn run_investigation_step(
                             for await event in run_analysis_and_report(
                                 Arc::clone(&client),
                                 Arc::clone(&config),
+                                Arc::clone(&state),
+                                thread_id.clone(),
                                 context,
                                 forced_findings,
                                 run_id.clone(),
@@ -468,6 +792,8 @@ fn run_investigation_step(
                 for await event in run_analysis_and_report(
                     Arc::clone(&client),
                     Arc::clone(&config),
+                    Arc::clone(&state),
+                    thread_id.clone(),
                     context,
                     findings,
                     run_id.clone(),
@@ -485,9 +811,18 @@ fn run_investigation_step(
 }
 
 /// Run Phase 2 (AnalystAgent) followed by Phase 3 (ReporterAgent).
+///
+/// After the reporter saves the post-mortem, chains to a plan confirmation
+/// HITL gate instead of completing the pipeline.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "All fields required to drive analyst/reporter + state for plan gate"
+)]
 fn run_analysis_and_report(
     client: Arc<anthropic::Client>,
     config: Arc<RigAgentConfig>,
+    state: Arc<StateStore>,
+    thread_id: crate::agent::shared::ThreadId,
     context: IncidentContext,
     investigation_findings: String,
     run_id: String,
@@ -545,23 +880,407 @@ fn run_analysis_and_report(
         match report_result {
             Ok(response) => {
                 tracing::info!(run_id = %run_id, "ReporterAgent finished");
-                // The reporter's text response typically echoes the SaveReportTool
-                // result ("Post-mortem saved to …") which rig-rs already saw.
-                // Emitting it would duplicate the confirmation, so we extract only
-                // the file path and emit a single clean message.
-                let path_line = response
+
+                // Extract report path from response
+                let report_path = response
                     .lines()
-                    .find(|l| l.contains(".infraware/incidents/"));
-                if let Some(line) = path_line {
-                    let msg = line.trim();
-                    yield Ok(AgentEvent::Message(MessageEvent::assistant(msg)));
+                    .find(|l| l.contains(".infraware/incidents/"))
+                    .map(|l| l.trim().to_string())
+                    .unwrap_or_default();
+
+                if !report_path.is_empty() {
+                    yield Ok(AgentEvent::Message(MessageEvent::assistant(
+                        report_path.trim(),
+                    )));
                 }
-                yield Ok(AgentEvent::phase(IncidentPhase::Completed));
-                yield Ok(AgentEvent::end());
+
+                // Instead of completing, ask if the user wants to create a plan
+                let question = "Would you like to create a remediation plan to fix this issue?".to_string();
+                let options = vec![
+                    "Yes, create plan".to_string(),
+                    "No, skip".to_string(),
+                ];
+
+                let pending = PendingInterrupt::incident_plan_confirmation(
+                    context,
+                    analysis_text.clone(),
+                    report_path,
+                );
+                let _ = state.store_interrupt(&thread_id, pending).await;
+
+                yield Ok(AgentEvent::updates_with_interrupt(
+                    HitlMarker::Question {
+                        question,
+                        options: Some(options),
+                    }
+                    .into(),
+                ));
             }
             Err(e) => {
                 tracing::error!(run_id = %run_id, error = ?e, "ReporterAgent failed");
                 yield Err(AgentError::Other(anyhow::anyhow!("Reporter error: {}", e)));
+            }
+        }
+    })
+}
+
+/// Run a single planning turn with the PlannerAgent.
+///
+/// If the agent calls `ask_user`, intercepts it and stores an
+/// `IncidentPlannerQuestion` interrupt, then returns.
+/// If the agent calls `save_remediation_plan`, it executes (not intercepted),
+/// then chains to the review loop.
+/// If the agent returns text without a tool call, it means the plan was saved
+/// and we proceed to the review loop.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "All fields required to drive planner agent + state + memory"
+)]
+pub(super) fn run_planning_step(
+    client: Arc<anthropic::Client>,
+    config: Arc<RigAgentConfig>,
+    state: Arc<StateStore>,
+    thread_id: crate::agent::shared::ThreadId,
+    context: IncidentContext,
+    analysis_text: String,
+    prompt: String,
+    revision_round: usize,
+    run_id: String,
+    memory_ctx: MemoryContext,
+) -> EventStream {
+    Box::pin(stream! {
+        let (tx, mut rx) = mpsc::unbounded_channel::<InterceptedToolCall>();
+        let hook = HitlHook { tool_call_tx: tx };
+
+        let preambles = memory_ctx.build_preambles().await;
+        let agent = agents::build_planner(
+            &client, &config, &context, &analysis_text, &memory_ctx, &preambles,
+        );
+
+        tracing::info!(
+            thread_id = %thread_id,
+            run_id = %run_id,
+            revision_round,
+            "Running PlannerAgent turn"
+        );
+
+        let result = agent
+            .prompt(&prompt)
+            .max_turns(3) // Allow save_remediation_plan tool to execute
+            .with_hook(hook)
+            .await;
+
+        // Check if ask_user was intercepted
+        if let Ok(intercepted) = rx.try_recv() {
+            if intercepted.tool_name == "ask_user"
+                && let Ok(args) = serde_json::from_str::<AskUserArgs>(&intercepted.args)
+            {
+                let pending = PendingInterrupt::incident_planner_question(
+                    args.question.clone(),
+                    args.options.clone(),
+                    context,
+                    analysis_text,
+                    revision_round,
+                    false, // is_review (scoping question from PlannerAgent)
+                    None,  // plan_content
+                    None,  // plan_path
+                    intercepted.tool_call_id,
+                    serde_json::from_str(&intercepted.args).ok(),
+                );
+                let _ = state.store_interrupt(&thread_id, pending).await;
+
+                yield Ok(AgentEvent::updates_with_interrupt(
+                    HitlMarker::Question {
+                        question: args.question,
+                        options: args.options,
+                    }
+                    .into(),
+                ));
+                return;
+            }
+            tracing::warn!(
+                tool = %intercepted.tool_name,
+                "Unexpected tool intercepted in planner"
+            );
+        }
+
+        // No tool intercepted — plan should have been saved
+        match result {
+            Ok(response) => {
+                tracing::info!(run_id = %run_id, "PlannerAgent finished");
+
+                // Extract plan path from response
+                let plan_path = response
+                    .lines()
+                    .find(|l| l.contains(".infraware/plans/"))
+                    .map(|l| {
+                        l.trim()
+                            .trim_start_matches("Remediation plan saved to ")
+                            .trim()
+                            .to_string()
+                    })
+                    .unwrap_or_default();
+
+                if plan_path.is_empty() {
+                    tracing::error!(run_id = %run_id, "PlannerAgent did not return plan path");
+                    yield Err(AgentError::Other(anyhow::anyhow!(
+                        "Planner did not save the plan"
+                    )));
+                    return;
+                }
+
+                // Read the plan from disk for the review loop
+                match tokio::fs::read_to_string(&plan_path).await {
+                    Ok(plan_content) => {
+                        for await event in start_plan_review(
+                            Arc::clone(&client),
+                            Arc::clone(&config),
+                            Arc::clone(&state),
+                            thread_id.clone(),
+                            context,
+                            plan_content,
+                            plan_path,
+                            analysis_text,
+                            revision_round,
+                            run_id.clone(),
+                            memory_ctx.clone(),
+                        ) {
+                            yield event;
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!(run_id = %run_id, error = ?e, "Failed to read plan file");
+                        yield Err(AgentError::Other(anyhow::anyhow!(
+                            "Failed to read plan: {}", e
+                        )));
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::error!(run_id = %run_id, error = ?e, "PlannerAgent failed");
+                yield Err(AgentError::Other(anyhow::anyhow!("Planner error: {}", e)));
+            }
+        }
+    })
+}
+
+/// Show the plan to the operator and ask for changes.
+///
+/// Part of the review loop: shows plan content, asks if changes are needed.
+/// If yes, re-runs the PlannerAgent with feedback. If no, proceeds to
+/// execution confirmation.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "All fields required for review loop context"
+)]
+pub fn start_plan_review(
+    _client: Arc<anthropic::Client>,
+    _config: Arc<RigAgentConfig>,
+    state: Arc<StateStore>,
+    thread_id: crate::agent::shared::ThreadId,
+    context: IncidentContext,
+    plan_content: String,
+    plan_path: String,
+    analysis_text: String,
+    revision_round: usize,
+    run_id: String,
+    _memory_ctx: MemoryContext,
+) -> EventStream {
+    Box::pin(stream! {
+        // Show plan content to operator
+        let plan_message = format!(
+            "**Remediation plan saved to `{}`:**\n\n{}",
+            plan_path, plan_content
+        );
+        yield Ok(AgentEvent::Message(MessageEvent::assistant(&plan_message)));
+
+        if revision_round >= MAX_PLAN_REVISIONS {
+            tracing::warn!(
+                run_id = %run_id,
+                revision_round,
+                "Max plan revisions reached, proceeding to execution confirmation"
+            );
+            yield Ok(AgentEvent::Message(MessageEvent::assistant(
+                "Maximum revision rounds reached. Proceeding to execution confirmation."
+            )));
+        }
+
+        // Ask if changes are needed
+        let question = if revision_round >= MAX_PLAN_REVISIONS {
+            "Do you want to execute this plan?".to_string()
+        } else {
+            "Would you like to change anything in the plan?".to_string()
+        };
+
+        let options = if revision_round >= MAX_PLAN_REVISIONS {
+            vec!["Yes, execute the plan".to_string(), "No, skip execution".to_string()]
+        } else {
+            vec!["Yes, I want changes".to_string(), "No, proceed to execution".to_string()]
+        };
+
+        if revision_round >= MAX_PLAN_REVISIONS {
+            // Max revisions — go directly to execution confirmation
+            let pending = PendingInterrupt::incident_execution_confirmation(
+                context,
+                plan_content,
+                plan_path,
+            );
+            let _ = state.store_interrupt(&thread_id, pending).await;
+
+            yield Ok(AgentEvent::updates_with_interrupt(
+                HitlMarker::Question {
+                    question,
+                    options: Some(options),
+                }
+                .into(),
+            ));
+        } else {
+            // Normal review — ask for changes (carry plan content for the orchestrator)
+            let pending = PendingInterrupt::incident_planner_question(
+                question.clone(),
+                Some(options.clone()),
+                context,
+                analysis_text,
+                revision_round,
+                true, // is_review
+                Some(plan_content),
+                Some(plan_path),
+                None,
+                None,
+            );
+            let _ = state.store_interrupt(&thread_id, pending).await;
+
+            yield Ok(AgentEvent::updates_with_interrupt(
+                HitlMarker::Question {
+                    question,
+                    options: Some(options),
+                }
+                .into(),
+            ));
+        }
+    })
+}
+
+/// Run a single execution turn with the ExecutorAgent.
+///
+/// If the agent calls `execute_diagnostic_command`, intercepts it and stores
+/// an `IncidentPlanCommand` interrupt, then returns.
+/// If the agent calls `ask_user`, intercepts it and stores an
+/// `IncidentExecutorQuestion` interrupt, then returns.
+/// If the agent returns text (no tool call), execution is complete.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "All fields required to drive executor agent + state + memory"
+)]
+fn run_execution_step(
+    client: Arc<anthropic::Client>,
+    config: Arc<RigAgentConfig>,
+    state: Arc<StateStore>,
+    thread_id: crate::agent::shared::ThreadId,
+    plan_content: String,
+    plan_path: String,
+    prompt: String,
+    run_id: String,
+    memory_ctx: MemoryContext,
+) -> EventStream {
+    Box::pin(stream! {
+        let (tx, mut rx) = mpsc::unbounded_channel::<InterceptedToolCall>();
+        let hook = HitlHook { tool_call_tx: tx };
+
+        let preambles = memory_ctx.build_preambles().await;
+        let agent = agents::build_executor(
+            &client, &config, &plan_content, &memory_ctx, &preambles,
+        );
+
+        tracing::info!(
+            thread_id = %thread_id,
+            run_id = %run_id,
+            "Running ExecutorAgent turn"
+        );
+
+        let result = agent
+            .prompt(&prompt)
+            .max_turns(1)
+            .with_hook(hook)
+            .await;
+
+        // Check if a tool call was intercepted
+        if let Ok(intercepted) = rx.try_recv() {
+            match intercepted.tool_name.as_str() {
+                "execute_diagnostic_command" => {
+                    if let Ok(args) = serde_json::from_str::<DiagnosticCommandArgs>(
+                        &intercepted.args,
+                    ) {
+                        let hitl_message = format_hitl_message(&args);
+                        let pending = PendingInterrupt::incident_plan_command(
+                            args.command.clone(),
+                            args.motivation.clone(),
+                            args.needs_continuation,
+                            args.risk_level,
+                            args.expected_diagnostic_value.clone(),
+                            plan_content,
+                            plan_path,
+                            intercepted.tool_call_id,
+                            serde_json::from_str(&intercepted.args).ok(),
+                        );
+                        let _ = state.store_interrupt(&thread_id, pending).await;
+
+                        yield Ok(AgentEvent::updates_with_interrupt(
+                            HitlMarker::CommandApproval {
+                                command: args.command,
+                                message: hitl_message,
+                                needs_continuation: args.needs_continuation,
+                            }
+                            .into(),
+                        ));
+                        return;
+                    }
+                }
+                "ask_user" => {
+                    if let Ok(args) = serde_json::from_str::<AskUserArgs>(&intercepted.args) {
+                        let pending = PendingInterrupt::incident_executor_question(
+                            args.question.clone(),
+                            args.options.clone(),
+                            plan_content,
+                            plan_path,
+                            intercepted.tool_call_id,
+                            serde_json::from_str(&intercepted.args).ok(),
+                        );
+                        let _ = state.store_interrupt(&thread_id, pending).await;
+
+                        yield Ok(AgentEvent::updates_with_interrupt(
+                            HitlMarker::Question {
+                                question: args.question,
+                                options: args.options,
+                            }
+                            .into(),
+                        ));
+                        return;
+                    }
+                }
+                _ => {}
+            }
+            tracing::warn!(
+                tool = %intercepted.tool_name,
+                "Unexpected tool intercepted in executor"
+            );
+        }
+
+        // No tool intercepted — execution complete
+        match result {
+            Ok(summary) => {
+                tracing::info!(run_id = %run_id, "ExecutorAgent finished");
+
+                if !summary.trim().is_empty() {
+                    yield Ok(AgentEvent::Message(MessageEvent::assistant(&summary)));
+                }
+
+                yield Ok(AgentEvent::phase(IncidentPhase::Completed));
+                yield Ok(AgentEvent::end());
+            }
+            Err(e) => {
+                tracing::error!(run_id = %run_id, error = ?e, "ExecutorAgent failed");
+                yield Err(AgentError::Other(anyhow::anyhow!("Executor error: {}", e)));
             }
         }
     })
