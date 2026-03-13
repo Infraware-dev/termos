@@ -738,6 +738,221 @@ pub fn create_resume_stream(
                 yield Ok(AgentEvent::end());
             }
 
+            // Operator confirms/rejects creating a remediation plan
+            (ResumeResponse::Answer { text }, ResumeContext::IncidentPlanConfirmation { context, analysis_text, .. }) => {
+                let is_affirmative = classify_user_response(
+                    &client,
+                    &config,
+                    "Would you like to create a remediation plan to fix this issue?",
+                    &["Yes, create plan", "No, skip"],
+                    text,
+                ).await;
+                if !is_affirmative {
+                    let msg = "Remediation planning skipped.";
+                    yield Ok(AgentEvent::Message(MessageEvent::assistant(msg)));
+                    yield Ok(AgentEvent::phase(crate::agent::IncidentPhase::Completed));
+                    yield Ok(AgentEvent::end());
+                    return;
+                }
+
+                let mut stream = incident::start_planning(
+                    Arc::clone(&client),
+                    Arc::clone(&config),
+                    Arc::clone(&state),
+                    thread_id.clone(),
+                    context.clone(),
+                    analysis_text.clone(),
+                    run_id.clone(),
+                    memory_ctx.clone(),
+                );
+
+                while let Some(event) = stream.next().await {
+                    yield event;
+                }
+            }
+
+            // Operator answered a planner question or review question
+            (ResumeResponse::Answer { text }, ResumeContext::IncidentPlannerQuestion { question, context, analysis_text, revision_round, is_review, plan_content, plan_path, .. }) => {
+                if *is_review {
+                    // Review loop: classify whether user wants to proceed or make changes
+                    // Option 1 = "Yes, I want changes" (affirmative = true = wants changes)
+                    let wants_changes = classify_user_response(
+                        &client,
+                        &config,
+                        question,
+                        &["Yes, I want changes", "No, proceed to execution"],
+                        text,
+                    ).await;
+
+                    if wants_changes {
+                        let revision_prompt = format!(
+                            "The operator reviewed the plan and wants changes:\n\"{}\"\n\n\
+                             Revise the plan based on this feedback and save the updated version \
+                             using save_remediation_plan.",
+                            text
+                        );
+
+                        let mut stream = incident::run_planning_step(
+                            Arc::clone(&client),
+                            Arc::clone(&config),
+                            Arc::clone(&state),
+                            thread_id.clone(),
+                            context.clone(),
+                            analysis_text.clone(),
+                            revision_prompt,
+                            *revision_round + 1,
+                            run_id.clone(),
+                            memory_ctx.clone(),
+                        );
+
+                        while let Some(event) = stream.next().await {
+                            yield event;
+                        }
+                    } else {
+                        // No changes — proceed to execution confirmation
+                        let pc = plan_content.clone().unwrap_or_default();
+                        let pp = plan_path.clone().unwrap_or_default();
+
+                        let pending = PendingInterrupt::incident_execution_confirmation(
+                            context.clone(),
+                            pc,
+                            pp,
+                        );
+                        let _ = state.store_interrupt(&thread_id, pending).await;
+
+                        let question = "Do you want to execute this plan?".to_string();
+                        let options = vec![
+                            "Yes, execute the plan".to_string(),
+                            "No, skip execution".to_string(),
+                        ];
+                        yield Ok(AgentEvent::updates_with_interrupt(
+                            HitlMarker::Question {
+                                question,
+                                options: Some(options),
+                            }
+                            .into(),
+                        ));
+                    }
+                } else {
+                    // Regular planner question (scoping)
+                    let mut stream = incident::resume_planning_question(
+                        Arc::clone(&client),
+                        Arc::clone(&config),
+                        Arc::clone(&state),
+                        thread_id.clone(),
+                        question.clone(),
+                        text.clone(),
+                        context.clone(),
+                        analysis_text.clone(),
+                        *revision_round,
+                        run_id.clone(),
+                        memory_ctx.clone(),
+                    );
+
+                    while let Some(event) = stream.next().await {
+                        yield event;
+                    }
+                }
+            }
+
+            // Operator confirms/rejects executing the plan
+            (ResumeResponse::Answer { text }, ResumeContext::IncidentExecutionConfirmation { plan_content, plan_path, .. }) => {
+                let is_affirmative = classify_user_response(
+                    &client,
+                    &config,
+                    "Do you want to execute this plan?",
+                    &["Yes, execute the plan", "No, skip execution"],
+                    text,
+                ).await;
+                if !is_affirmative {
+                    let msg = "Plan execution skipped.";
+                    yield Ok(AgentEvent::Message(MessageEvent::assistant(msg)));
+                    yield Ok(AgentEvent::phase(crate::agent::IncidentPhase::Completed));
+                    yield Ok(AgentEvent::end());
+                    return;
+                }
+
+                let mut stream = incident::start_execution(
+                    Arc::clone(&client),
+                    Arc::clone(&config),
+                    Arc::clone(&state),
+                    thread_id.clone(),
+                    plan_content.clone(),
+                    plan_path.clone(),
+                    run_id.clone(),
+                    memory_ctx.clone(),
+                );
+
+                while let Some(event) = stream.next().await {
+                    yield event;
+                }
+            }
+
+            // Remediation command executed via terminal PTY
+            (ResumeResponse::CommandOutput { output, .. }, ResumeContext::IncidentPlanCommand { command, motivation, needs_continuation, plan_content, plan_path, .. }) => {
+                let mut stream = incident::resume_execution_with_output(
+                    Arc::clone(&client),
+                    Arc::clone(&config),
+                    Arc::clone(&state),
+                    thread_id.clone(),
+                    command.clone(),
+                    motivation.clone(),
+                    *needs_continuation,
+                    plan_content.clone(),
+                    plan_path.clone(),
+                    run_id.clone(),
+                    output.clone(),
+                    memory_ctx.clone(),
+                );
+
+                while let Some(event) = stream.next().await {
+                    yield event;
+                }
+            }
+
+            // Operator rejected a remediation command
+            (ResumeResponse::Rejected, ResumeContext::IncidentPlanCommand { command, .. }) => {
+                let msg = format!("Remediation command `{}` rejected. Plan execution stopped.", command);
+                yield Ok(AgentEvent::Message(MessageEvent::assistant(&msg)));
+                yield Ok(AgentEvent::end());
+            }
+
+            // Operator rejected plan creation
+            (ResumeResponse::Rejected, ResumeContext::IncidentPlanConfirmation { .. }) => {
+                let msg = "Remediation planning skipped.";
+                yield Ok(AgentEvent::Message(MessageEvent::assistant(msg)));
+                yield Ok(AgentEvent::phase(crate::agent::IncidentPhase::Completed));
+                yield Ok(AgentEvent::end());
+            }
+
+            // Operator rejected plan execution
+            (ResumeResponse::Rejected, ResumeContext::IncidentExecutionConfirmation { .. }) => {
+                let msg = "Plan execution skipped.";
+                yield Ok(AgentEvent::Message(MessageEvent::assistant(msg)));
+                yield Ok(AgentEvent::phase(crate::agent::IncidentPhase::Completed));
+                yield Ok(AgentEvent::end());
+            }
+
+            // Operator answered an executor question (rollback/skip/abort)
+            (ResumeResponse::Answer { text }, ResumeContext::IncidentExecutorQuestion { question, plan_content, plan_path, .. }) => {
+                let mut stream = incident::resume_execution_question(
+                    Arc::clone(&client),
+                    Arc::clone(&config),
+                    Arc::clone(&state),
+                    thread_id.clone(),
+                    question.clone(),
+                    text.clone(),
+                    plan_content.clone(),
+                    plan_path.clone(),
+                    run_id.clone(),
+                    memory_ctx.clone(),
+                );
+
+                while let Some(event) = stream.next().await {
+                    yield event;
+                }
+            }
+
             _ => {
                 yield Err(AgentError::run_not_resumable("Invalid resume response for interrupt type"));
             }
