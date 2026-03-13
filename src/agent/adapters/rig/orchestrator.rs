@@ -779,16 +779,16 @@ pub fn create_resume_stream(
                 tracing::debug!(run_id = %run_id, is_review = %is_review, revision_round = %revision_round, "Resuming planner with operator answer");
                 if *is_review {
                     // Review loop: classify whether user wants to proceed or make changes
-                    // Option 1 = "Yes, I want changes" (affirmative = true = wants changes)
-                    let wants_changes = classify_user_response(
+                    // Option 1 = "Yes, proceed to execution" (affirmative = true = happy with plan)
+                    let happy_with_plan = classify_user_response(
                         &client,
                         &config,
                         question,
-                        &["Yes, I want changes", "No, proceed to execution"],
+                        &["Yes, proceed to execution", "No, I want changes"],
                         text,
                     ).await;
 
-                    if wants_changes {
+                    if !happy_with_plan {
                         tracing::info!(run_id = %run_id, revision_round = %revision_round, "Operator requested plan changes, starting revision");
                         let revision_prompt = format!(
                             "The operator reviewed the plan and wants changes:\n\"{}\"\n\n\

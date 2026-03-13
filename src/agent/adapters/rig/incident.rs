@@ -1117,13 +1117,13 @@ pub fn start_plan_review(
         let question = if revision_round >= MAX_PLAN_REVISIONS {
             "Do you want to execute this plan?".to_string()
         } else {
-            "Would you like to change anything in the plan?".to_string()
+            "Are you happy with this plan?".to_string()
         };
 
         let options = if revision_round >= MAX_PLAN_REVISIONS {
             vec!["Yes, execute the plan".to_string(), "No, skip execution".to_string()]
         } else {
-            vec!["Yes, I want changes".to_string(), "No, proceed to execution".to_string()]
+            vec!["Yes, proceed to execution".to_string(), "No, I want changes".to_string()]
         };
 
         if revision_round >= MAX_PLAN_REVISIONS {
