@@ -328,6 +328,73 @@ pub fn build_reporter(
         .build()
 }
 
+/// Build the `PlannerAgent`.
+///
+/// Equipped with `AskUserTool` for clarifying questions and `SavePlanTool`
+/// to persist the remediation plan. Memory tools are also included.
+pub fn build_planner(
+    client: &anthropic::Client,
+    config: &RigAgentConfig,
+    context: &IncidentContext,
+    analysis_text: &str,
+    memory_ctx: &MemoryContext,
+    preambles: &Preambles,
+) -> RigAgent {
+    let system_prompt = format!(
+        "{}\n\n## Incident Context\n\n{}\n\n## Analysis\n\n{}",
+        PLANNER_PROMPT,
+        context.to_prompt_json(),
+        analysis_text
+    );
+
+    client
+        .agent(&config.model)
+        .preamble(&system_prompt)
+        .append_preamble(&preambles.memory)
+        .append_preamble(&preambles.session)
+        .max_tokens(config.max_tokens as u64)
+        .temperature(f64::from(config.temperature))
+        .tool(AskUserTool::new())
+        .tool(SavePlanTool)
+        .tool(SaveMemoryTool::new(Arc::clone(&memory_ctx.memory_store)))
+        .tool(SaveSessionContextTool::new(Arc::clone(
+            &memory_ctx.session_context_store,
+        )))
+        .build()
+}
+
+/// Build the `ExecutorAgent`.
+///
+/// Equipped with `DiagnosticCommandTool` for executing plan commands (HITL on each)
+/// and `AskUserTool` for failure-handling decisions. Memory tools are also included.
+pub fn build_executor(
+    client: &anthropic::Client,
+    config: &RigAgentConfig,
+    plan_content: &str,
+    memory_ctx: &MemoryContext,
+    preambles: &Preambles,
+) -> RigAgent {
+    let system_prompt = format!(
+        "{}\n\n## Remediation Plan\n\n{}",
+        EXECUTOR_PROMPT, plan_content
+    );
+
+    client
+        .agent(&config.model)
+        .preamble(&system_prompt)
+        .append_preamble(&preambles.memory)
+        .append_preamble(&preambles.session)
+        .max_tokens(config.max_tokens as u64)
+        .temperature(f64::from(config.temperature))
+        .tool(DiagnosticCommandTool)
+        .tool(AskUserTool::new())
+        .tool(SaveMemoryTool::new(Arc::clone(&memory_ctx.memory_store)))
+        .tool(SaveSessionContextTool::new(Arc::clone(
+            &memory_ctx.session_context_store,
+        )))
+        .build()
+}
+
 // ---------------------------------------------------------------------------
 // System prompts
 // ---------------------------------------------------------------------------
@@ -499,6 +566,83 @@ Write a clear, structured Markdown post-mortem and save it using `save_incident_
 - Call `save_incident_report` exactly once with the completed Markdown.
 ";
 
+const PLANNER_PROMPT: &str = "\
+You are a senior SRE creating a remediation plan for a production incident.
+
+## Your Mission
+Based on the root-cause analysis, create a detailed, step-by-step remediation plan \
+that an operator can follow to fix the issue. The plan must be safe, reversible where \
+possible, and include verification steps.
+
+## Plan Format
+Write a Markdown document with this structure:
+
+# Remediation Plan: <incident title>
+
+**Date:** YYYY-MM-DD
+**Risk Level:** Low / Medium / High (overall)
+
+## Prerequisites
+- List any prerequisites (backups, maintenance windows, etc.)
+
+## Steps
+
+### Step 1: <description>
+- **Command:** `<exact shell command>`
+- **Risk:** Low / Medium / High
+- **Expected outcome:** <what should happen>
+- **Rollback:** `<command to undo this step>`
+
+### Step 2: ...
+(continue for all steps)
+
+## Verification
+
+### Verify 1: <what to verify>
+- **Command:** `<verification command>`
+- **Expected outcome:** <success criteria>
+
+## Guidelines
+- Ask the operator clarifying questions using `ask_user` before finalizing the plan. \
+For example, ask about maintenance windows, backup preferences, or which approach \
+they prefer when multiple options exist.
+- Order steps from least risky to most risky when possible.
+- Always include rollback commands for medium and high risk steps.
+- The final steps MUST be verification commands that confirm the fix is working.
+- Prefer read-only verification (curl, status checks) over mutations.
+- Save the plan using `save_remediation_plan` when complete.
+";
+
+const EXECUTOR_PROMPT: &str = "\
+You are a senior SRE executing a remediation plan for a production incident.
+
+## Your Mission
+Execute the remediation plan step by step. For each step, use \
+`execute_diagnostic_command` to run the command. Follow the plan order exactly.
+
+## Rules
+- Execute ONE step at a time using `execute_diagnostic_command`.
+- After each command output, assess whether the step succeeded or failed.
+- If a step succeeds, move to the next step.
+- If a step fails, use `ask_user` to ask the operator whether to:
+  1. Execute the rollback command and retry
+  2. Skip this step and continue
+  3. Abort the plan execution
+- Set `needs_continuation=true` for every command so you can assess the output.
+- Set appropriate `risk_level` and `motivation` matching the plan step.
+- After executing all steps (including verification), provide a summary of:
+  - Steps executed successfully
+  - Steps that failed and what action was taken
+  - Verification results
+  - Overall status (fully resolved / partially resolved / failed)
+
+## Important
+- Do NOT skip verification steps.
+- Do NOT reorder steps unless a previous step failed and the operator chose to skip.
+- Do NOT invent commands not in the plan. Follow the plan exactly.
+- When all steps are complete, respond with your summary text (do NOT call any tool).
+";
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -583,6 +727,8 @@ mod tests {
         assert!(!INVESTIGATOR_PROMPT.is_empty());
         assert!(!ANALYST_PROMPT.is_empty());
         assert!(!REPORTER_PROMPT.is_empty());
+        assert!(!PLANNER_PROMPT.is_empty());
+        assert!(!EXECUTOR_PROMPT.is_empty());
     }
 
     #[test]
@@ -600,6 +746,30 @@ mod tests {
     #[test]
     fn test_reporter_prompt_mentions_save_tool() {
         assert!(REPORTER_PROMPT.contains("save_incident_report"));
+    }
+
+    #[test]
+    fn test_planner_prompt_mentions_key_tools() {
+        assert!(PLANNER_PROMPT.contains("ask_user"));
+        assert!(PLANNER_PROMPT.contains("save_remediation_plan"));
+    }
+
+    #[test]
+    fn test_executor_prompt_mentions_key_tools() {
+        assert!(EXECUTOR_PROMPT.contains("execute_diagnostic_command"));
+        assert!(EXECUTOR_PROMPT.contains("ask_user"));
+    }
+
+    #[test]
+    fn test_planner_prompt_mentions_verification() {
+        assert!(PLANNER_PROMPT.contains("verification"));
+        assert!(PLANNER_PROMPT.contains("Verification"));
+    }
+
+    #[test]
+    fn test_executor_prompt_mentions_rollback() {
+        assert!(EXECUTOR_PROMPT.contains("rollback"));
+        assert!(EXECUTOR_PROMPT.contains("Abort"));
     }
 
     #[test]
