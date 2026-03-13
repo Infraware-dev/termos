@@ -11,6 +11,8 @@ pub enum IncidentPhase {
     Investigating,
     Analyzing,
     Reporting,
+    Planning,
+    Executing,
     Completed,
 }
 

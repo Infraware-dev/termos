@@ -97,6 +97,12 @@ impl<'a> LlmEventHandler<'a> {
                     crate::agent::IncidentPhase::Reporting => {
                         "\r\n\x1b[1;32m📄 Generating post-mortem report...\x1b[0m\r\n"
                     }
+                    crate::agent::IncidentPhase::Planning => {
+                        "\r\n\x1b[1;35m📋 Creating remediation plan...\x1b[0m\r\n"
+                    }
+                    crate::agent::IncidentPhase::Executing => {
+                        "\r\n\x1b[1;31m⚡ Executing remediation plan...\x1b[0m\r\n"
+                    }
                     crate::agent::IncidentPhase::Completed => {
                         "\r\n\x1b[1;34m✅ Incident pipeline completed.\x1b[0m\r\n"
                     }
