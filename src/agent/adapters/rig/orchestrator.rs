@@ -740,6 +740,7 @@ pub fn create_resume_stream(
 
             // Operator confirms/rejects creating a remediation plan
             (ResumeResponse::Answer { text }, ResumeContext::IncidentPlanConfirmation { context, analysis_text, .. }) => {
+                tracing::debug!(run_id = %run_id, "Classifying plan confirmation response");
                 let is_affirmative = classify_user_response(
                     &client,
                     &config,
@@ -748,6 +749,7 @@ pub fn create_resume_stream(
                     text,
                 ).await;
                 if !is_affirmative {
+                    tracing::info!(run_id = %run_id, "Operator declined remediation planning");
                     let msg = "Remediation planning skipped.";
                     yield Ok(AgentEvent::Message(MessageEvent::assistant(msg)));
                     yield Ok(AgentEvent::phase(crate::agent::IncidentPhase::Completed));
@@ -755,6 +757,7 @@ pub fn create_resume_stream(
                     return;
                 }
 
+                tracing::info!(run_id = %run_id, "Operator confirmed remediation planning, starting Phase 4");
                 let mut stream = incident::start_planning(
                     Arc::clone(&client),
                     Arc::clone(&config),
@@ -773,6 +776,7 @@ pub fn create_resume_stream(
 
             // Operator answered a planner question or review question
             (ResumeResponse::Answer { text }, ResumeContext::IncidentPlannerQuestion { question, context, analysis_text, revision_round, is_review, plan_content, plan_path, .. }) => {
+                tracing::debug!(run_id = %run_id, is_review = %is_review, revision_round = %revision_round, "Resuming planner with operator answer");
                 if *is_review {
                     // Review loop: classify whether user wants to proceed or make changes
                     // Option 1 = "Yes, I want changes" (affirmative = true = wants changes)
@@ -785,6 +789,7 @@ pub fn create_resume_stream(
                     ).await;
 
                     if wants_changes {
+                        tracing::info!(run_id = %run_id, revision_round = %revision_round, "Operator requested plan changes, starting revision");
                         let revision_prompt = format!(
                             "The operator reviewed the plan and wants changes:\n\"{}\"\n\n\
                              Revise the plan based on this feedback and save the updated version \
@@ -810,6 +815,7 @@ pub fn create_resume_stream(
                         }
                     } else {
                         // No changes — proceed to execution confirmation
+                        tracing::info!(run_id = %run_id, "Operator approved plan, proceeding to execution confirmation");
                         let pc = plan_content.clone().unwrap_or_default();
                         let pp = plan_path.clone().unwrap_or_default();
 
@@ -835,6 +841,7 @@ pub fn create_resume_stream(
                     }
                 } else {
                     // Regular planner question (scoping)
+                    tracing::debug!(run_id = %run_id, "Resuming planner with scoping answer");
                     let mut stream = incident::resume_planning_question(
                         Arc::clone(&client),
                         Arc::clone(&config),
@@ -857,6 +864,7 @@ pub fn create_resume_stream(
 
             // Operator confirms/rejects executing the plan
             (ResumeResponse::Answer { text }, ResumeContext::IncidentExecutionConfirmation { plan_content, plan_path, .. }) => {
+                tracing::debug!(run_id = %run_id, "Classifying execution confirmation response");
                 let is_affirmative = classify_user_response(
                     &client,
                     &config,
@@ -865,6 +873,7 @@ pub fn create_resume_stream(
                     text,
                 ).await;
                 if !is_affirmative {
+                    tracing::info!(run_id = %run_id, "Operator declined plan execution");
                     let msg = "Plan execution skipped.";
                     yield Ok(AgentEvent::Message(MessageEvent::assistant(msg)));
                     yield Ok(AgentEvent::phase(crate::agent::IncidentPhase::Completed));
@@ -872,6 +881,7 @@ pub fn create_resume_stream(
                     return;
                 }
 
+                tracing::info!(run_id = %run_id, "Operator confirmed plan execution, starting Phase 5");
                 let mut stream = incident::start_execution(
                     Arc::clone(&client),
                     Arc::clone(&config),
@@ -890,6 +900,7 @@ pub fn create_resume_stream(
 
             // Remediation command executed via terminal PTY
             (ResumeResponse::CommandOutput { output, .. }, ResumeContext::IncidentPlanCommand { command, motivation, needs_continuation, plan_content, plan_path, .. }) => {
+                tracing::info!(run_id = %run_id, command = %command, needs_continuation = %needs_continuation, "Received remediation command output from terminal");
                 let mut stream = incident::resume_execution_with_output(
                     Arc::clone(&client),
                     Arc::clone(&config),
@@ -912,6 +923,7 @@ pub fn create_resume_stream(
 
             // Operator rejected a remediation command
             (ResumeResponse::Rejected, ResumeContext::IncidentPlanCommand { command, .. }) => {
+                tracing::info!(run_id = %run_id, command = %command, "Operator rejected remediation command");
                 let msg = format!("Remediation command `{}` rejected. Plan execution stopped.", command);
                 yield Ok(AgentEvent::Message(MessageEvent::assistant(&msg)));
                 yield Ok(AgentEvent::end());
@@ -919,6 +931,7 @@ pub fn create_resume_stream(
 
             // Operator rejected plan creation
             (ResumeResponse::Rejected, ResumeContext::IncidentPlanConfirmation { .. }) => {
+                tracing::info!(run_id = %run_id, "Operator rejected plan creation");
                 let msg = "Remediation planning skipped.";
                 yield Ok(AgentEvent::Message(MessageEvent::assistant(msg)));
                 yield Ok(AgentEvent::phase(crate::agent::IncidentPhase::Completed));
@@ -927,6 +940,7 @@ pub fn create_resume_stream(
 
             // Operator rejected plan execution
             (ResumeResponse::Rejected, ResumeContext::IncidentExecutionConfirmation { .. }) => {
+                tracing::info!(run_id = %run_id, "Operator rejected plan execution");
                 let msg = "Plan execution skipped.";
                 yield Ok(AgentEvent::Message(MessageEvent::assistant(msg)));
                 yield Ok(AgentEvent::phase(crate::agent::IncidentPhase::Completed));
@@ -935,6 +949,7 @@ pub fn create_resume_stream(
 
             // Operator answered an executor question (rollback/skip/abort)
             (ResumeResponse::Answer { text }, ResumeContext::IncidentExecutorQuestion { question, plan_content, plan_path, .. }) => {
+                tracing::debug!(run_id = %run_id, "Resuming executor with operator answer");
                 let mut stream = incident::resume_execution_question(
                     Arc::clone(&client),
                     Arc::clone(&config),

@@ -1087,6 +1087,13 @@ pub fn start_plan_review(
     _memory_ctx: MemoryContext,
 ) -> EventStream {
     Box::pin(stream! {
+        tracing::info!(
+            run_id = %run_id,
+            plan_path = %plan_path,
+            revision_round,
+            "Presenting plan for operator review"
+        );
+
         // Show plan content to operator
         let plan_message = format!(
             "**Remediation plan saved to `{}`:**\n\n{}",
