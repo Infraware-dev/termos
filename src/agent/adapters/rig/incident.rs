@@ -375,6 +375,11 @@ pub fn resume_planning_question(
     memory_ctx: MemoryContext,
 ) -> EventStream {
     Box::pin(stream! {
+        // Record the planning Q&A into the context so subsequent agent
+        // rebuilds see the full history in their system prompt.
+        let mut context = context;
+        context.add_question_answer(&question, &answer);
+
         let prompt = format!(
             "You asked the operator: \"{}\"\n\
              The operator answered: \"{}\"\n\n\
