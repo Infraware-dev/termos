@@ -246,6 +246,125 @@ impl PendingInterrupt {
             tool_args,
         }
     }
+
+    /// Create an incident plan confirmation interrupt (y/n to start planning)
+    pub fn incident_plan_confirmation(
+        context: IncidentContext,
+        analysis_text: String,
+        report_path: String,
+    ) -> Self {
+        Self {
+            resume_context: ResumeContext::IncidentPlanConfirmation {
+                context,
+                analysis_text,
+                report_path,
+            },
+            tool_call_id: None,
+            tool_args: None,
+        }
+    }
+
+    /// Create an incident planner question interrupt
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "All fields required for planner question context"
+    )]
+    pub fn incident_planner_question(
+        question: String,
+        options: Option<Vec<String>>,
+        context: IncidentContext,
+        analysis_text: String,
+        revision_round: usize,
+        is_review: bool,
+        plan_content: Option<String>,
+        plan_path: Option<String>,
+        tool_call_id: Option<String>,
+        tool_args: Option<serde_json::Value>,
+    ) -> Self {
+        Self {
+            resume_context: ResumeContext::IncidentPlannerQuestion {
+                question,
+                options,
+                context,
+                analysis_text,
+                revision_round,
+                is_review,
+                plan_content,
+                plan_path,
+            },
+            tool_call_id,
+            tool_args,
+        }
+    }
+
+    /// Create an incident execution confirmation interrupt (y/n to start execution)
+    pub fn incident_execution_confirmation(
+        context: IncidentContext,
+        plan_content: String,
+        plan_path: String,
+    ) -> Self {
+        Self {
+            resume_context: ResumeContext::IncidentExecutionConfirmation {
+                context,
+                plan_content,
+                plan_path,
+            },
+            tool_call_id: None,
+            tool_args: None,
+        }
+    }
+
+    /// Create an incident plan command interrupt (operator approves remediation command)
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "All fields required for plan execution context"
+    )]
+    pub fn incident_plan_command(
+        command: String,
+        motivation: String,
+        needs_continuation: bool,
+        risk_level: RiskLevel,
+        expected_diagnostic_value: String,
+        plan_content: String,
+        plan_path: String,
+        tool_call_id: Option<String>,
+        tool_args: Option<serde_json::Value>,
+    ) -> Self {
+        Self {
+            resume_context: ResumeContext::IncidentPlanCommand {
+                command,
+                motivation,
+                needs_continuation,
+                risk_level,
+                expected_diagnostic_value,
+                plan_content,
+                plan_path,
+            },
+            tool_call_id,
+            tool_args,
+        }
+    }
+
+    /// Create an incident executor question interrupt (e.g., rollback/skip/abort)
+    pub fn incident_executor_question(
+        question: String,
+        options: Option<Vec<String>>,
+        plan_content: String,
+        plan_path: String,
+        tool_call_id: Option<String>,
+        tool_args: Option<serde_json::Value>,
+    ) -> Self {
+        Self {
+            resume_context: ResumeContext::IncidentExecutorQuestion {
+                question,
+                options,
+                plan_content,
+                plan_path,
+            },
+            tool_call_id,
+            tool_args,
+        }
+    }
 }
 
 /// Context for resuming after an interrupt
@@ -293,6 +412,71 @@ pub enum ResumeContext {
         options: Option<Vec<String>>,
         /// Accumulated investigation context so far
         context: IncidentContext,
+    },
+    /// Waiting for operator to confirm creating a remediation plan
+    IncidentPlanConfirmation {
+        /// Accumulated investigation context
+        context: IncidentContext,
+        /// Analysis text from AnalystAgent
+        analysis_text: String,
+        /// Path to the saved report file
+        report_path: String,
+    },
+    /// Waiting for operator to answer a planner scoping or review question
+    IncidentPlannerQuestion {
+        /// The question asked
+        question: String,
+        /// Predefined answer choices (if any)
+        options: Option<Vec<String>>,
+        /// Accumulated investigation context
+        context: IncidentContext,
+        /// Analysis text from AnalystAgent
+        analysis_text: String,
+        /// Current revision round (0-indexed, max 10)
+        revision_round: usize,
+        /// Whether this is a review loop question (true) or a scoping question (false)
+        is_review: bool,
+        /// Plan content (present when `is_review` is true)
+        plan_content: Option<String>,
+        /// Plan file path (present when `is_review` is true)
+        plan_path: Option<String>,
+    },
+    /// Waiting for operator to confirm executing the remediation plan
+    IncidentExecutionConfirmation {
+        /// Accumulated investigation context
+        context: IncidentContext,
+        /// Full content of the saved plan
+        plan_content: String,
+        /// Path to the saved plan file
+        plan_path: String,
+    },
+    /// Waiting for operator to approve a remediation command during plan execution
+    IncidentPlanCommand {
+        /// The command to execute
+        command: String,
+        /// Why this command is needed
+        motivation: String,
+        /// Whether the ExecutorAgent needs to process the output
+        needs_continuation: bool,
+        /// Risk level declared by the agent
+        risk_level: RiskLevel,
+        /// Expected diagnostic value
+        expected_diagnostic_value: String,
+        /// Full content of the plan being executed
+        plan_content: String,
+        /// Path to the plan file
+        plan_path: String,
+    },
+    /// Waiting for operator to answer an executor question (e.g., rollback/skip/abort)
+    IncidentExecutorQuestion {
+        /// The question asked
+        question: String,
+        /// Predefined answer choices (if any)
+        options: Option<Vec<String>>,
+        /// Full content of the plan being executed
+        plan_content: String,
+        /// Path to the plan file
+        plan_path: String,
     },
 }
 
@@ -476,5 +660,118 @@ mod tests {
         // Both should be empty initially (can't compare directly)
         assert!(format!("{:?}", store1).contains("StateStore"));
         assert!(format!("{:?}", store2).contains("StateStore"));
+    }
+
+    #[test]
+    fn test_pending_interrupt_plan_confirmation() {
+        let ctx = IncidentContext::new("test incident");
+        let interrupt = PendingInterrupt::incident_plan_confirmation(
+            ctx,
+            "analysis text".to_string(),
+            ".infraware/incidents/test.md".to_string(),
+        );
+        match interrupt.resume_context {
+            ResumeContext::IncidentPlanConfirmation { report_path, .. } => {
+                assert_eq!(report_path, ".infraware/incidents/test.md");
+            }
+            _ => panic!("Expected IncidentPlanConfirmation"),
+        }
+    }
+
+    #[test]
+    fn test_pending_interrupt_planner_question() {
+        let ctx = IncidentContext::new("test incident");
+        let interrupt = PendingInterrupt::incident_planner_question(
+            "Which approach?".to_string(),
+            Some(vec!["A".to_string(), "B".to_string()]),
+            ctx,
+            "analysis".to_string(),
+            0,
+            false,
+            None,
+            None,
+            None,
+            None,
+        );
+        match interrupt.resume_context {
+            ResumeContext::IncidentPlannerQuestion {
+                question,
+                revision_round,
+                is_review,
+                ..
+            } => {
+                assert_eq!(question, "Which approach?");
+                assert_eq!(revision_round, 0);
+                assert!(!is_review);
+            }
+            _ => panic!("Expected IncidentPlannerQuestion"),
+        }
+    }
+
+    #[test]
+    fn test_pending_interrupt_execution_confirmation() {
+        let ctx = IncidentContext::new("test incident");
+        let interrupt = PendingInterrupt::incident_execution_confirmation(
+            ctx,
+            "# Plan\n1. Fix config".to_string(),
+            ".infraware/plans/test.md".to_string(),
+        );
+        match interrupt.resume_context {
+            ResumeContext::IncidentExecutionConfirmation { plan_path, .. } => {
+                assert_eq!(plan_path, ".infraware/plans/test.md");
+            }
+            _ => panic!("Expected IncidentExecutionConfirmation"),
+        }
+    }
+
+    #[test]
+    fn test_pending_interrupt_plan_command() {
+        let interrupt = PendingInterrupt::incident_plan_command(
+            "systemctl restart nginx".to_string(),
+            "Restart nginx after config fix".to_string(),
+            true,
+            RiskLevel::Medium,
+            "Service should come back up".to_string(),
+            "# Plan content".to_string(),
+            ".infraware/plans/test.md".to_string(),
+            None,
+            None,
+        );
+        match interrupt.resume_context {
+            ResumeContext::IncidentPlanCommand {
+                command,
+                risk_level,
+                ..
+            } => {
+                assert_eq!(command, "systemctl restart nginx");
+                assert_eq!(risk_level, RiskLevel::Medium);
+            }
+            _ => panic!("Expected IncidentPlanCommand"),
+        }
+    }
+
+    #[test]
+    fn test_pending_interrupt_executor_question() {
+        let interrupt = PendingInterrupt::incident_executor_question(
+            "Step failed. What to do?".to_string(),
+            Some(vec![
+                "Rollback".to_string(),
+                "Skip".to_string(),
+                "Abort".to_string(),
+            ]),
+            "# Plan".to_string(),
+            ".infraware/plans/test.md".to_string(),
+            None,
+            None,
+        );
+        match interrupt.resume_context {
+            ResumeContext::IncidentExecutorQuestion {
+                question, options, ..
+            } => {
+                assert_eq!(question, "Step failed. What to do?");
+                assert_eq!(options.unwrap().len(), 3);
+            }
+            _ => panic!("Expected IncidentExecutorQuestion"),
+        }
     }
 }
