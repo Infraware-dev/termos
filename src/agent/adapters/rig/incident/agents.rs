@@ -129,6 +129,111 @@ impl Tool for SaveReportTool {
 }
 
 // ---------------------------------------------------------------------------
+// SavePlanTool
+// ---------------------------------------------------------------------------
+
+/// Arguments the LLM supplies when saving the remediation plan.
+#[derive(Debug, Deserialize, Serialize, JsonSchema)]
+pub struct SavePlanArgs {
+    /// Filename slug (e.g. "nginx-config-fix") — will be combined with date.
+    pub slug: String,
+    /// Full Markdown content of the remediation plan.
+    pub content: String,
+}
+
+/// Result returned after the plan is written.
+#[derive(Debug, Serialize)]
+pub struct SavePlanResult {
+    /// Whether the file was saved successfully.
+    pub saved: bool,
+    /// Absolute path of the saved file.
+    pub path: String,
+    /// Human-readable message.
+    pub message: String,
+}
+
+/// Error type for the plan-save tool.
+#[derive(Debug, thiserror::Error)]
+pub enum SavePlanError {
+    #[error("Failed to write plan: {0}")]
+    Io(String),
+}
+
+/// Rig Tool that writes the remediation plan Markdown to `.infraware/plans/`.
+#[derive(Debug, Clone, Default)]
+pub struct SavePlanTool;
+
+impl Tool for SavePlanTool {
+    const NAME: &'static str = "save_remediation_plan";
+
+    type Error = SavePlanError;
+    type Args = SavePlanArgs;
+    type Output = SavePlanResult;
+
+    #[expect(
+        clippy::manual_async_fn,
+        reason = "rig-rs Tool trait requires impl Future return type"
+    )]
+    fn definition(&self, _prompt: String) -> impl Future<Output = ToolDefinition> + Send + Sync {
+        async {
+            ToolDefinition {
+                name: Self::NAME.to_string(),
+                description: "Save the completed remediation plan as a Markdown file under \
+                    .infraware/plans/. Call this exactly once when the plan is ready. \
+                    Provide a short slug (e.g. 'nginx-config-fix') and the full Markdown content."
+                    .to_string(),
+                parameters: serde_json::to_value(schema_for!(SavePlanArgs))
+                    .expect("Failed to generate JSON schema for SavePlanArgs"),
+            }
+        }
+    }
+
+    #[expect(
+        clippy::manual_async_fn,
+        reason = "rig-rs Tool trait requires impl Future return type"
+    )]
+    fn call(
+        &self,
+        args: Self::Args,
+    ) -> impl Future<Output = Result<Self::Output, Self::Error>> + Send {
+        async move {
+            use tokio::fs;
+
+            let today = chrono::Utc::now().format("%Y-%m-%d");
+            let sanitized_slug: String = args
+                .slug
+                .trim()
+                .replace(' ', "-")
+                .chars()
+                .filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_')
+                .collect();
+            if sanitized_slug.is_empty() {
+                return Err(SavePlanError::Io(
+                    "slug is empty after sanitization".to_string(),
+                ));
+            }
+            let filename = format!("{today}-{sanitized_slug}.md");
+            let dir = ".infraware/plans";
+
+            fs::create_dir_all(dir)
+                .await
+                .map_err(|e| SavePlanError::Io(e.to_string()))?;
+
+            let path = format!("{dir}/{filename}");
+            fs::write(&path, &args.content)
+                .await
+                .map_err(|e| SavePlanError::Io(e.to_string()))?;
+
+            Ok(SavePlanResult {
+                saved: true,
+                path: path.clone(),
+                message: format!("Remediation plan saved to {path}"),
+            })
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Agent builder functions
 // ---------------------------------------------------------------------------
 
@@ -495,5 +600,76 @@ mod tests {
     #[test]
     fn test_reporter_prompt_mentions_save_tool() {
         assert!(REPORTER_PROMPT.contains("save_incident_report"));
+    }
+
+    #[test]
+    fn test_save_plan_tool_name() {
+        assert_eq!(SavePlanTool::NAME, "save_remediation_plan");
+    }
+
+    #[tokio::test]
+    async fn test_save_plan_tool_definition() {
+        let tool = SavePlanTool;
+        let def = tool.definition(String::new()).await;
+        assert_eq!(def.name, "save_remediation_plan");
+        assert!(def.parameters.is_object());
+    }
+
+    #[tokio::test]
+    async fn test_save_plan_writes_file() {
+        use std::fs;
+
+        let tool = SavePlanTool;
+        let args = SavePlanArgs {
+            slug: "test-plan".to_string(),
+            content: "# Remediation Plan\n\n1. Fix config".to_string(),
+        };
+
+        let result = tool.call(args).await.unwrap();
+        assert!(result.saved);
+        assert!(result.path.contains("test-plan"));
+        assert!(result.path.contains(".infraware/plans/"));
+        assert!(result.path.ends_with(".md"));
+
+        // Cleanup
+        let _ = fs::remove_file(&result.path);
+    }
+
+    #[tokio::test]
+    async fn test_save_plan_rejects_empty_slug() {
+        let tool = SavePlanTool;
+        let args = SavePlanArgs {
+            slug: "../../..".to_string(),
+            content: "# Plan".to_string(),
+        };
+
+        let result = tool.call(args).await;
+        assert!(
+            result.is_err(),
+            "Slug with only path-traversal chars should fail"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_save_plan_sanitizes_slug() {
+        use std::fs;
+
+        let tool = SavePlanTool;
+        let args = SavePlanArgs {
+            slug: "../../my-plan/../../hack".to_string(),
+            content: "# Plan".to_string(),
+        };
+
+        let result = tool.call(args).await.unwrap();
+        assert!(result.saved);
+        assert!(
+            !result.path.contains(".."),
+            "Path should not contain traversal: {}",
+            result.path
+        );
+        assert!(result.path.contains("my-planhack"));
+
+        // Cleanup
+        let _ = fs::remove_file(&result.path);
     }
 }
