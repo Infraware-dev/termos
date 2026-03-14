@@ -75,7 +75,7 @@ impl RigAgentConfig {
         Self {
             api_key: api_key.into(),
             memory: MemoryConfig::default(),
-            model: "claude-sonnet-4-20250514".to_string(),
+            model: CLAUDE_4_SONNET.to_string(),
             max_tokens: 4096,
             system_prompt: DEFAULT_SYSTEM_PROMPT.to_string(),
             timeout_secs: 300,
@@ -175,7 +175,7 @@ mod tests {
     fn test_config_new() {
         let config = RigAgentConfig::new("test-api-key");
         assert_eq!(config.api_key, "test-api-key");
-        assert_eq!(config.model, "claude-sonnet-4-20250514");
+        assert_eq!(config.model, CLAUDE_4_SONNET);
         assert_eq!(config.max_tokens, 4096);
         assert_eq!(config.timeout_secs, 300);
         assert!((config.temperature - 0.7).abs() < f32::EPSILON);
