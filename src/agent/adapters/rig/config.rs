@@ -4,6 +4,7 @@ use std::env;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
+use rig::providers::anthropic::completion::CLAUDE_4_SONNET;
 
 /// Default system prompt for the DevOps assistant
 ///
@@ -87,8 +88,7 @@ impl RigAgentConfig {
         let api_key = env::var("ANTHROPIC_API_KEY")
             .context("ANTHROPIC_API_KEY environment variable is required for rig agent")?;
 
-        let model =
-            env::var("ANTHROPIC_MODEL").unwrap_or_else(|_| "claude-sonnet-4-20250514".to_string());
+        let model = env::var("ANTHROPIC_MODEL").unwrap_or_else(|_| CLAUDE_4_SONNET.to_string());
 
         let max_tokens = env::var("RIG_MAX_TOKENS")
             .ok()

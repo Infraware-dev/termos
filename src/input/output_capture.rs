@@ -2,7 +2,6 @@
 //!
 //! Captures command output for sending to the backend after command completion.
 //! Detects when the shell prompt reappears to determine command completion.
-//! Uses a debounce window to avoid false positives from partial PTY chunks.
 
 use std::time::{Duration, Instant};
 
@@ -27,14 +26,6 @@ static ANSI_RE: Lazy<Regex> = Lazy::new(|| {
 fn strip_ansi(s: &str) -> String {
     ANSI_RE.replace_all(s, "").to_string()
 }
-
-/// Default debounce window before confirming prompt detection.
-///
-/// PTY data arrives in arbitrary chunks, so a prompt-like pattern may appear
-/// at the end of a partial chunk before more output follows. Waiting this long
-/// after the last prompt detection with no new non-prompt data avoids false
-/// positives.
-const DEFAULT_PROMPT_DEBOUNCE: Duration = Duration::from_millis(150);
 
 /// Minimum grace period after capture starts before prompt detection is armed.
 ///
@@ -65,12 +56,9 @@ pub struct OutputCapture {
     lines_received: usize,
     /// Skip the first line (echo of command itself)
     skip_command_echo: bool,
-    /// Timestamp when a prompt pattern was first detected at buffer tail.
-    /// Reset to `None` when new data pushes a non-prompt line to the tail.
-    prompt_detected_at: Option<Instant>,
-    /// Debounce window: prompt must persist this long with no new data before
-    /// we report command completion.
-    prompt_debounce: Duration,
+    /// Whether a prompt pattern was detected at the buffer tail.
+    /// Reset to `false` when new data pushes a non-prompt line to the tail.
+    prompt_detected: bool,
     /// Timestamp when capture started (command was sent to PTY).
     started_at: Option<Instant>,
     /// Grace period after start before prompt detection is armed.
@@ -118,21 +106,19 @@ impl OutputCapture {
             prompt_patterns,
             lines_received: 0,
             skip_command_echo: true,
-            prompt_detected_at: None,
-            prompt_debounce: DEFAULT_PROMPT_DEBOUNCE,
+            prompt_detected: false,
             started_at: None,
             start_grace_period: DEFAULT_START_GRACE_PERIOD,
         }
     }
 
-    /// Create an output capture instance with a custom debounce duration.
+    /// Create an output capture instance with no start grace period.
     ///
-    /// Useful in tests where the default debounce would slow things down.
+    /// Useful in tests where the default grace period would slow things down.
     #[cfg(test)]
     #[must_use]
-    pub fn with_debounce(debounce: Duration) -> Self {
+    pub fn without_grace_period() -> Self {
         let mut capture = Self::new();
-        capture.prompt_debounce = debounce;
         capture.start_grace_period = Duration::ZERO;
         capture
     }
@@ -147,7 +133,7 @@ impl OutputCapture {
         self.current_command = Some(command.to_string());
         self.lines_received = 0;
         self.skip_command_echo = true;
-        self.prompt_detected_at = None;
+        self.prompt_detected = false;
         self.started_at = Some(Instant::now());
     }
 
@@ -199,30 +185,30 @@ impl OutputCapture {
             self.buffer.drain(..keep_from);
         }
 
-        // Update prompt-detection timestamp
+        // Update prompt-detection state
         if self.check_prompt_at_tail() {
-            // Prompt pattern present at buffer tail — start or maintain debounce
-            if self.prompt_detected_at.is_none() {
+            if !self.prompt_detected {
                 tracing::debug!(
-                    "OutputCapture: Prompt detected, starting debounce. Last line: '{}'",
+                    "OutputCapture: Prompt detected. Last line: '{}'",
                     self.get_last_line()
                 );
-                self.prompt_detected_at = Some(Instant::now());
+                self.prompt_detected = true;
             }
         } else {
             // New data pushed a non-prompt line to the tail — reset
-            if self.prompt_detected_at.is_some() {
+            if self.prompt_detected {
                 tracing::debug!("OutputCapture: Prompt detection reset by new output");
             }
-            self.prompt_detected_at = None;
+            self.prompt_detected = false;
         }
     }
 
     /// Returns `true` when the command is considered complete.
     ///
     /// Completion requires:
-    /// 1. A prompt pattern was detected at the buffer tail
-    /// 2. The debounce window has elapsed with no new non-prompt output
+    /// 1. The start grace period has elapsed (avoids false positives from
+    ///    shell echo-back immediately after the command is sent)
+    /// 2. A prompt pattern was detected at the buffer tail
     #[must_use]
     pub fn is_command_complete(&self) -> bool {
         // Grace period: the shell may echo control sequences and redraw
@@ -232,10 +218,7 @@ impl OutputCapture {
             .started_at
             .is_some_and(|t| t.elapsed() >= self.start_grace_period);
 
-        grace_elapsed
-            && self
-                .prompt_detected_at
-                .is_some_and(|t| t.elapsed() >= self.prompt_debounce)
+        grace_elapsed && self.prompt_detected
     }
 
     /// Check whether the last line of the buffer matches a shell prompt pattern.
@@ -294,7 +277,7 @@ impl OutputCapture {
         self.capturing = false;
         self.current_command = None;
         self.lines_received = 0;
-        self.prompt_detected_at = None;
+        self.prompt_detected = false;
         self.started_at = None;
         output
     }
@@ -328,14 +311,14 @@ impl OutputCapture {
 mod tests {
     use super::*;
 
-    /// Helper: create a capture with zero debounce so tests don't need to sleep.
-    fn zero_debounce_capture() -> OutputCapture {
-        OutputCapture::with_debounce(Duration::ZERO)
+    /// Helper: create a capture with no grace period so tests complete instantly.
+    fn test_capture() -> OutputCapture {
+        OutputCapture::without_grace_period()
     }
 
     #[test]
     fn test_basic_capture() {
-        let mut capture = zero_debounce_capture();
+        let mut capture = test_capture();
 
         // Start capture
         capture.start("ls -la");
@@ -360,7 +343,7 @@ mod tests {
 
     #[test]
     fn test_prompt_patterns() {
-        let mut capture = zero_debounce_capture();
+        let mut capture = test_capture();
         capture.start("echo test");
 
         // Test various prompt styles
@@ -384,7 +367,7 @@ mod tests {
 
     #[test]
     fn test_not_prompt() {
-        let mut capture = zero_debounce_capture();
+        let mut capture = test_capture();
         capture.start("cat file.txt");
         capture.lines_received = 2;
 
@@ -408,7 +391,7 @@ mod tests {
 
     #[test]
     fn test_clean_output() {
-        let mut capture = zero_debounce_capture();
+        let mut capture = test_capture();
         capture.start("uname -a");
 
         capture.buffer = "uname -a\nLinux hostname 5.15.0\nuser@host:~$ ".to_string();
@@ -420,7 +403,7 @@ mod tests {
 
     #[test]
     fn test_buffer_limit() {
-        let mut capture = zero_debounce_capture();
+        let mut capture = test_capture();
         capture.start("cat large_file");
 
         // Simulate large output
@@ -459,7 +442,7 @@ mod tests {
 
     #[test]
     fn test_colored_prompt_detection() {
-        let mut capture = zero_debounce_capture();
+        let mut capture = test_capture();
         capture.start("uname -s");
         capture.lines_received = 2;
 
@@ -481,7 +464,7 @@ mod tests {
 
     #[test]
     fn test_dec_private_mode_prompt_detection() {
-        let mut capture = zero_debounce_capture();
+        let mut capture = test_capture();
         capture.start("ls");
         capture.lines_received = 2;
 
@@ -497,7 +480,7 @@ mod tests {
 
     #[test]
     fn test_clean_output_with_ansi() {
-        let mut capture = zero_debounce_capture();
+        let mut capture = test_capture();
         capture.start("uname -s");
 
         // Simulate command echo with colors and colored prompt
@@ -513,10 +496,8 @@ mod tests {
 
     #[test]
     fn test_grace_period_prevents_early_completion() {
-        // Use zero debounce but a long grace period
-        let mut capture = OutputCapture::with_debounce(Duration::ZERO);
+        let mut capture = OutputCapture::new();
         capture.start_grace_period = Duration::from_secs(10);
-        // Re-start to record `started_at` with the new grace period
         capture.start("cat /var/www/html/index.php");
 
         // Simulate the shell echoing back control sequences and prompt
@@ -524,9 +505,9 @@ mod tests {
         capture.append("cat /var/www/html/index.php\n");
         capture.append("\x1b[?2004h\x1b[38;2;198;208;214m|~| root@host:/# \x1b[0m\x1b[K");
 
-        // Prompt IS detected in the buffer (debounce tracking works)
+        // Prompt IS detected in the buffer
         assert!(
-            capture.prompt_detected_at.is_some(),
+            capture.prompt_detected,
             "Prompt should still be detected in the buffer"
         );
         // But is_command_complete returns false because grace period hasn't elapsed
@@ -537,32 +518,18 @@ mod tests {
     }
 
     #[test]
-    fn test_debounce_prevents_premature_completion() {
-        // Use a long debounce to verify the window is respected
-        let mut capture = OutputCapture::with_debounce(Duration::from_secs(10));
-
-        capture.start("ls -la");
-        capture.append("ls -la\n");
-        capture.append("file.txt\n");
-        capture.append("user@host:~$ "); // Prompt appears
-
-        // Prompt detected but debounce window has not elapsed
-        assert!(!capture.is_command_complete());
-    }
-
-    #[test]
-    fn test_debounce_reset_on_new_output() {
-        let mut capture = zero_debounce_capture();
+    fn test_prompt_detection_reset_on_new_output() {
+        let mut capture = test_capture();
 
         capture.start("some-command");
         capture.append("some-command\n");
         capture.append("user@host:~$ "); // Looks like prompt
-        assert!(capture.prompt_detected_at.is_some());
+        assert!(capture.prompt_detected);
 
         // More output arrives — prompt was a false positive in the data
         capture.append("\nactual output continues\n");
         assert!(
-            capture.prompt_detected_at.is_none(),
+            !capture.prompt_detected,
             "Prompt detection should reset when new non-prompt output arrives"
         );
         assert!(!capture.is_command_complete());
