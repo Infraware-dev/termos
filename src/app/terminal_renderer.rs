@@ -3,14 +3,16 @@
 //! Provides `TerminalRenderer` which handles the pure rendering phase
 //! of terminal display, separated from input handling.
 
-use egui::{Color32, Painter, Pos2, Rect};
+use std::f32::consts::TAU;
+
+use egui::{Color32, Painter, Pos2, Rect, Stroke};
 
 use super::TimingState;
 use super::render::{RenderState, RowRenderContext};
 use super::state::AppState;
 use crate::session::SessionId;
 use crate::ui::{
-    SPINNER_FRAMES, Theme, render_backgrounds, render_cursor, render_decorations, render_scrollbar,
+    Theme, render_backgrounds, render_cursor, render_decorations, render_scrollbar,
     render_text_runs_buffered,
 };
 
@@ -118,7 +120,7 @@ impl<'a> TerminalRenderer<'a> {
 
         // Render throbber or cursor
         if show_throbber && scroll_offset == 0 {
-            self.draw_throbber(painter, rect, cursor_row, cursor_col, &font_id);
+            self.draw_throbber(painter, rect, cursor_row, cursor_col);
         } else if cursor_visible
             && self.timing.cursor_blink_visible
             && scroll_offset == 0
@@ -134,28 +136,42 @@ impl<'a> TerminalRenderer<'a> {
         }
     }
 
-    /// Draws the spinner/throbber at cursor position.
-    fn draw_throbber(
-        &self,
-        painter: &Painter,
-        rect: Rect,
-        cursor_row: u16,
-        cursor_col: u16,
-        font_id: &egui::FontId,
-    ) {
-        let frame_idx =
-            (self.timing.startup_time.elapsed().as_millis() / 250) as usize % SPINNER_FRAMES.len();
-        let frame = SPINNER_FRAMES[frame_idx];
-        let row_y = rect.top() + cursor_row as f32 * self.render.char_height;
-        let spinner_x = rect.left() + cursor_col as f32 * self.render.char_width;
+    /// Draws a spinning arc throbber at the cursor position.
+    fn draw_throbber(&self, painter: &Painter, rect: Rect, cursor_row: u16, cursor_col: u16) {
+        let elapsed = self.timing.startup_time.elapsed().as_secs_f32();
+        let margin_x = self.render.char_width;
+        let margin_y = self.render.char_height * 0.25;
+        let row_y = rect.top() + margin_y + cursor_row as f32 * self.render.char_height;
+        let spinner_x = rect.left() + margin_x + cursor_col as f32 * self.render.char_width;
 
-        painter.text(
-            Pos2::new(spinner_x, row_y),
-            egui::Align2::LEFT_TOP,
-            frame,
-            font_id.clone(),
-            Color32::from_rgb(0, 255, 255),
+        let radius = (self.render.char_height * 0.35).min(self.render.char_width * 0.8);
+        let center = Pos2::new(
+            spinner_x + self.render.char_width * 0.5,
+            row_y + self.render.char_height * 0.5,
         );
+
+        let color = Color32::from_rgb(0, 255, 255);
+        let stroke = Stroke::new(2.0, color);
+
+        // Rotating arc: sweeps ~270 degrees, rotates at 1.5 rev/sec
+        let start_angle = elapsed * TAU * 1.5;
+        let arc_length = TAU * 0.75;
+        let segments = 32;
+
+        let points: Vec<Pos2> = (0..=segments)
+            .map(|i| {
+                let t = i as f32 / segments as f32;
+                let angle = start_angle + t * arc_length;
+                Pos2::new(
+                    center.x + radius * angle.cos(),
+                    center.y + radius * angle.sin(),
+                )
+            })
+            .collect();
+
+        for window in points.windows(2) {
+            painter.line_segment([window[0], window[1]], stroke);
+        }
     }
 
     /// Draws the cursor at its position.

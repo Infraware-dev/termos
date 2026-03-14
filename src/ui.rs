@@ -8,6 +8,3 @@ pub use renderer::{
 };
 pub use scrollbar::Scrollbar;
 pub use theme::Theme;
-
-/// Dots spinner frames for the LLM throbber
-pub const SPINNER_FRAMES: &[&str] = &[".", "..", "...", "...."];
