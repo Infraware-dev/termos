@@ -70,6 +70,8 @@ pub enum PtyProviderType {
 
 /// Options for creating an [`InfrawareApp`].
 pub struct AppOptions {
+    /// Anthropic API key (from CLI or env var)
+    pub api_key: Option<String>,
     /// Pty provider type
     pub pty_provider: PtyProviderType,
 }
@@ -316,7 +318,7 @@ impl InfrawareApp {
         sessions.insert(initial_session_id, initial_session);
 
         // Initialize LLM controller
-        let llm = LlmController::new();
+        let llm = LlmController::new(options.api_key);
 
         // Create tiles and track the initial pane's tile ID
         let mut tiles = egui_tiles::Tiles::default();

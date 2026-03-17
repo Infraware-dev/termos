@@ -31,9 +31,9 @@ pub struct LlmController {
 
 impl LlmController {
     /// Creates a new controller, selecting the agent from environment.
-    pub fn new() -> Self {
+    pub fn new(api_key: Option<String>) -> Self {
         let (bg_event_tx, bg_event_rx) = mpsc::channel();
-        let agent = Self::create_agent();
+        let agent = Self::create_agent(api_key);
 
         Self {
             agent,
@@ -46,12 +46,12 @@ impl LlmController {
     }
 
     /// Selects and initialises the agent based on `AGENT_TYPE` env var.
-    fn create_agent() -> Arc<dyn Agent> {
+    fn create_agent(api_key: Option<String>) -> Arc<dyn Agent> {
         let agent_type = std::env::var("AGENT_TYPE").unwrap_or_else(|_| "rig".to_string());
 
         match agent_type.as_str() {
             #[cfg(feature = "rig")]
-            "rig" => match crate::agent::RigAgent::from_env() {
+            "rig" => match crate::agent::RigAgent::with_api_key(api_key) {
                 Ok(agent) => {
                     tracing::info!("Initialised RigAgent (Anthropic Claude)");
                     Arc::new(agent)

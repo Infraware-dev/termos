@@ -47,8 +47,6 @@ pub static SIGINT_RECEIVED: AtomicBool = AtomicBool::new(false);
 fn main() -> eframe::Result<()> {
     // Load environment variables from .env file (if present)
     dotenvy::dotenv().ok();
-    // Load secrets from .env.secrets file (if present)
-    dotenvy::from_filename(".env.secrets").ok();
 
     // load cli arguments (also sets up logging based on args)
     let args = Args::parse();
@@ -99,6 +97,7 @@ fn app_options(_args: &Args) -> AppOptions {
     #[cfg(feature = "arena")]
     if let Some(scenario) = _args.arena {
         return AppOptions {
+            api_key: _args.api_key.clone(),
             pty_provider: app::PtyProviderType::ArenaScenario(scenario),
         };
     }
@@ -113,7 +112,10 @@ fn app_options(_args: &Args) -> AppOptions {
     #[cfg(not(feature = "pty-test_container"))]
     let pty_provider = app::PtyProviderType::Local;
 
-    AppOptions { pty_provider }
+    AppOptions {
+        api_key: _args.api_key.clone(),
+        pty_provider,
+    }
 }
 
 /// Splits an image reference into `(image, tag)`.

@@ -23,6 +23,9 @@ cd infraware-terminal
 ENGINE_TYPE=mock cargo run
 
 # Oppure con RigEngine (default, richiede API key Anthropic)
+cargo run -- --api-key sk-...
+
+# Oppure con l'API key come variabile d'ambiente
 ANTHROPIC_API_KEY=sk-... cargo run
 ```
 
@@ -42,7 +45,7 @@ L'engine gira in-process nel terminale (nessun backend separato).
 
 | Engine            | Uso                           | Comando                                            |
 |-------------------|-------------------------------|----------------------------------------------------|
-| **RigEngine**     | Agente Rust nativo (default)  | `ANTHROPIC_API_KEY=sk-... cargo run`               |
+| **RigEngine**     | Agente Rust nativo (default)  | `cargo run -- --api-key sk-...`                    |
 | **MockEngine**    | Testing/sviluppo              | `ENGINE_TYPE=mock cargo run`                       |
 
 ## Variabili d'Ambiente
@@ -50,7 +53,7 @@ L'engine gira in-process nel terminale (nessun backend separato).
 ```bash
 # Engine
 ENGINE_TYPE=rig|mock             # Default: rig
-ANTHROPIC_API_KEY=sk-...         # Richiesta per RigEngine
+ANTHROPIC_API_KEY=sk-...         # Fallback per --api-key (se non passato da CLI)
 ANTHROPIC_MODEL=claude-sonnet-4-20250514  # Opzionale, ha un default
 RIG_MAX_TOKENS=4096              # Opzionale
 RIG_TEMPERATURE=0.7              # Opzionale
@@ -63,7 +66,7 @@ MEMORY_LIMIT=200                      # Max entries memoria
 # MockEngine
 MOCK_WORKFLOW_FILE=path/to/workflow.json  # Opzionale
 
-# Logging
+# Logging (oppure --log-level da CLI)
 LOG_LEVEL=debug|info|warn|error  # Default: info
 ```
 
@@ -94,21 +97,21 @@ infraware-terminal/
 │   ├── app/                    # Handler modules
 │   │   ├── input_handler.rs    # Keyboard input
 │   │   ├── hitl_handler.rs     # Human-in-the-loop
-│   │   ├── llm_controller.rs   # Drives engine directly
+│   │   ├── llm_controller.rs   # Drives agent directly
 │   │   ├── llm_event_handler.rs
 │   │   ├── session_manager.rs
 │   │   ├── tiles_manager.rs
 │   │   └── ...
-│   ├── engine.rs               # Engine module root (re-exports)
-│   ├── engine/                 # Agentic engine (in-process)
-│   │   ├── traits.rs           # AgenticEngine, EventStream
+│   ├── agent.rs                # Agent module root (re-exports)
+│   ├── agent/                  # Agentic engine (in-process)
+│   │   ├── traits.rs           # Agent trait, EventStream
 │   │   ├── adapters/
-│   │   │   ├── mock.rs         # MockEngine (testing)
-│   │   │   └── rig/            # RigEngine (Anthropic Claude)
+│   │   │   ├── mock.rs         # MockAgent (testing)
+│   │   │   └── rig/            # RigAgent (Anthropic Claude)
 │   │   └── shared/             # Event types, models
 │   ├── terminal/               # VTE parser, grid, cell
 │   ├── pty/                    # PTY session, async I/O
-│   ├── llm/                    # Markdown renderer
+│   ├── markdown/               # Markdown → ANSI renderer
 │   ├── input/                  # Keyboard mapping, command classification
 │   ├── ui/                     # egui helpers, theme
 │   └── config.rs
@@ -122,11 +125,11 @@ infraware-terminal/
 │ infraware-terminal (single binary)          │
 │                                             │
 │  ┌───────────┐     ┌─────────────────────┐  │
-│  │ Terminal   │     │ AgenticEngine       │  │
+│  │ Terminal   │     │ Agent (trait)        │  │
 │  │ UI (egui) │◄───►│ (in-process)        │  │
 │  └─────┬─────┘     │ ┌────────┐ ┌──────┐ │  │
 │        │           │ │ Mock   │ │ Rig  │ │  │
-│   ┌────▼────┐      │ │ Engine │ │Engine│ │  │
+│   ┌────▼────┐      │ │ Agent  │ │Agent │ │  │
 │   │   PTY   │      │ └────────┘ └──┬───┘ │  │
 │   │ Session │      └───────────────┼─────┘  │
 │   └────┬────┘                      │        │
@@ -137,7 +140,7 @@ infraware-terminal/
 └─────────────────────────────────────────────┘
 ```
 
-I comandi vengono eseguiti tramite il PTY del terminale, non internamente dall'engine.
+I comandi vengono eseguiti tramite il PTY del terminale, non internamente dall'agent.
 
 ## Keyboard Shortcuts
 

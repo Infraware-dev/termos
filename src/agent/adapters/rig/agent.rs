@@ -81,11 +81,17 @@ impl RigAgent {
         })
     }
 
-    /// Create a RigAgent from environment variables
-    pub fn from_env() -> Result<Self, AgentError> {
-        let config = RigAgentConfig::from_env()
+    /// Create a RigAgent from environment variables, with an optional
+    /// API key override (e.g. from CLI `--api-key`).
+    pub fn with_api_key(api_key: Option<String>) -> Result<Self, AgentError> {
+        let config = RigAgentConfig::from_env(api_key)
             .map_err(|e| AgentError::Other(anyhow::anyhow!("Config error: {}", e)))?;
         Self::new(config)
+    }
+
+    /// Create a RigAgent from environment variables
+    pub fn from_env() -> Result<Self, AgentError> {
+        Self::with_api_key(None)
     }
 }
 

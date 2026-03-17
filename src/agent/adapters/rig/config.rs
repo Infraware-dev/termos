@@ -83,10 +83,12 @@ impl RigAgentConfig {
         }
     }
 
-    /// Load configuration from environment variables
-    pub fn from_env() -> Result<Self> {
-        let api_key = env::var("ANTHROPIC_API_KEY")
-            .context("ANTHROPIC_API_KEY environment variable is required for rig agent")?;
+    /// Load configuration from environment variables, with an optional
+    /// API key override (e.g. from CLI `--api-key`).
+    pub fn from_env(api_key: Option<String>) -> Result<Self> {
+        let api_key = api_key
+            .or_else(|| env::var("ANTHROPIC_API_KEY").ok())
+            .context("ANTHROPIC_API_KEY is required (pass --api-key or set the env var)")?;
 
         let model = env::var("ANTHROPIC_MODEL").unwrap_or_else(|_| CLAUDE_4_SONNET.to_string());
 

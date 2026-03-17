@@ -7,12 +7,15 @@ use clap::Parser;
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
 pub struct Args {
+    /// Anthropic API key. Falls back to ANTHROPIC_API_KEY env var if not provided.
+    #[arg(long, env = "ANTHROPIC_API_KEY")]
+    pub api_key: Option<String>,
     /// Start in Arena mode with the given scenario name (e.g., "the-502-cascade").
     #[cfg(feature = "arena")]
     #[arg(long)]
     pub arena: Option<crate::pty::ArenaScenario>,
-    /// Application log level (trace, debug, info, warn, error). Can also be set via RUST_LOG or LOG_LEVEL environment variables.
-    #[arg(long, env = "RUST_LOG", short = 'l', default_value = "info")]
+    /// Application log level (trace, debug, info, warn, error). Can also be set via LOG_LEVEL environment variable.
+    #[arg(long, env = "LOG_LEVEL", short = 'l', default_value = "info")]
     pub log_level: LogLevel,
     /// Image name to use for the PTY test container. Tag can be specified with `image:tag` format.
     /// If the tag is omitted, it defaults to "latest". This is only used if `--use-pty-test-container` is set.
