@@ -10,7 +10,7 @@ Prefix any command with `?` to ask questions in natural language.
 > **Early Stage**: This project is under active development. APIs, features, and behavior may change
 > without notice. Contributions and feedback are welcome!
 
-![Infraware Terminal](docs/assets/screenshot.png)
+![Infraware Terminal](resources/screenshot.png)
 
 ## Features
 
