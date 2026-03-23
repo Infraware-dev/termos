@@ -1,7 +1,7 @@
 # Infraware Terminal
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
-[![CI](https://github.com/Infraware-dev/infraware-terminal/actions/workflows/rust-ci.yml/badge.svg)](https://github.com/Infraware-dev/infraware-terminal/actions/workflows/rust-ci.yml)
+[![CI](https://github.com/Infraware-dev/terminal/actions/workflows/rust-ci.yml/badge.svg)](https://github.com/Infraware-dev/terminal/actions/workflows/rust-ci.yml)
 [![Rust](https://img.shields.io/badge/rust-1.94%2B-orange.svg)](https://www.rust-lang.org/)
 
 An AI-native terminal for cloud infrastructure operations, with an integrated agentic engine for DevOps assistance.
@@ -10,8 +10,7 @@ Prefix any command with `?` to ask questions in natural language.
 > **Early Stage**: This project is under active development. APIs, features, and behavior may change
 > without notice. Contributions and feedback are welcome!
 
-<!-- TODO: Add screenshot — place it at docs/assets/screenshot.png -->
-<!-- ![Infraware Terminal](docs/assets/screenshot.png) -->
+![Infraware Terminal](resources/demo.gif)
 
 ## Features
 
